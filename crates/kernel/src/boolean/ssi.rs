@@ -610,7 +610,8 @@ fn contour_at(
     for &((i, j), corner_value) in &quiet_cells {
         let centre = corner(i, j) + v2(dx / 2.0, dy / 2.0);
         if let Some((uv, f0)) = critical_point(a, chart, b, centre, 2.0 * dx.hypot(dy)) {
-            if f0 * corner_value < 0.0 && relevant(b.project(a.from_chart(chart, uv))) {
+            // Within tolerance of zero it is a touching point, with no loop to find.
+            if f0 * corner_value < 0.0 && f0.abs() > TOL && relevant(b.project(a.from_chart(chart, uv))) {
                 return Err(Trouble::TooCoarse(format!(
                     "{} and {} meet in a loop too small to trace",
                     a.name(),

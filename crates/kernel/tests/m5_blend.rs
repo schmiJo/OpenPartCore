@@ -14,6 +14,10 @@ fn close(a: f64, b: f64, rel: f64, what: &str) {
     );
 }
 
+/// First radius, second radius, and OpenCASCADE's volume.
+const OCCT_CHAINS: &[(f64, f64, f64)] =
+    &[(4.0, 2.0, 23821.810554709475), (5.0, 3.0, 23695.005194770096), (3.0, 3.0, 23830.69242805789)];
+
 fn mesh_ok(b: &Body, what: &str) {
     let m = tessellate(b, &TessParams::for_size(b.aabb().diagonal())).unwrap_or_else(|e| panic!("{what}: {e}"));
     assert_eq!(m.open_edge_count(), 0, "{what}: open mesh");
@@ -335,4 +339,112 @@ fn bracket_with_holes_and_fillets() {
     let expected = vol(&body) - corner_area(6.0) * width + corner_area(5.0) * width - 4.0 * PI * 3.5 * 3.5 * t;
     close(vol(&out), expected, 1e-9, "bracket");
     mesh_ok(&out, "bracket");
+}
+
+/// A box with its top front edge filleted, and the edge of the top left side selected.
+fn chain_setup(first_radius: f64) -> (Body, Vec<usize>) {
+    let b = box_solid(&Frame::WORLD, 40.0, 30.0, 20.0, 1).unwrap();
+    let first = b.edges_where(|i, _| {
+        let m = b.edge_midpoint(i);
+        (m.z - 20.0).abs() < 1e-6 && m.y.abs() < 1e-6
+    });
+    let f = fillet(&b, &first, first_radius, 2).unwrap();
+    let second = f.edges_where(|i, _| {
+        let m = f.edge_midpoint(i);
+        (m.z - 20.0).abs() < 1e-6 && m.x.abs() < 1e-6
+    });
+    assert_eq!(second.len(), 1, "one edge selected");
+    (f, second)
+}
+
+/// Selecting one edge follows the chain from that edge around the first fillet's arc and
+/// down the vertical corner, because each continues the last tangentially. The volumes
+/// are OpenCASCADE's on the same parts, where the rolling ball has a unique solution.
+#[test]
+fn propagation_follows_a_tangent_chain_like_occt() {
+    for (r1, r2, expected) in OCCT_CHAINS {
+        let (f, second) = chain_setup(*r1);
+        let g = fillet(&f, &second, *r2, 3).unwrap();
+        close(vol(&g), *expected, 1e-9, &format!("chain r{r1} then r{r2}"));
+        mesh_ok(&g, "propagated fillet");
+        validate(&g).unwrap();
+    }
+}
+
+/// With propagation off, the fillet stops flush and leaves the step it used to.
+#[test]
+fn propagation_can_be_turned_off() {
+    let (f, second) = chain_setup(2.0);
+    let h = fillet_with(&f, &second, 4.0, BlendOptions { propagate: false }, 3).unwrap();
+    // Exactly the prism along the selected edge, which starts 2 mm in from the end.
+    close(vol(&h), vol(&f) - corner_area(4.0) * 28.0, 1e-10, "without propagation");
+}
+
+/// One straight edge of a rounded plate's rim selects the whole rim.
+#[test]
+fn propagation_goes_around_a_rounded_rim() {
+    let (w, d, c, h, r) = (40.0, 30.0, 5.0, 8.0, 2.0);
+    let plate = extrude(&Profile::new(Wire::rounded_rect(w, d, c)), &Frame::WORLD, h, 1).unwrap();
+    let all = plate.edges_where(|i, _| (plate.edge_midpoint(i).z - h).abs() < 1e-9);
+    let one = all.iter().copied().find(|&i| plate.edge_is_parallel(i, Vec3::X)).unwrap();
+    let every = fillet(&plate, &all, r, 9).unwrap();
+    let single = fillet(&plate, &[one], r, 9).unwrap();
+    close(vol(&single), vol(&every), 1e-12, "same as selecting the whole rim");
+}
+
+/// Rim radius equal to the corner radius: each corner is a sphere. OpenCASCADE reference.
+#[test]
+fn rim_fillet_equal_to_the_corner_radius() {
+    let b = extrude(&Profile::new(Wire::rounded_rect(60.0, 40.0, 8.0)), &Frame::WORLD, 12.0, 1).unwrap();
+    let rim = b.edges_where(|i, _| (b.edge_midpoint(i).z - 12.0).abs() < 1e-6);
+    let f = fillet(&b, &rim, 8.0, 2).unwrap();
+    close(vol(&f), 25736.683625955688, 1e-9, "r = corner radius");
+    assert_eq!(f.faces.iter().filter(|x| matches!(x.surface, Surface::Sphere { .. })).count(), 4);
+    mesh_ok(&f, "r = corner radius");
+}
+
+/// Rim radius above the corner radius. No rolling ball can touch both faces all the way
+/// around such a corner, so there is no unique answer. This kernel uses the exact surface
+/// the ball's section sweeps, a lemon ending in a tip on the corner's axis, and lets the
+/// straight fillets meet in mitres. OpenCASCADE instead fits a free-form patch that bulges
+/// 0.011 mm past the original wall, for a volume 7e-4 lower. So the reference here is
+/// direct integration of this definition: the height of the top over each point.
+#[test]
+fn rim_fillet_larger_than_the_corner_radius() {
+    let (w, d, c, h, r) = (60.0f64, 40.0f64, 8.0f64, 20.0f64, 9.0f64);
+    let b = extrude(&Profile::new(Wire::rounded_rect(w, d, c)), &Frame::WORLD, h, 1).unwrap();
+    let rim = b.edges_where(|i, _| (b.edge_midpoint(i).z - h).abs() < 1e-6);
+    let f = fillet(&b, &rim, r, 2).unwrap();
+    assert_eq!(f.faces.iter().filter(|x| matches!(x.surface, Surface::Torus { major, .. } if major < 0.0)).count(), 4);
+    mesh_ok(&f, "r > corner radius");
+    validate(&f).unwrap();
+
+    let (ax, ay) = (w / 2.0 - c, d / 2.0 - c);
+    let arc = |offset: f64| {
+        // Height above the fillet's centre at this distance from its centre line.
+        (r * r - offset * offset).max(0.0).sqrt() + (h - r)
+    };
+    let top = |x: f64, y: f64| -> f64 {
+        // By symmetry, work in the quadrant x, y >= 0.
+        if x > ax && y > ay {
+            // The corner's sector, beyond the axis in both directions: the lemon.
+            let rho = (x - ax).hypot(y - ay);
+            if rho > c {
+                return 0.0;
+            }
+            return arc(rho + (r - c));
+        }
+        let from_x = if x > w / 2.0 - r { arc(x - (w / 2.0 - r)) } else { h };
+        let from_y = if y > d / 2.0 - r { arc(y - (d / 2.0 - r)) } else { h };
+        from_x.min(from_y)
+    };
+    let n = 1500;
+    let (dx, dy) = (w / 2.0 / n as f64, d / 2.0 / n as f64);
+    let mut total = 0.0;
+    for i in 0..n {
+        for j in 0..n {
+            total += top((i as f64 + 0.5) * dx, (j as f64 + 0.5) * dy) * dx * dy;
+        }
+    }
+    close(vol(&f), 4.0 * total, 1e-5, "r > corner radius against integration");
 }

@@ -56,7 +56,28 @@ fn extras() -> Vec<(&'static str, Result<Body>)> {
         let rim = plate.edges_where(|i, _| (plate.edge_midpoint(i).z - 8.0).abs() < 1e-9);
         fillet(&plate, &rim, 2.0, 2)
     };
+    let rim = |corner: f64, height: f64, radius: f64| {
+        let plate = extrude(&Profile::new(Wire::rounded_rect(60.0, 40.0, corner)), &Frame::WORLD, height, 1).unwrap();
+        let top = plate.edges_where(|i, _| (plate.edge_midpoint(i).z - height).abs() < 1e-9);
+        fillet(&plate, &top, radius, 2)
+    };
+    let chain = {
+        let b = box_solid(&Frame::WORLD, 40.0, 30.0, 20.0, 1).unwrap();
+        let front = b.edges_where(|i, _| {
+            let m = b.edge_midpoint(i);
+            (m.z - 20.0).abs() < 1e-6 && m.y.abs() < 1e-6
+        });
+        let f = fillet(&b, &front, 4.0, 2).unwrap();
+        let side = f.edges_where(|i, _| {
+            let m = f.edge_midpoint(i);
+            (m.z - 20.0).abs() < 1e-6 && m.x.abs() < 1e-6
+        });
+        fillet(&f, &side, 2.0, 3)
+    };
     vec![
+        ("rim_r_equals_corner", rim(8.0, 12.0, 8.0)),
+        ("rim_r_above_corner", rim(8.0, 20.0, 9.0)),
+        ("propagated_chain", chain),
         ("rounded_cube", rounded_cube),
         ("boss_flare", boss_flare),
         ("chamfered_rim", chamfered_rim),

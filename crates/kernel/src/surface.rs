@@ -26,6 +26,11 @@ pub enum Surface {
     /// Normal points outward.
     Sphere { frame: Frame, radius: f64 },
     /// `frame.z` is the axis. Normal points away from the tube centre.
+    ///
+    /// `major` may be negative, down to just above `-minor`. That is the lens-shaped part
+    /// of a self-intersecting torus, the "lemon": its tube centre sits across the axis, and
+    /// the surface ends in a tip on the axis at each end. A rolling ball makes one when
+    /// its radius exceeds the radius of the rim it follows.
     Torus { frame: Frame, major: f64, minor: f64 },
 }
 
@@ -168,6 +173,21 @@ impl Surface {
                     .collect();
                 chart.u0 = angular_center(&us);
             }
+            Surface::Torus { major, minor, .. } if major < 0.0 => {
+                // Polar coordinates about whichever tip the face is at, so the tip is
+                // one ordinary point of the chart and not a whole line of them.
+                let us: Vec<f64> = points
+                    .iter()
+                    .filter_map(|&p| {
+                        let l = f.to_local(p);
+                        (l.x.hypot(l.y) > 1e-9).then(|| l.y.atan2(l.x))
+                    })
+                    .collect();
+                chart.u0 = angular_center(&us);
+                let height: f64 = points.iter().map(|&p| f.to_local(p).z).sum();
+                let tip = (-major / minor).acos();
+                chart.v0 = if height >= 0.0 { tip } else { -tip };
+            }
             Surface::Torus { major, .. } => {
                 let us: Vec<f64> = points
                     .iter()
@@ -231,6 +251,16 @@ impl Surface {
                 let w = 2.0 * radius / (1.0 + z).max(1e-12);
                 v2(x * w, y * w)
             }
+            Surface::Torus { major, minor, .. } if major < 0.0 => {
+                let l = f.to_local(p);
+                let rho = l.x.hypot(l.y);
+                let v = l.z.atan2(rho - major);
+                let (distance, mirror) =
+                    if ch.v0 >= 0.0 { ((ch.v0 - v) * minor, 1.0) } else { ((v - ch.v0) * minor, -1.0) };
+                let distance = distance.max(0.0);
+                let phi = if rho > 1e-300 { wrap_pi(l.y.atan2(l.x) - ch.u0) } else { 0.0 };
+                v2(distance * phi.cos(), mirror * distance * phi.sin())
+            }
             Surface::Torus { major, minor, .. } => {
                 let l = f.to_local(p);
                 v2(
@@ -284,6 +314,27 @@ impl Surface {
                 let da = c.x * ((1.0 + s - 2.0 * a * a) * k2) + c.y * (-2.0 * a * b * k2) + c.z * (-2.0 * a * k2);
                 let db = c.x * (-2.0 * a * b * k2) + c.y * ((1.0 + s - 2.0 * b * b) * k2) + c.z * (-2.0 * b * k2);
                 (c.origin + q * radius, da, db)
+            }
+            Surface::Torus { major, minor, .. } if major < 0.0 => {
+                let upper = ch.v0 >= 0.0;
+                let mirror = if upper { 1.0 } else { -1.0 };
+                let distance = uv.x.hypot(uv.y);
+                let phi = if distance > 1e-300 { (mirror * uv.y).atan2(uv.x) } else { 0.0 };
+                let v = if upper { ch.v0 - distance / minor } else { ch.v0 + distance / minor };
+                let (su, cu) = (ch.u0 + phi).sin_cos();
+                let (sv, cv) = v.sin_cos();
+                let radial = f.x * cu + f.y * su;
+                let theta = f.y * cu - f.x * su;
+                let rho = major + minor * cv;
+                let p = f.origin + radial * rho + f.z * (minor * sv);
+                // Moving away from the tip along a meridian, and turning about the axis.
+                let meridian = (radial * -sv + f.z * cv) * -mirror;
+                let (ux, uy, spread) = if distance > 1e-12 {
+                    (uv.x / distance, uv.y / distance, rho / distance)
+                } else {
+                    (1.0, 0.0, ch.v0.abs().sin())
+                };
+                (p, meridian * ux + theta * (-mirror * uy * spread), meridian * uy + theta * (mirror * ux * spread))
             }
             Surface::Torus { major, minor, .. } => {
                 let u = ch.u0 + uv.x / (major + minor);
@@ -349,6 +400,34 @@ mod tests {
             Surface::Sphere { frame: f, radius: 4.0 },
             Surface::Torus { frame: f, major: 6.0, minor: 2.0 },
         ]
+    }
+
+    /// The lemon's chart is polar about its tip, in both the upper and lower lobe.
+    #[test]
+    fn lemon_chart_is_consistent() {
+        let f = Frame::new(v3(1.0, -2.0, 3.0), v3(0.3, 0.5, 1.0), Vec3::X);
+        let s = Surface::Torus { frame: f, major: -1.0, minor: 9.0 };
+        for height in [1.0, -1.0] {
+            let tip = (1.0f64 / 9.0).acos();
+            let probe = f.point(5.0, 1.0, height * 6.0);
+            let ch = s.fit_chart(&[s.project(probe)]);
+            assert!((ch.v0.abs() - tip).abs() < 1e-12);
+            for &(x, y) in &[(0.4, 0.1), (1.0, -0.5), (2.5, 1.5), (0.05, 0.02), (4.0, 0.0)] {
+                let uv = v2(x, y);
+                let (p, dx, dy) = s.chart_derivs(&ch, uv);
+                assert!(s.sdf(p).abs() < 1e-12, "on surface {uv:?} {}", s.sdf(p));
+                assert!(s.to_chart(&ch, p).dist(uv) < 1e-9, "round trip {uv:?} {:?}", s.to_chart(&ch, p));
+                let n = dx.cross(dy).normalized();
+                assert!((n - s.normal(p)).norm() < 1e-8, "handedness at {uv:?}: {n:?} vs {:?}", s.normal(p));
+                assert!(dx.norm() <= 1.0 + 1e-9 && dy.norm() <= 1.0 + 1e-9, "stretch {uv:?}");
+                let h = 1e-5;
+                let fd = (s.from_chart(&ch, v2(x + h, y)) - s.from_chart(&ch, v2(x - h, y))) / (2.0 * h);
+                assert!((dx - fd).norm() < 1e-6, "dx at {uv:?}");
+            }
+            // The tip itself is one point of the chart.
+            let tip_point = s.from_chart(&ch, v2(0.0, 0.0));
+            assert!(f.to_local(tip_point).x.hypot(f.to_local(tip_point).y) < 1e-9);
+        }
     }
 
     fn sample_chart_points(s: &Surface, ch: &Chart) -> Vec<Vec2> {

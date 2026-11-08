@@ -69,12 +69,85 @@ enum End {
     Clip { plane: Frame, keep: Vec3, reach: f64 },
 }
 
-/// Rounds the given edges to a radius.
+/// How a blend treats the edges it was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlendOptions {
+    /// Follow tangent neighbours of the selected edges. Without this, a blend on one
+    /// edge of a smooth chain stops flush at the end of that edge and leaves a step.
+    pub propagate: bool,
+}
+
+/// Rounds the given edges to a radius, following them around tangent corners.
 pub fn fillet(body: &Body, edges: &[usize], radius: f64, feature: u32) -> Result<Body> {
+    fillet_with(body, edges, radius, BlendOptions { propagate: true }, feature)
+}
+
+/// Rounds edges to a radius, with control over tangent propagation.
+pub fn fillet_with(body: &Body, edges: &[usize], radius: f64, options: BlendOptions, feature: u32) -> Result<Body> {
     if !(radius.is_finite() && radius >= MIN_FEATURE) {
         return Err(Error::InvalidInput(format!("fillet radius {radius} is too small")));
     }
-    blend(body, edges, Kind::Fillet(radius), feature)
+    let selected = if options.propagate { propagate_tangents(body, edges)? } else { edges.to_vec() };
+    blend(body, &selected, Kind::Fillet(radius), feature)
+}
+
+/// Adds every edge reachable from the selection through tangent continuation. An edge
+/// that is itself smooth, or that can't be blended, ends the chain.
+fn propagate_tangents(body: &Body, selected: &[usize]) -> Result<Vec<usize>> {
+    let uses = body.edge_uses();
+    let mut at_vertex: Vec<Vec<usize>> = vec![Vec::new(); body.vertices.len()];
+    for (i, e) in body.edges.iter().enumerate() {
+        at_vertex[e.v0].push(i);
+        at_vertex[e.v1].push(i);
+    }
+    let is_corner = |e: usize| -> bool {
+        let edge = &body.edges[e];
+        if !matches!(edge.curve, Curve::Line { .. } | Curve::Circle { .. }) {
+            return false;
+        }
+        let [a, b] = uses[e].as_slice() else {
+            return false;
+        };
+        let mid = edge.eval_mid();
+        let (fa, fb) = (&body.faces[a.0], &body.faces[b.0]);
+        fa.outward_normal(mid).cross(fb.outward_normal(mid)).norm() > 1e-6
+    };
+    // Unit direction leaving vertex `v` along edge `e`.
+    let leaving = |e: usize, v: usize| -> Vec3 {
+        let edge = &body.edges[e];
+        if edge.v0 == v {
+            edge.curve.derivative(edge.t0).normalized()
+        } else {
+            -edge.curve.derivative(edge.t1).normalized()
+        }
+    };
+    let mut seen = vec![false; body.edges.len()];
+    let mut stack = Vec::new();
+    for &e in selected {
+        if e >= body.edges.len() {
+            return Err(Error::InvalidInput(format!("there is no edge {e}")));
+        }
+        if !seen[e] {
+            seen[e] = true;
+            stack.push(e);
+        }
+    }
+    let mut out = selected.to_vec();
+    while let Some(e) = stack.pop() {
+        let edge = &body.edges[e];
+        for v in [edge.v0, edge.v1] {
+            let out_dir = -leaving(e, v);
+            for &g in &at_vertex[v] {
+                // Continuing means leaving the vertex in the direction we arrived.
+                if !seen[g] && leaving(g, v).dot(out_dir) > 1.0 - 1e-9 && is_corner(g) {
+                    seen[g] = true;
+                    out.push(g);
+                    stack.push(g);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Bevels the given edges, cutting back by a distance along each face.
@@ -340,13 +413,16 @@ fn corner_of(body: &Body, run: &Run, section: &Section, size: f64) -> Result<Cor
 }
 
 /// The swept profile for a corner, and the points used to judge its reach.
-fn profile_of(corner: &Corner, kind: Kind) -> Result<(Profile, Vec<Vec2>)> {
+fn profile_of(corner: &Corner, kind: Kind, circular: bool) -> Result<(Profile, Vec<Vec2>)> {
     let p = corner.p;
     let [a, b] = corner.sides;
     match kind {
         Kind::Fillet(r) => {
             let (c, t1, t2) = fillet_circle(p, &a, &b, r, corner.convex)?;
             let arc_ccw = (t1 - c).cross(t2 - c) > 0.0;
+            if circular && c.x < -TOL {
+                return clipped_at_axis(p, &a, &b, c, r, t1, t2);
+            }
             let mut path = PathBuilder::new(p);
             path = match a.trace {
                 Trace::Line => path.line_to(t1),
@@ -388,6 +464,45 @@ fn profile_of(corner: &Corner, kind: Kind) -> Result<(Profile, Vec<Vec2>)> {
             Ok((Profile::new(path.close()), vec![p, t1, t2]))
         }
     }
+}
+
+/// The section of a circular blend whose radius exceeds the rim's. The rolling ball's
+/// centre lies across the axis, and a revolved section can't cross its axis, so the section
+/// stops there: from the corner along one trace to the axis, up the axis to where the arc
+/// reaches it, then along the arc to the other contact. The arc sweeps out a lemon.
+fn clipped_at_axis(p: Vec2, a: &Side, b: &Side, c: Vec2, r: f64, t1: Vec2, t2: Vec2) -> Result<(Profile, Vec<Vec2>)> {
+    // Which trace runs through the axis? It must be straight to be swept this way.
+    let (first, far, near) = if t1.x < t2.x { (a, t1, t2) } else { (b, t2, t1) };
+    if !matches!(first.trace, Trace::Line) {
+        return Err(Error::Unsupported(
+            "a blend larger than its rim is only supported where one face is flat across the rim".into(),
+        ));
+    }
+    if first.into.x >= -1e-12 {
+        return Err(Error::InvalidInput(format!("a fillet of radius {r} does not fit this corner")));
+    }
+    let on_trace = p + first.into * (-p.x / first.into.x);
+    let on_trace = v2(0.0, on_trace.y);
+    // Where the arc meets the axis, on the side the arc actually runs.
+    let h = (r * r - c.x * c.x).sqrt();
+    let candidates = [v2(0.0, c.y + h), v2(0.0, c.y - h)];
+    let toward = (far - c) + (near - c);
+    let on_arc =
+        if (candidates[0] - c).dot(toward) >= (candidates[1] - c).dot(toward) { candidates[0] } else { candidates[1] };
+    let other = if std::ptr::eq(first, a) { b } else { a };
+    let arc_ccw = (on_arc - c).cross(near - c) > 0.0;
+    let mut path = PathBuilder::new(p).line_to(on_trace);
+    if on_trace.dist(on_arc) > MIN_FEATURE {
+        path = path.line_to(on_arc);
+    }
+    path = path.arc_to(near, c, arc_ccw);
+    path = match other.trace {
+        Trace::Line => path.line_to(p),
+        Trace::Arc { centre, .. } => path.arc_to(p, centre, (near - centre).cross(p - centre) > 0.0),
+    };
+    // Contacts in the same order as the corner's sides.
+    let contacts = if std::ptr::eq(first, a) { [on_trace, near] } else { [near, on_trace] };
+    Ok((Profile::new(path.close()), vec![p, contacts[0], contacts[1], on_arc]))
 }
 
 /// The circle of radius `r` tangent to both traces: the ball rolling along the edge.
@@ -632,7 +747,7 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
     for (i, run) in runs.iter().enumerate() {
         let section = section_of(run, size)?;
         let corner = corner_of(body, run, &section, size)?;
-        let (profile, points) = profile_of(&corner, kind)?;
+        let (profile, points) = profile_of(&corner, kind, section.circular)?;
         // Both contacts must land on their faces, or the blend overruns them.
         for (s, &q) in corner.sides.iter().zip(&points[1..3]) {
             let p3 = section.lift(q, section.station);
@@ -647,8 +762,8 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
                 )));
             }
         }
-        if section.circular && points.iter().any(|q| q.x < TOL) {
-            return Err(Error::InvalidInput("the blend reaches the axis of this circular edge".into()));
+        if section.circular && points.iter().any(|q| q.x < -TOL) {
+            return Err(Error::InvalidInput("the blend crosses the axis of this circular edge".into()));
         }
         let ends = if run.closed {
             [End::Flush, End::Flush]

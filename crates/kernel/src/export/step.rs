@@ -140,6 +140,17 @@ impl Writer {
                 let a = self.axis(frame);
                 self.entity(&format!("SPHERICAL_SURFACE('',#{a},{})", real(*radius)))
             }
+            Surface::Torus { frame, major, minor } if major.abs() < *minor => {
+                // STEP has a separate entity for a torus that crosses itself, and a flag
+                // for which part of it is meant: the outer apple or the inner lemon.
+                let a = self.axis(frame);
+                let outer = if *major >= 0.0 { ".T." } else { ".F." };
+                self.entity(&format!(
+                    "DEGENERATE_TOROIDAL_SURFACE('',#{a},{},{},{outer})",
+                    real(major.abs()),
+                    real(*minor)
+                ))
+            }
             Surface::Torus { frame, major, minor } => {
                 let a = self.axis(frame);
                 self.entity(&format!("TOROIDAL_SURFACE('',#{a},{},{})", real(*major), real(*minor)))

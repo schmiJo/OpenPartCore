@@ -103,6 +103,51 @@ fn face_integrals(body: &Body, face: &Face, reference: Vec3) -> (f64, f64) {
             }
             ((apex - reference).dot(vector_area) / 3.0, chart_area * sign)
         }
+        Surface::Torus { frame, major, minor } if *major < 0.0 => {
+            // The polar chart has a cone-like kink at the tip, which Gauss rules resolve
+            // badly. In (u, v) the integrand is smooth and the meridians have du = 0. The
+            // tip becomes a whole side of the region that no edge runs along, so the inner
+            // integral starts at the tip: it is zero there, and that side contributes nothing.
+            let tip = face.chart.v0;
+            let (major, minor) = (*major, *minor);
+            let rule = gauss_24();
+            let mut flux = 0.0;
+            let mut area = 0.0;
+            for lp in &face.loops {
+                for &c in lp {
+                    for_each_boundary_node(body, c, |p, dp| {
+                        let l = frame.to_local(p);
+                        let rho = l.x.hypot(l.y);
+                        if rho < 1e-9 {
+                            return;
+                        }
+                        let u = l.y.atan2(l.x);
+                        let (su, cu) = u.sin_cos();
+                        let theta = frame.y * cu - frame.x * su;
+                        let radial = frame.x * cu + frame.y * su;
+                        let du = dp.dot(theta) / rho;
+                        let v = l.z.atan2(rho - major);
+                        let (mid, half) = ((v + tip) / 2.0, (v - tip) / 2.0);
+                        let mut h_flux = 0.0;
+                        let mut h_area = 0.0;
+                        for &(x, w) in rule {
+                            let (sv, cv) = (mid + half * x).sin_cos();
+                            let r = major + minor * cv;
+                            let q = frame.origin + radial * r + frame.z * (minor * sv);
+                            let n = radial * cv + frame.z * sv;
+                            let jacobian = r * minor;
+                            h_flux += w * half * (q - reference).dot(n) * jacobian;
+                            h_area += w * half * jacobian;
+                        }
+                        // Green's theorem: the integral over the region is minus the loop
+                        // integral of H du for a counter-clockwise loop in (u, v).
+                        flux -= h_flux * du;
+                        area -= h_area * du;
+                    });
+                }
+            }
+            (flux / 3.0, area * sign)
+        }
         _ => {
             let (lo, hi) = body_chart_range(body, face);
             let x_ref = (lo + hi) / 2.0;
