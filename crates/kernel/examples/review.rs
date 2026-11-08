@@ -740,6 +740,41 @@ fn chain(dir: &str, first: u64, count: u64) {
                     done += 1;
                     body = b;
                     step(&body, done);
+                    if std::env::var("REVIEW_DUMP").ok().as_deref() == Some(&format!("{seq}:{done}")) {
+                        let c = body.aabb().center();
+                        let mut text = format!("center {} {} {}\n", c.x, c.y, c.z);
+                        for (k, (v, a)) in coreshape::mass::per_face(&body, c).iter().enumerate() {
+                            let f = &body.faces[k];
+                            let _ = writeln!(text, "{k} {} {a:.9} flux {v:.9} loops {:?} edges {:?}", f.surface.name(), f.loops.iter().map(|l| l.len()).collect::<Vec<_>>(), f.loops.iter().flatten().map(|c| match body.edges[c.edge].curve { Curve::Line { .. } => 'L', Curve::Circle { .. } => 'C', Curve::Ellipse { .. } => 'E', Curve::Sampled(_) => 'S' }).collect::<String>());
+                        }
+                        let fine = tessellate(&body, &TessParams { chord: 0.002, angle: 2f64.to_radians() }).unwrap();
+                        let _ = writeln!(text, "exact volume {} fine mesh volume {} open {}", mass_properties(&body).volume, fine.volume(), fine.open_edge_count());
+                        for (k, f) in body.faces.iter().enumerate() {
+                            for (l, lp) in f.loops.iter().enumerate() {
+                                let closure = coreshape::mass::loop_closure_error(&body, lp);
+                                if closure > 1e-9 {
+                                    let _ = writeln!(text, "closure face {k} loop {l} {} error {closure:e}", f.surface.name());
+                                }
+                            }
+                        }
+                        for (i, e) in body.edges.iter().enumerate() {
+                            if let Curve::Sampled(c) = &e.curve {
+                                let n = 200;
+                                let mut off = 0.0f64;
+                                let mut length = 0.0;
+                                let mut prev = e.curve.eval(e.t0);
+                                for k in 1..=n {
+                                    let p = e.curve.eval(e.t0 + (e.t1 - e.t0) * k as f64 / n as f64);
+                                    off = off.max(c.surfaces.0.sdf(p).abs()).max(c.surfaces.1.sdf(p).abs());
+                                    length += p.dist(prev);
+                                    prev = p;
+                                }
+                                let g = (e.t0..e.t1).contains(&0.0);
+                                let _ = writeln!(text, "sampled edge {i}: t {:.4}..{:.4} of {} samples, length {length:.5}, off surface {off:.1e}, ends {:.1e} {:.1e} starts at knot {g}", e.t0, e.t1, c.points.len(), e.curve.eval(e.t0).dist(body.vertices[e.v0]), e.curve.eval(e.t1).dist(body.vertices[e.v1]));
+                            }
+                        }
+                        std::fs::write(format!("{dir}/faces.txt"), text).unwrap();
+                    }
                     writeln!(log, "{{\"seq\":{seq},\"i\":{done},\"op\":\"{name}\",\"s\":\"ok\",\"bool\":{boolop},\"prim\":{spec},\"v\":{:.10e},\"faces\":{},\"ms\":{ms:.1},\"open\":{mesh},\"shells\":{}}}", mass_properties(&body).volume, body.faces.len(), body.shells.len()).unwrap();
                 }
                 Run::Err(e, ms) => writeln!(log, "{{\"seq\":{seq},\"i\":{done},\"op\":\"{name}\",\"s\":\"refused\",\"bool\":{boolop},\"prim\":{spec},\"msg\":\"{}\",\"ms\":{ms:.1}}}", clean(&e)).unwrap(),

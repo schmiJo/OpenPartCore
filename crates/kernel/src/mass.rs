@@ -18,12 +18,30 @@ pub struct MassProps {
     pub area: f64,
 }
 
-/// Number of quadrature pieces for an edge.
-fn pieces_for(curve: &Curve, t0: f64, t1: f64) -> usize {
+/// Where to break an edge's parameter range for quadrature. Each piece must be smooth,
+/// so a sampled curve breaks at every sample. Its range can start mid-segment once the
+/// edge has been split, so the breaks follow the samples rather than the range.
+fn quadrature_breaks(curve: &Curve, t0: f64, t1: f64) -> Vec<f64> {
     match curve {
-        Curve::Line { .. } => 2,
-        Curve::Circle { .. } | Curve::Ellipse { .. } => (((t1 - t0) / (PI / 6.0)).ceil() as usize).max(1),
-        Curve::Sampled(_) => ((t1 - t0).ceil() as usize).max(1),
+        Curve::Sampled(_) => {
+            let mut breaks = vec![t0];
+            let mut k = t0.floor() + 1.0;
+            while k < t1 - 1e-9 {
+                if k > t0 + 1e-9 {
+                    breaks.push(k);
+                }
+                k += 1.0;
+            }
+            breaks.push(t1);
+            breaks
+        }
+        _ => {
+            let pieces = match curve {
+                Curve::Line { .. } => 2,
+                _ => (((t1 - t0) / (PI / 6.0)).ceil() as usize).max(1),
+            };
+            (0..=pieces).map(|i| t0 + (t1 - t0) * i as f64 / pieces as f64).collect()
+        }
     }
 }
 
@@ -33,15 +51,12 @@ fn pieces_for(curve: &Curve, t0: f64, t1: f64) -> usize {
 fn for_each_boundary_node(body: &Body, c: Coedge, mut f: impl FnMut(Vec3, Vec3)) {
     let e = &body.edges[c.edge];
     let rule = gauss_24();
-    let pieces = pieces_for(&e.curve, e.t0, e.t1);
-    let dt = (e.t1 - e.t0) / pieces as f64;
     let sign = if c.reversed { -1.0 } else { 1.0 };
-    for i in 0..pieces {
-        let (a, b) = (e.t0 + dt * i as f64, e.t0 + dt * (i + 1) as f64);
-        let (mid, half) = ((a + b) / 2.0, (b - a) / 2.0);
-        for &(x, w) in rule {
+    for w in quadrature_breaks(&e.curve, e.t0, e.t1).windows(2) {
+        let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
+        for &(x, weight) in rule {
             let t = mid + half * x;
-            f(e.curve.eval(t), e.curve.derivative(t) * (w * half * sign));
+            f(e.curve.eval(t), e.curve.derivative(t) * (weight * half * sign));
         }
     }
 }
@@ -157,6 +172,16 @@ pub fn mass_properties(body: &Body) -> MassProps {
         out.area += a;
     }
     out
+}
+
+/// How far the integrated tangent misses closing around a loop. For a closed loop the
+/// exact answer is zero, so this measures the quadrature behind every other number here.
+pub fn loop_closure_error(body: &Body, lp: &[Coedge]) -> f64 {
+    let mut sum = Vec3::ZERO;
+    for &c in lp {
+        for_each_boundary_node(body, c, |_, dp| sum += dp);
+    }
+    sum.norm()
 }
 
 /// Flux contribution to the volume, and area, of each face, about a reference point.

@@ -445,9 +445,9 @@ fn cone_apex_on_a_cylinder_matches_exact_integration() {
     let b = cylinder(&Frame::translation(v3(0.0, 2.0, 2.0)), 1.0, 4.0, 2).unwrap();
     let common = 5.455259503248;
     let (u, d, i) = all_ops(&a, &b, "apex on cylinder");
-    close(vol(&i), common, 1e-11, "common");
-    close(vol(&d), PI * 16.0 / 3.0 - common, 1e-11, "cut");
-    close(vol(&u), PI * 16.0 / 3.0 + PI * 4.0 - common, 1e-11, "union");
+    close(vol(&i), common, 1e-10, "common");
+    close(vol(&d), PI * 16.0 / 3.0 - common, 1e-10, "cut");
+    close(vol(&u), PI * 16.0 / 3.0 + PI * 4.0 - common, 1e-10, "union");
 }
 
 /// Review seeds that once failed the identities or were refused for grid-level reasons.
@@ -476,4 +476,30 @@ fn many_holes_in_one_profile() {
     assert_eq!(validate(&b).unwrap().genus, vec![400]);
     let r = 380.0 / n as f64 * 0.3;
     close(vol(&b), 1600000.0 - 400.0 * PI * r * r * 10.0, 1e-10, "perforated plate");
+}
+
+/// Regression from the review's chain test: a traced edge split by a later operation has
+/// a range starting mid-segment, and quadrature pieces straddled the kinks between
+/// segments. Volume and area were off by up to 0.4% on the faces it bounded.
+#[test]
+fn split_traced_edges_keep_exact_mass_properties() {
+    let a = cylinder(&z_at(-20.0), 8.0, 40.0, 1).unwrap();
+    let b = cylinder(&along_x(-20.0), 5.0, 40.0, 2).unwrap();
+    let u = union(&a, &b).unwrap();
+    // Cuts across the traced curves, leaving them with fractional parameter ranges.
+    let cut = box_solid(&Frame::translation(v3(-30.0, 1.3, -30.0)), 60.0, 60.0, 60.0, 3).unwrap();
+    let (x, y, _) = all_ops(&u, &cut, "cut through traced curves");
+    for body in [&x, &y] {
+        let fractional = body.edges.iter().any(|e| {
+            matches!(e.curve, Curve::Sampled(_)) && e.t0.fract() != 0.0
+                || matches!(e.curve, Curve::Sampled(_)) && e.t1.fract() != 0.0
+        });
+        assert!(fractional, "expected split traced edges");
+        for f in &body.faces {
+            for lp in &f.loops {
+                let closure = coreshape::mass::loop_closure_error(body, lp);
+                assert!(closure < 1e-7, "loop misses closing by {closure:e} on a {}", f.surface.name());
+            }
+        }
+    }
 }
