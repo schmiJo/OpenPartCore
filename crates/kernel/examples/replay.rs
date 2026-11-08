@@ -9,12 +9,16 @@ fn main() {
         "rot" => Category::RotatedBoxes,
         "prism" => Category::GridPrisms,
         "gen" => Category::GeneralPrimitives,
+        "ext" => Category::SplineExtrusions,
+        "rev" => Category::SplineRevolves,
         _ => Category::AlignedPrimitives,
     };
     let seed: u64 = args[2].parse().unwrap();
-    let mut rng = Rng::new(seed ^ ((category as u64 + 1) << 40));
-    let a = make_shape(category, &mut rng).unwrap();
-    let b = make_shape(category, &mut rng).unwrap();
+    let (a, b, mut rng) = make_pair(category, seed);
+    let (Some(a), Some(b)) = (a, b) else {
+        println!("The generator made no shape for this seed, so the case doesn't count.");
+        return;
+    };
     for (n, s) in [("A", &a), ("B", &b)] {
         let mut seen: Vec<String> = Vec::new();
         for f in &s.faces {

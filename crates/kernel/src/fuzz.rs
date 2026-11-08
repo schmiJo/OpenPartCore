@@ -297,12 +297,19 @@ pub fn check_pair(a: &Body, b: &Body, rng: &mut Rng, membership_points: usize) -
 }
 
 /// One replayable case.
-pub fn run_case(category: Category, seed: u64, membership_points: usize) -> Outcome {
+/// The two shapes of a case, and the generator as it stands after them, which the checks carry on from.
+/// Either is `None` when the generator couldn't make that shape, and the case then doesn't count.
+pub fn make_pair(category: Category, seed: u64) -> (Option<Body>, Option<Body>, Rng) {
     let mut rng = Rng::new(seed ^ ((category as u64 + 1) << 40));
     let a = make_shape(category, &mut rng);
     // A spline shape meets a primitive more often than another spline.
     let other = if SPLINE_CATEGORIES.contains(&category) && rng.int(0, 2) > 0 { Category::GeneralPrimitives } else { category };
     let b = make_shape(other, &mut rng);
+    (a, b, rng)
+}
+
+pub fn run_case(category: Category, seed: u64, membership_points: usize) -> Outcome {
+    let (a, b, mut rng) = make_pair(category, seed);
     let (Some(a), Some(b)) = (a, b) else {
         return Outcome::default();
     };

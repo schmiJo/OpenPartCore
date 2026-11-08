@@ -222,6 +222,11 @@ fn isolate(g: &[f64], lo: f64, hi: f64, depth: u32, flat: f64, out: &mut dyn FnM
         }
     }
     let mid = (lo + hi) / 2.0;
+    // A root exactly on the cut leaves a zero at the end of both halves, and a zero isn't a change of sign,
+    // so neither half would see it. Reporting it unjudged is safe: the caller keeps only the nearest.
+    if left[n - 1] == 0.0 {
+        out(mid);
+    }
     isolate(&left[..n], lo, mid, depth - 1, flat, out);
     isolate(&right[..n], mid, hi, depth - 1, flat, out);
 }
@@ -1257,6 +1262,25 @@ mod tests {
                 let (end, d) = (pc.eval(u1), pc.derivative(u1).normalized());
                 let beyond = end + d * 5.0 + d.right() * 2.0;
                 assert!((pc.signed_distance(beyond) - 2.0).abs() < 1e-9, "{}", pc.signed_distance(beyond));
+            }
+        }
+    }
+
+    /// A point on the curve is at distance zero from it, including where the search's halving lands
+    /// exactly on it. That leaves an exact zero between two halves, which a sign test can't see, and it
+    /// once reported 31.86 mm for this vase profile's middle.
+    #[test]
+    fn a_point_exactly_where_the_search_halves_is_still_found() {
+        let vases = [[69.0, 34.5, 47.0, 15.0, 33.5], [63.5, 28.5, 50.5, 20.5, 19.0], [70.0, 31.5, 57.0, 26.5, 19.5], [62.0, 20.0, 47.5, 27.0, 35.5]];
+        for [h, foot, belly, waist, lip] in vases {
+            let pts = [v3(foot, 0.0, 0.0), v3(belly, h * 0.35, 0.0), v3(waist, h * 0.72, 0.0), v3(lip, h, 0.0)];
+            let s = Spline::through(&pts).unwrap();
+            let pc = PlaneCurve::new(s.clone());
+            let (a, b) = s.domain();
+            for i in 0..=256 {
+                let p = s.eval(a + (b - a) * i as f64 / 256.0);
+                let d = pc.signed_distance(v2(p.x, p.y)).abs();
+                assert!(d < 1e-9, "{d} off at {i}/256 of the vase with height {h}");
             }
         }
     }

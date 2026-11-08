@@ -6,14 +6,16 @@ dist/artifact.html  page fragment for the artifact host, which adds its own skel
 
 The kernel is embedded as base64, so each file has no external files to fetch.
 """
-import base64, pathlib, subprocess, sys
+import base64, os, pathlib, subprocess, sys
 
 root = pathlib.Path(__file__).resolve().parent.parent
 subprocess.run(
     ["cargo", "build", "--profile", "wasm", "--target", "wasm32-unknown-unknown", "-p", "coreshape-wasm"],
     cwd=root, check=True,
 )
-wasm = (root / "target/wasm32-unknown-unknown/wasm/coreshape_wasm.wasm").read_bytes()
+# Cargo builds wherever this says, so read it from there, or the page silently gets an older kernel.
+target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR") or root / "target")
+wasm = (target / "wasm32-unknown-unknown/wasm/coreshape_wasm.wasm").read_bytes()
 page = (root / "web/viewer.html").read_text()
 b64 = base64.b64encode(wasm).decode()
 dist = root / "dist"
