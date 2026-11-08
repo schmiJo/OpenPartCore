@@ -34,7 +34,7 @@ python3 scripts/selftest_web.py              # drive it in headless Chrome
 scripts/check_step.sh /tmp/step-check        # read every model's STEP file in OpenCASCADE
 ```
 
-`dist/index.html` is one self-contained file, about 700 KB including the kernel. Open it
+`dist/index.html` is one self-contained file, about 800 KB including the kernel. Open it
 from any static host.
 
 ## Using the kernel

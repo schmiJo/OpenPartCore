@@ -37,6 +37,22 @@ driver = r"""
       check(`${catalog[i].id} builds at defaults`, b.info.ok && b.info.failed === null && b.info.openEdges === 0, `${b.ms.toFixed(1)} ms`);
     }
 
+    // How long does moving each model's first and last slider take?
+    for (let i = 0; i < catalog.length; i++) {
+      selectModel(i);
+      const m = catalog[i];
+      const times = [];
+      for (const p of [m.params[m.params.length - 1], m.params[0]]) {
+        const original = p.value;
+        p.value = original + (original + p.step <= p.max ? p.step : -p.step);
+        window.__viewer.rebuild(false);
+        times.push(window.__lastBuild.ms.toFixed(0));
+        p.value = original;
+        window.__viewer.rebuild(false);
+      }
+      check(`timing ${m.id}`, true, `last slider ${times[0]} ms, first slider ${times[1]} ms`);
+    }
+
     selectModel(catalog.findIndex((m) => m.id === "bracket"));
     const startVolume = window.__lastBuild.info.volume;
     const count = window.__lastBuild.info.features.length;

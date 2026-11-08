@@ -103,8 +103,10 @@ crossed cylinders whose radius difference equals the axis offset.
   renderer. The controls, shaders and touch handling are written for iOS but haven't been used on it.
 - **The hosted page itself.** It has been published but not opened. If the host's content policy
   blocks WebAssembly, the page shows an error saying it could not start.
-- **Phone performance.** On this desktop in wasm, the heaviest first build takes about 0.8 s and most
-  slider changes take under 0.3 s. Expect a phone to be slower, by an amount not measured.
+- **Phone performance.** Measured on this desktop in wasm under headless Chrome, a slider change
+  takes 45-110 ms on the bracket, 195-270 ms on the flange, about 300 ms on the rounded block and
+  390-630 ms on the mounting plate. That is a few times slower than native, and the plate will feel
+  laggy. A phone's speed has not been measured.
 - **Running on macOS and Windows.** The kernel compiles for both, but tests have only run on Linux.
 - **The download path on the hosted page.** Saving uses the host's download capability with the
   file wrapped in a zip, because `.step` and `.stl` aren't on its allowlist.
