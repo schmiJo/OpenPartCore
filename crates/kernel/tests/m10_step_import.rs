@@ -273,26 +273,34 @@ fn a_gap_within_reason_gets_read_and_stated() {
     assert!(!text.is_empty());
     let exact = read_step(&text, 1).unwrap();
     assert_eq!(exact[0].tolerance, 0.0, "a clean file has no gap to state");
-    let loose: Vec<String> = text
-        .lines()
-        .map(|l| {
-            if l.contains("CYLINDRICAL_SURFACE") {
-                // Radius 4 becomes 4.0005, with the edges still at 4.
-                l.replace(",4.)", ",4.0005)")
-            } else {
-                l.to_string()
-            }
-        })
-        .collect();
-    let loose = loose.join("\n");
-    assert_ne!(loose, text);
+    // Only the surface changes: radius 4 becomes 4.0005, with the edges still at 4.
+    let with_radius = |r: &str| {
+        let mut changed = 0;
+        let out = text
+            .lines()
+            .map(|l| {
+                if l.contains("CYLINDRICAL_SURFACE") {
+                    let new = l.replace("4.0000000000000000E0)", &format!("{r})"));
+                    if new != l {
+                        changed += 1;
+                    }
+                    new
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(changed > 0, "the writer's radius wasn't found, so the file wasn't changed");
+        out
+    };
+    let loose = with_radius("4.0005");
     let back = read_step(&loose, 1).unwrap();
     assert!(back[0].tolerance >= 4e-4 && back[0].tolerance <= 1e-3, "{}", back[0].tolerance);
     validate(&back[0]).unwrap();
     assert!((mass_properties(&back[0]).volume - mass_properties(&b).volume).abs() < 0.1);
     // Far past what a file's error could be, it's refused.
-    let far = text.lines().map(|l| if l.contains("CYLINDRICAL_SURFACE") { l.replace(",4.)", ",4.9)") } else { l.to_string() }).collect::<Vec<_>>().join("\n");
-    assert!(read_step(&far, 1).is_err());
+    assert!(read_step(&with_radius("4.9"), 1).is_err());
 }
 
 #[test]
