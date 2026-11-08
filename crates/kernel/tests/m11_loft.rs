@@ -207,6 +207,43 @@ fn two_patches_meet_like_two_real_surfaces() {
 }
 
 #[test]
+fn random_cuts_on_exact_patches_match_the_real_surfaces() {
+    // Every patch here is exactly a real cylinder or cone, written as rational splines, in any position. So any
+    // tool has to give the same volume through either one, which needs no other system to check against.
+    let mut rng = Rng::new(2026);
+    let (mut compared, mut refused) = (0, 0);
+    for _ in 0..24 {
+        let f = Frame::new(v3(rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-2.0, 2.0)), rng.unit_vector(), rng.unit_vector());
+        let (r0, r1, h) = (rng.range(3.0, 7.0), rng.range(3.0, 7.0), rng.range(6.0, 14.0));
+        let top = Frame { origin: f.origin + f.z * h, ..f };
+        let patch = loft(&[(&circle(r0), f), (&circle(r1), top)], 1).unwrap();
+        let real = cone_frustum(&f, r0, r1, h, 1).or_else(|_| cylinder(&f, r0, h, 1)).unwrap();
+        let center = f.origin + f.z * (h / 2.0) + rng.unit_vector() * rng.range(2.0, 6.0);
+        let frame = Frame::new(center, rng.unit_vector(), rng.unit_vector());
+        let tool = match rng.int(0, 3) {
+            0 => box_solid(&frame, rng.range(2.0, 9.0), rng.range(2.0, 9.0), rng.range(2.0, 9.0), 2),
+            1 => sphere(&frame, rng.range(1.5, 5.0), 2),
+            2 => cylinder(&frame, rng.range(1.0, 4.0), rng.range(4.0, 16.0), 2),
+            _ => torus(&frame, rng.range(3.0, 6.0), rng.range(0.7, 2.0), 2),
+        }
+        .unwrap();
+        for op in [BoolOp::Union, BoolOp::Subtract, BoolOp::Intersect] {
+            let (a, b) = (boolean::boolean(&patch, &tool, op), boolean::boolean(&real, &tool, op));
+            match (a, b) {
+                (Ok(a), Ok(b)) => {
+                    let (x, y) = (volume(&a), volume(&b));
+                    assert!((x - y).abs() < 1e-5 * y.abs().max(1.0), "{op:?}: on the patch {x}, on the real surface {y}");
+                    compared += 1;
+                }
+                // Tangencies are refused, and the two routes don't have to refuse the same ones.
+                _ => refused += 1,
+            }
+        }
+    }
+    assert!(compared >= 60, "{compared} compared, {refused} refused");
+}
+
+#[test]
 fn volumes_add_up_on_a_truly_free_form_shape() {
     // No analytic twin here, so the identities stand in: union + intersection = A + B, and A - B = A - (A and B).
     let a = loft(&[(&square(12.0), at(0.0)), (&circle(5.0), at(7.0)), (&square(7.0), at(14.0))], 1).unwrap();
@@ -217,6 +254,23 @@ fn volumes_add_up_on_a_truly_free_form_shape() {
     assert!((vu + vi - va - vb).abs() < 1e-5 * va, "{vu} + {vi} against {va} + {vb}");
     assert!((vs + vi - va).abs() < 1e-5 * va, "{vs} + {vi} against {va}");
     assert!(vi > 0.0 && vs > 0.0);
+}
+
+#[test]
+fn a_face_that_bulges_past_its_edges_is_inside_its_box() {
+    // Through a wide middle section, a side bulges well past both of its ends. Everything of the shape has to
+    // be inside the body's box, and a point on that bulge has to count as on the face.
+    let b = loft(&[(&circle(3.0), at(0.0)), (&circle(12.0), at(10.0)), (&circle(3.0), at(20.0))], 1).unwrap();
+    let bounds = b.aabb();
+    let index = coreshape::boolean::classify::Index::new(&b);
+    let mesh = tessellate(&b, &TessParams::for_size(10.0)).unwrap();
+    for q in &mesh.positions {
+        assert!(bounds.inflated(1e-9).contains(*q), "{q:?} is outside {bounds:?}");
+    }
+    let on = v3(12.0, 0.0, 10.0);
+    assert!(index.locate_in_body(v3(11.0, 0.0, 10.0)) == coreshape::boolean::classify::BodyLoc::Inside);
+    assert!(index.locate_in_body(v3(13.0, 0.0, 10.0)) == coreshape::boolean::classify::BodyLoc::Outside);
+    assert!(matches!(index.locate_in_body(on), coreshape::boolean::classify::BodyLoc::OnFace(_)));
 }
 
 #[test]
@@ -258,6 +312,38 @@ fn a_loft_comes_back_from_its_own_step_file() {
         let (a, c) = (subtract(&b, &tool).unwrap(), subtract(&back[0], &tool).unwrap());
         assert!((volume(&a) - volume(&c)).abs() < 1e-5 * x);
     }
+}
+
+#[test]
+fn a_loft_that_would_pass_through_itself_is_refused() {
+    // One section through another.
+    let across = Frame::new(v3(0.0, 0.0, 1.0), Vec3::X, Vec3::Y);
+    let why = loft(&[(&circle(5.0), at(0.0)), (&circle(5.0), across)], 1).err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(why.contains("pass through each other"), "{why}");
+    // A bend, whose planes meet away from the outlines, is fine.
+    let bent = Frame::new(v3(20.0, 0.0, 20.0), Vec3::X, Vec3::Y);
+    assert!(loft(&[(&circle(5.0), at(0.0)), (&circle(5.0), bent)], 1).is_ok());
+    // A hole whose path takes it through the outside wall.
+    let ring = |r: f64, x: f64| Profile::new(Wire::circle(v2(0.0, 0.0), r)).with_hole(Wire::circle(v2(x, 0.0), 1.0));
+    let why = loft(&[(&ring(8.0, 6.5), at(0.0)), (&ring(1.5, 0.0), at(5.0)), (&ring(8.0, -6.5), at(10.0))], 1)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(why.contains("cross"), "{why}");
+}
+
+#[test]
+fn a_patch_lying_on_a_different_surface_is_refused_and_not_guessed_at() {
+    // The patch is exactly this cylinder, but nothing tells the kernel so, and the surfaces touch everywhere.
+    let patch = loft(&[(&circle(6.0), at(0.0)), (&circle(6.0), at(20.0))], 1).unwrap();
+    let real = cylinder(&Frame { origin: v3(0.0, 0.0, 5.0), ..Frame::WORLD }, 6.0, 30.0, 2).unwrap();
+    for op in [BoolOp::Union, BoolOp::Subtract, BoolOp::Intersect] {
+        assert!(boolean::boolean(&patch, &real, op).is_err(), "{op:?}");
+    }
+    // Two copies of one patch, which it can recognise, are fine.
+    let again = patch.clone();
+    let both = boolean::boolean(&patch, &again, BoolOp::Union).unwrap();
+    assert!((volume(&both) - volume(&patch)).abs() < 1e-6);
 }
 
 #[test]

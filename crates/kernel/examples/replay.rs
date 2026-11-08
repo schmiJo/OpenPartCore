@@ -11,6 +11,7 @@ fn main() {
         "gen" => Category::GeneralPrimitives,
         "ext" => Category::SplineExtrusions,
         "rev" => Category::SplineRevolves,
+        "loft" => Category::Lofts,
         _ => Category::AlignedPrimitives,
     };
     let seed: u64 = args[2].parse().unwrap();

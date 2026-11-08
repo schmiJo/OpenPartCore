@@ -6,17 +6,18 @@ What the kernel refuses, what it only approximates, and what hasn't been tested.
 Numbers come from the runs described here. To replay any fuzz case:
 
 ```sh
-cargo run --release -p coreshape --example replay -- <grid|rot|prism|gen|al|ext|rev> <seed>
+cargo run --release -p coreshape --example replay -- <grid|rot|prism|gen|al|ext|rev|loft> <seed>
 ```
 
 ## What isn't built
 
 These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 
-- **Free-form surfaces.** No lofts, and no `B_SPLINE_SURFACE` from a file. The only spline surfaces are curves swept along a line or around an axis. This is phase 3 of [NURBS_DESIGN.md](NURBS_DESIGN.md), which isn't decided.
+- **Free-form surfaces with a pole,** where a whole side shrinks to a point, as in a lofted dome. They're refused by name. Many real files have them, so this is the next gap in reading other systems' parts.
+- **More kinds of loft.** No loft to a point, closed loop, guide curve or tangency at the ends: see [below](#free-form-surfaces-and-lofts).
 - **Helix, delete face and thicken.** Not started. A sweep path can only be lines and arcs.
 - **Offset, shell and draft that change a body's topology.** They refuse instead: see [below](#offset-shell-and-draft).
-- **Fillets and chamfers beyond straight and circular edges.** No ellipses, traced curves or spline faces, no variable radius, and no general vertex blends: see [below](#fillets-and-chamfers).
+- **Fillets and chamfers beyond straight and circular edges.** No ellipses, traced curves, spline or free-form faces, no variable radius, and no general vertex blends: see [below](#fillets-and-chamfers).
 - **Assemblies and drawings.** A STEP assembly is refused.
 
 ## Fuzz results
@@ -57,29 +58,31 @@ tangency, because the curve touches a face boundary tangentially at a vertex.
 |---|---|---|---|
 | Free-form splines and ellipses, extruded | 1,000 | 1 (0.1%) | 0 |
 | Spline profiles, revolved | 1,000 | 1 (0.1%) | 0 |
+| Lofts through mixed sections | 1,000 | 1 (0.1%) | 0 |
 
 The refusals are "extrusion and torus meet in a loop too small to trace" (`ext 775`) and "plane and torus are tangent at a point on their
-intersection" (`rev 115`). An earlier run reported one wrong result, a mesh that wouldn't close on a seed-96 extrusion. The profile really did cross
+intersection" (`rev 115`). The loft's is "two edges claim the same continuation" (`loft 912`), an internal error near a tangency that should name it. About one generated loft in twelve is refused when it's built, as a fold or as sides that cross, and doesn't count as a case. An earlier run reported one wrong result, a mesh that wouldn't close on a seed-96 extrusion. The profile really did cross
 itself, within the last sample before a corner, and outlines are now checked more closely toward corners, so that one is now refused.
 
-**In OpenCASCADE,** all 50 parts of the gallery read back valid, 15 of them spline parts. On those 15, volumes agree to 3e-7 or better on 13. On `spline_outline` and `spline_drilled`, OpenCASCADE's
+**In OpenCASCADE,** all 63 parts of the gallery read back valid: 15 swept spline parts, 13 lofts and free-form parts, and the rest analytic. On the 15 spline parts, volumes agree to 3e-7 or better on 13. On `spline_outline` and `spline_drilled`, OpenCASCADE's
 reported volume is 1.8e-4 and 1.6e-4 above this kernel's. Its own numbers settle this in the kernel's favour: for `spline_outline`, a polygon through 20,001 points
 of OpenCASCADE's own edges gives a cap area of 812.6155, and this kernel's is 812.6155, while its `Area` for that face says 812.9296. A mesh of the solid made by OpenCASCADE
 has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
 
 ## STEP import
 
-`coreshape::import::step::read_step`, or the `import_step` feature. It reads closed solids on planes, cylinders, cones, spheres, tori, and curves swept along a line or around an axis, in millimetres, metres, inches and so on.
+`coreshape::import::step::read_step`, or the `import_step` feature. It reads closed solids on planes, cylinders, cones, spheres, tori, curves swept along a line or around an axis, and rational B-spline surfaces, in millimetres, metres, inches and so on.
 
-- **Refused, naming the surface and how many faces use it:** any other surface, such as `B_SPLINE_SURFACE`, so that no result has faces missing. That's free-form surfaces, which is phase 3 of [NURBS_DESIGN.md](NURBS_DESIGN.md).
+- **Refused, naming the surface and how many faces use it:** any other surface, such as `OFFSET_SURFACE`, so that no result has faces missing.
+- **Refused, saying why:** a B-spline surface with a pole or a fold, or of degree above 16, or a face that runs across its surface's seam. A closed B-spline surface whose seam is on the face's own boundary is fine: it's cut into two faces along its parameter.
 - **Refused:** assemblies, since parts placed by transforms aren't read yet; open shells; any other edge curve, such as a hyperbola; a vertex over 1e-3 mm off the surfaces around it; a surface of revolution whose curve turns too far for one face, which an extrusion's curve can do because it gets cut up.
 - **Faces change shape on the way in.** This kernel's edges have two different ends and its curved faces stay within half a turn, so a seamed full cylinder comes in as two halves under one name, and so on. Volumes and areas don't change.
 - **Traced edges.** A B-spline edge between two surfaces, which is how other systems store an intersection curve, gets resampled onto both surfaces, so it follows them to this kernel's tolerance and not the file's. That's why `tee` and `cross_drilled` differ from OpenCASCADE by about 1e-6 relative.
 - **A file's orientation flags aren't trusted.** OpenCASCADE writes `FACE_BOUND` flags that its own reader repairs by looking at the shape, so this works out each loop's direction from its neighbours, and from a flat face to set the sign.
 
-**Checked** by `scripts/check_step_import.sh`, which has OpenCASCADE write 22 shapes, then reads each, compares volume and area, meshes it, cuts a box out of it, writes it back, and has OpenCASCADE check the result. All 21 that can be represented match, with volumes within 2.2e-6 relative and most about 1e-13, watertight meshes, and results valid in OpenCASCADE. The one free-form loft is refused by name. 3,000 randomly damaged files were each read as a valid solid or refused, with no panics, and everything this kernel writes comes back the same. Other writers than OpenCASCADE haven't been tried.
+**Checked** by `scripts/check_step_import.sh`, which has OpenCASCADE write 25 shapes, then reads each, compares volume and area, meshes it, cuts a box out of it, writes it back, and has OpenCASCADE check the result. All 25 match, with volumes within 2.2e-6 relative and most about 1e-13, watertight meshes, and results valid in OpenCASCADE. Four are free-form, one with a hole through its curved walls, and match to 3.2e-9 or better. They're simple lofts, though, and real parts will have poles and rougher edges. 3,000 randomly damaged files were each read as a valid solid or refused, with no panics, and everything this kernel writes comes back the same. Other writers than OpenCASCADE haven't been tried.
 
-## Spline surfaces
+## Swept spline surfaces
 
 Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.md).
 
@@ -91,6 +94,24 @@ Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.
   refuses it there.
 - **Volumes are integrated,** so `MassProps::volume_error` reports an estimate from comparing two rules, typically about 1e-12 relative. It isn't a proof, but tests hold it against known answers: an ellipse's prism, a torus, a sphere, a spheroid and a slanted cut.
 - **Speed.** Each distance on one of these surfaces costs a search of about a microsecond, where an analytic one costs nanoseconds. Run natively, the spline demos take about 130 ms a rebuild, 230 ms for a full mesh of the vase, and 510 ms for the cam's mass properties, since its cross hole makes traced curves on spline faces. A slider's draft mesh skips mass properties. In the browser they're the slowest demos: see [Slider speed](#slider-speed).
+
+## Free-form surfaces and lofts
+
+Rational B-spline patches, from a loft or a file: see [NURBS_DESIGN.md](NURBS_DESIGN.md#phase-3-free-form-patches).
+
+- **Refused by name:** fillets, chamfers, offset, shell and draft on these faces, as on swept splines. A pole or a fold, found by sampling each knot interval at 169 points for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
+- **Two surfaces lying on each other are refused unless they're the same patch.** A patch that's exactly a cylinder, against a real cylinder of that size, is refused as a tangency, and nothing guesses that they're the same.
+- **The proof has edges.** The closest point is proven for every point of the patch. Past its boundary the surface carries on along its tangent planes, where the value is only a height, and that's only used near faces' edges. Far from a surface, if a great many points are almost equally close, a search can run out of budget and report a smaller distance it can prove. A patch's tightest bend, which sets how fine a trace is, is sampled and not proven, so a very small feature between samples could be stepped over. The checks on every result still apply.
+- **Lofts take one outline per section, with the same number of holes,** and they can't end in a point, close into a ring, follow guide curves or set tangency at the ends.
+- **Sections are matched by counting.** Each outline's pieces are matched in order, with the longest cut in half until the counts agree, starting from the rotation that moves them least. So a rectangle to a circle twists by up to 45 degrees, as the nozzle demo does, and you steer it by turning a sketch or adding corners to it.
+- **A loft through itself is refused:** one section through another, or sides that cross, by looking at 23 stages along it at 12 points per piece. A crossing much smaller than that could get through. It only looks along the direction of travel, so a loft that turns back on itself sharply may be refused when it needn't be.
+- **Volumes are integrated,** so `MassProps::volume_error` reports an estimate from comparing two rules, typically about 1e-10 relative. Tests hold it against known answers: a true cylinder, frustum and ring, a tilted cut and a revolved curve.
+
+**Checked by comparing with real surfaces.** A loft between circles is exactly a cylinder or cone, written as rational splines. 24 random solids of that kind, each with a random box, sphere, cylinder or torus through all three Booleans, have to match the analytic version to 1e-5 relative, and they do, as does the fixed set in `crates/kernel/tests/m11_loft.rs`. Closest points are checked against brute force, and a torus written as a patch has a torus's distance to 1e-9. The fuzz above found two real bugs on the way: a face's bounding box missed its bulge past its edges, which gave wrong answers and refusals, and a Gauss rule ran across a traced curve's crossing of a knot line, which left volume identities off by about 1e-4 until the rule stopped there, bringing them to about 1e-11.
+
+**In OpenCASCADE,** all 13 lofts and Booleans on them read back valid. 10 agree on volume to 7e-6 or better. On `loft_cylinder`, `loft_frustum` and `loft_ring`, OpenCASCADE's reported volume is 2e-3 above this kernel's, and its circle's area is off too: 314.117 for a true 314.159. These three have exact answers, which this kernel matches to 1e-9, and a fine mesh of OpenCASCADE's own shape goes to the same place, 9424.71 on a true 9424.78. It's the same effect as on `spline_outline` above. A first version was wrong in the other direction: OpenCASCADE read one trimmed sphere face as the rest of the sphere, by repairing a loop around the sphere's pole, so the STEP writer now puts poles and seams off a face where it can.
+
+**Speed is the weak point.** A distance takes about 3 microseconds on the surface and 10 near it, where a swept spline's takes one and an analytic one takes nanoseconds, and that's after three rounds of work on it. Booleans on two lofts took about 1.5 s natively in the fuzz, with a similar time for their mass properties, while the simpler nozzle demo takes under 200 ms a rebuild. Each knot interval that gets touched also keeps about 170 kB, or 370 kB if it's rational and cubic, so a surface with thousands of them would be a problem. That hasn't been tried.
 
 ## Cases OpenCASCADE handles and this kernel refuses
 
@@ -104,7 +125,7 @@ Found by an independent review harness and still open. `--example review named <
 | Fillet the saddle edge of a tee pipe | Refused the same way | 20449.687 |
 
 The first two are slivers near the tolerance, and a refusal there is the safe answer, but the
-message should name the sliver instead of blaming closure. OpenCASCADE also reads free-form surfaces and
+message should name the sliver instead of blaming closure. OpenCASCADE also reads surfaces with poles and
 assemblies from STEP files, which this kernel refuses.
 
 ## What Booleans refuse by design
@@ -134,7 +155,7 @@ Supported:
 Not supported, returning an error:
 
 - Edges on traced intersection curves or ellipses, such as the rim of a hole through a cylinder.
-- Any edge touching a spline face.
+- Any edge touching a spline or free-form face.
 - Variable radius.
 - A radius that runs off a neighbouring face. Real kernels can absorb the overrun and restructure
   the neighbours. This one refuses.
@@ -162,7 +183,7 @@ Works, but differs from commercial CAD:
 | Mounting plate | 11 | A fillet ends up tangent along an intersection (5), the holes cross (3), or the fillet runs off its neighbour (2), and 1 more |
 | Crossed cylinders | 7 | An exact tangency, such as a radius difference equal to the axis offset |
 | Stress cases | 11 | Always the deliberate known-limit case |
-| Flange, rounded block, sliding pockets, vase, cam, knob, ring sector | 0 | |
+| Flange, rounded block, sliding pockets, vase, nozzle, cam, knob, ring sector | 0 | |
 
 The vase was refused at 13 of 200 until this scan was rerun on 2026-11-08. That was a bug and not a limit: when a point lay exactly where the closest-point search halves
 a span, the search missed it and reported the point as 32 mm from its own curve. The validity check refused every one, so no wrong shape came out. It's fixed, with a test. The fuzz
@@ -191,7 +212,7 @@ and 5404.3606), and all the results read as valid solids.
 - **The path is lines and arcs,** and each step carries on from the last one's direction, so there are no corners, free curves or helices.
 - **A bend tighter than the profile is wide is refused,** since the profile would cross the bend's center.
 - **Each step is built separately and joined by a Boolean,** so a path that runs into itself gives the union of its pieces and isn't refused, and it can hit the Boolean's limits above.
-- **Spline profiles along a path have no test of their own.**
+- **Spline profiles along a path have no test of their own.** Free-form sweeps along a free path aren't built.
 
 ## Many tools at once
 
@@ -241,21 +262,34 @@ slider, since the first usually affects more features. `python3 scripts/selftest
 
 | Model | Before | While dragging now | When a drag pauses now |
 |---|---|---|---|
-| Bracket | 22, 71 | 11, 31 | 18, 31 |
-| Flange | 81, 119 | 33, 46 | 58, 83 |
-| Rounded block | 178, 165 | 62, 53 | 90, 71 |
-| Mounting plate | 188, 296 | 47, 93 | 87, 163 |
-| Crossed cylinders | 73, 7 | 16, 5 | 33, 4 |
-| Turned knob | 27, 31 | 7, 8 | 24, 25 |
-| Ring sector | 88, 93 | 11, 10 | 38, 37 |
-| Spline vase | | 179, 159 | 340, 371 |
-| Spline cam | | 162, 148 | 719, 634 |
+| Bracket | 22, 71 | 15, 32 | 16, 48 |
+| Flange | 81, 119 | 29, 28 | 34, 50 |
+| Rounded block | 178, 165 | 75, 68 | 121, 77 |
+| Mounting plate | 188, 296 | 34, 100 | 59, 140 |
+| Crossed cylinders | 73, 7 | 11, 4 | 23, 4 |
+| Turned knob | 27, 31 | 3, 3 | 13, 12 |
+| Ring sector | 88, 93 | 4, 6 | 31, 22 |
+| Spline vase |  | 134, 102 | 195, 215 |
+| Free-form nozzle |  | 202, 227 | 434, 381 |
+| Spline cam |  | 163, 158 | 739, 621 |
 
-"Before" is before the speed work, and the rest were measured again on 2026-11-08. The spline demos came later, and they're the slowest: each distance on a spline surface costs a search. Most of the cam's pause is its mass properties.
+"Before" is before the speed work, and the rest were measured again on 2026-11-08. The spline and free-form demos came later, and they're the slowest: each distance on one of those surfaces costs a search. Most of the cam's pause is its mass properties.
 
-While dragging, a slider gets a lighter mesh (about a fifth of the triangles on curved parts) and volume and area wait, shown dimmed. All of the
+**How many triangles the page sends,** as these demos stand at their default sizes:
+
+| Model | For an STL | On screen | While dragging |
+|---|---|---|---|
+| Flange | 5,688 | 1,356 | 960 |
+| Mounting plate | 11,610 | 3,028 | 1,188 |
+| Turned knob | 5,504 | 2,018 | 654 |
+| Ring sector | 8,796 | 2,712 | 948 |
+| Spline vase | 9,336 | 3,912 | 972 |
+| Free-form nozzle | 9,124 | 5,106 | 2,566 |
+| Spline cam | 9,610 | 6,014 | 2,428 |
+
+While dragging, a slider gets a light mesh, where a circle has eight sides, and volume and area wait, shown dimmed. All of the
 kernel's checks still run: skipping the slower ones was measured, and saved under 10%, so they stay on. About 140 ms after the slider stops,
-the full mesh and the exact numbers follow. Saves and exports always use the finished result.
+the full mesh and the exact numbers follow. Saves and exports always use the finished result. What's shown isn't what's exported: the screen's mesh is within a thousandth of the part's size, which is under half a pixel on a phone, and an STL is within 4e-4 of it, which takes two to four times the triangles.
 
 The kernel itself got two to four times faster on these models:
 
@@ -266,7 +300,7 @@ The kernel itself got two to four times faster on these models:
 ## Not tested
 
 - **Safari in depth.** The page has been used on a real iPhone, where it ran and looked right. Nothing has measured it there, and the self test only runs in headless Chrome.
-- **Phone performance.** By hand on the iPhone after the speed work, sliders felt fast, with the mounting plate the slowest and acceptable. That was before the spline demos, which are now
+- **Phone performance.** By hand on the iPhone after the speed work, sliders felt fast, with the mounting plate the slowest and acceptable. That was before the spline and free-form demos, which are now
   the slowest by far, and they haven't been tried on a phone. The slider times above are from this desktop.
 - **The hosted page itself, as far as this repository's checks go.** Nothing automated opens it. If the host's content policy
   blocks WebAssembly, the page shows an error saying it could not start.
@@ -276,6 +310,6 @@ The kernel itself got two to four times faster on these models:
 - **Running on macOS and Windows.** The kernel compiles for both, but tests have only run on Linux.
 - **The download path on the hosted page.** Saving uses the host's download capability with the
   file wrapped in a zip, because `.step` and `.stl` aren't on its allowlist.
-- **Other CAD systems.** STEP files have been written and read back with OpenCASCADE only. Files from other writers and large real-world parts haven't been tried, and the 22 import shapes are small test parts.
+- **Other CAD systems.** STEP files have been written and read back with OpenCASCADE only. Files from other writers and large real-world parts haven't been tried, and the 25 import shapes are small test parts. Expect free-form files from elsewhere to find problems these haven't, starting with poles.
 - **A real MCP client.** Only the test suite has connected to the server: see [MCP.md](MCP.md).
 - **Splines in the sketch solver against PlaneGCS.** Lines, arcs, circles, ellipses and distances were compared, and splines only have the solver's own fuzz: see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).

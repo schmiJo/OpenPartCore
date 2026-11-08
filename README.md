@@ -11,6 +11,7 @@ It runs natively and in the browser through WebAssembly.
 - **Modelling:** 2D profiles that extrude and revolve, and union, subtract and intersect
   on all five surface types, including coplanar and touching contacts.
 - **Blends:** constant-radius fillets and chamfers on straight and circular edges.
+- **Free-form:** lofts through sections and rational B-spline surfaces, in Booleans and in STEP files both ways.
 - **More modelling:** many tools in one Boolean, patterns, mirror, sweeps along lines and arcs,
   offset, shell and draft, all on the same exact surfaces.
 - **Documents:** parameters and features as plain data, saved as readable JSON. Features can
@@ -20,7 +21,7 @@ It runs natively and in the browser through WebAssembly.
   redundant and conflicting constraints, supports dragging, and is fast enough for every mouse
   move. Checked against FreeCAD's PlaneGCS: see [docs/SKETCH_SOLVER.md](docs/SKETCH_SOLVER.md).
 - **Output:** exact volume and area, a watertight mesh, STL and STEP, and offscreen PNG images.
-- **Input:** STEP files with analytic surfaces and swept curves. Anything else is refused by name.
+- **Input:** STEP files with analytic surfaces, swept curves and free-form surfaces. Anything else is refused by name.
 - **For agents:** an MCP server for building, editing and inspecting parts by stable names. See
   [docs/MCP.md](docs/MCP.md).
 

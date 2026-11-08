@@ -131,6 +131,23 @@ fn cam(doc: &mut Document, _: usize) {
     doc.with(Op::extrude(across, 0.0, "lift + 5", Mode::Remove));
 }
 
+/// A nozzle from a rectangle through a circle to an ellipse, so all its sides are free-form, with a hole
+/// across it that has to follow them.
+fn nozzle(doc: &mut Document, _: usize) {
+    let base = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rect("-width / 2", "-depth / 2", "width", "depth"))]));
+    let waist = doc.with(Op::sketch(Placement::xy("height * 0.55"), vec![Region::new(Shape::circle(0.0, 0.0, "waist"))]));
+    let lip = doc.with(Op::sketch(
+        Placement::xy("height"),
+        vec![Region::new(Shape::Ellipse { cx: 0.0.into(), cy: 0.0.into(), rx: "lip".into(), ry: "lip * 0.7".into(), degrees: 0.0.into() })],
+    ));
+    doc.with(Op::Loft { sections: vec![base, waist, lip], mode: Mode::Add });
+    let across = doc.with(Op::sketch(
+        Placement::new(point3("-width", 0.0, "height * 0.3"), point3(1.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)),
+        vec![Region::new(Shape::circle(0.0, 0.0, "pin / 2"))],
+    ));
+    doc.with(Op::extrude(across, 0.0, "2 * width", Mode::Remove));
+}
+
 fn bracket(doc: &mut Document, _: usize) {
     // Sketched on XZ, with the extrusion running from y = width back toward y = 0.
     let plane = Placement::new(point3(0.0, "width", 0.0), point3(0.0, -1.0, 0.0), point3(1.0, 0.0, 0.0));
@@ -356,6 +373,14 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("lip", "Lip radius", 18.0, 40.0, 26.0),
         mm("wall", "Wall thickness", 1.5, 6.0, 3.0),
     ];
+    static NOZZLE: [ParamDef; 6] = [
+        mm("height", "Height", 50.0, 110.0, 80.0),
+        mm("width", "Base width", 40.0, 80.0, 60.0),
+        mm("depth", "Base depth", 30.0, 70.0, 45.0),
+        mm("waist", "Waist radius", 10.0, 18.0, 14.0),
+        mm("lip", "Lip radius", 14.0, 30.0, 22.0),
+        mm("pin", "Cross hole", 4.0, 12.0, 8.0),
+    ];
     static CAM: [ParamDef; 7] = [
         mm("lift", "Lobe radius", 40.0, 70.0, 55.0),
         mm("base", "Base radius", 24.0, 36.0, 30.0),
@@ -436,7 +461,7 @@ pub fn catalog() -> &'static [ModelDef] {
         default: 0.0,
         choices: &STRESS_NAMES,
     }];
-    static MODELS: [ModelDef; 11] = [
+    static MODELS: [ModelDef; 12] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -492,6 +517,13 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A sketched spline revolved, with a second spline cut out to hollow it. The curve stays an exact spline all the way to the STEP file.",
             params: &VASE,
             build: vase,
+        },
+        ModelDef {
+            id: "nozzle",
+            name: "Free-form nozzle",
+            blurb: "A loft from a rectangle through a circle to an ellipse, so all its sides are free-form patches, with a hole across them that follows the surface. Slower than the others: it's the hardest thing the kernel does.",
+            params: &NOZZLE,
+            build: nozzle,
         },
         ModelDef {
             id: "cam",

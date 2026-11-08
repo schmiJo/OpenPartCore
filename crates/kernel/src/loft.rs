@@ -266,9 +266,12 @@ pub fn loft(sections: &[(&Profile, Frame)], feature: u32) -> Result<Body> {
         }
     }
 
+    sections_keep_apart(&wires)?;
+
     let tag = |slot| FaceTag { feature, slot };
     let mut body = Body::default();
     let (mut start_loops, mut end_loops) = (Vec::new(), Vec::new());
+    let mut all_patches: Vec<Vec<Arc<Patch>>> = Vec::with_capacity(holes + 1);
     for w in 0..=holes {
         // The same number of pieces in every section, by cutting the longest.
         let count = wires.iter().map(|s| s[w].len()).max().unwrap_or(0);
@@ -340,6 +343,7 @@ pub fn loft(sections: &[(&Profile, Frame)], feature: u32) -> Result<Body> {
             })
             .collect::<Result<_>>()?;
         let (mut bottom, mut top) = (Vec::with_capacity(count), Vec::with_capacity(count));
+        let mut patches = Vec::with_capacity(count);
         for i in 0..count {
             let j = (i + 1) % count;
             let piece = &pieces[i];
@@ -360,14 +364,17 @@ pub fn loft(sections: &[(&Profile, Frame)], feature: u32) -> Result<Body> {
                     weights.push(q.w);
                 }
             }
-            let patch = Patch::new((piece.degree, degree_v), (piece.knots.clone(), knots_v.clone()), (nu, nv), points, weights)?;
+            let patch = Arc::new(Patch::new((piece.degree, degree_v), (piece.knots.clone(), knots_v.clone()), (nu, nv), points, weights)?);
+            patches.push(patch.clone());
             // A flat piece is a plane, which everything downstream handles better and more exactly.
-            let surface = flat_frame(&patch).map_or_else(|| Surface::Free { frame: Frame::WORLD, patch: Arc::new(patch) }, Surface::Plane);
+            let surface = flat_frame(&patch).map_or_else(|| Surface::Free { frame: Frame::WORLD, patch }, Surface::Plane);
             body.add_face(surface, false, vec![vec![low, rails[j], high.flipped(), rails[i].flipped()]], tag(SLOT_SEG_BASE + piece.id));
         }
         start_loops.push(bottom.iter().rev().map(|c| c.flipped()).collect::<Vec<_>>());
         end_loops.push(top);
+        all_patches.push(patches);
     }
+    sides_keep_apart(&all_patches)?;
 
     // The caps, with their normals along the direction of travel, then the start's flipped to face out.
     let plane_at = |k: usize| {
@@ -383,6 +390,124 @@ pub fn loft(sections: &[(&Profile, Frame)], feature: u32) -> Result<Body> {
     body.compute_shells();
     validate(&body).map_err(Error::InvalidBody)?;
     Ok(body)
+}
+
+/// Whether two segments in a plane properly cross.
+fn segments_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+    let side = |p: Vec2, q: Vec2, r: Vec2| (q - p).cross(r - p);
+    let (d1, d2, d3, d4) = (side(a, b, c), side(a, b, d), side(c, d, a), side(c, d, b));
+    d1 * d2 < 0.0 && d3 * d4 < 0.0
+}
+
+/// Refuses sections where one passes through another, by where a section's outline crosses the plane of its
+/// neighbour. Those planes can meet away from the outlines, as in a bend, and that's fine.
+fn sections_keep_apart(wires: &[Vec<Vec<Chain>>]) -> Result<()> {
+    let outline = |chains: &[Chain]| -> Vec<Vec3> {
+        let mut points = Vec::new();
+        for c in chains {
+            for h in &c.spans {
+                for i in 0..8 {
+                    let s = i as f64 / 8.0;
+                    let mut work = h.clone();
+                    for level in (1..work.len()).rev() {
+                        for k in 0..level {
+                            work[k] = work[k].lerp(work[k + 1], s);
+                        }
+                    }
+                    points.push(work[0].point());
+                }
+            }
+        }
+        points
+    };
+    let outlines: Vec<Vec<Vec3>> = wires.iter().map(|w| outline(&w[0])).collect();
+    for k in 0..outlines.len() {
+        for other in [k.wrapping_sub(1), k + 1] {
+            let Some(them) = outlines.get(other) else { continue };
+            let mine = &outlines[k];
+            let z = area_vector(&wires[k][0]).normalized();
+            let origin = wire_centroid(&wires[k][0]);
+            let x = z.any_perpendicular();
+            let y = z.cross(x);
+            let flat = |p: Vec3| v2((p - origin).dot(x), (p - origin).dot(y));
+            let polygon: Vec<Vec2> = mine.iter().map(|p| flat(*p)).collect();
+            for i in 0..them.len() {
+                let (p, q) = (them[i], them[(i + 1) % them.len()]);
+                let (hp, hq) = ((p - origin).dot(z), (q - origin).dot(z));
+                if hp * hq >= 0.0 {
+                    continue;
+                }
+                let at = flat(p + (q - p) * (hp / (hp - hq)));
+                // Inside the neighbour's outline, by counting crossings along a ray.
+                let mut inside = false;
+                for j in 0..polygon.len() {
+                    let (a, b) = (polygon[j], polygon[(j + 1) % polygon.len()]);
+                    if (a.y > at.y) != (b.y > at.y) && at.x < a.x + (at.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+                        inside = !inside;
+                    }
+                }
+                if inside {
+                    return Err(Error::InvalidProfile(format!("loft: sections {k} and {other} pass through each other")));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuses sides that cross each other, which would be a solid passing through itself. Each stage of the loft
+/// has to be an outline that doesn't cross itself, looking along the direction of travel there. This goes by
+/// sampling, so a crossing smaller than the samples could get through.
+fn sides_keep_apart(wires: &[Vec<Arc<Patch>>]) -> Result<()> {
+    const STAGES: usize = 24;
+    const ALONG: usize = 12;
+    let stage = |v: f64| -> Vec<Vec<Vec3>> {
+        wires
+            .iter()
+            .map(|wire| {
+                let mut points = Vec::with_capacity(wire.len() * ALONG);
+                for patch in wire {
+                    let (u0, u1) = patch.domain().0;
+                    for i in 0..ALONG {
+                        points.push(patch.eval(u0 + (u1 - u0) * i as f64 / ALONG as f64, v));
+                    }
+                }
+                points
+            })
+            .collect()
+    };
+    let middle = |outline: &[Vec<Vec3>]| outline[0].iter().fold(Vec3::ZERO, |m, p| m + *p) / outline[0].len() as f64;
+    for s in 1..STAGES {
+        let v = s as f64 / STAGES as f64;
+        let here = stage(v);
+        let along = middle(&stage(v + 0.5 / STAGES as f64)) - middle(&stage(v - 0.5 / STAGES as f64));
+        if !(along.norm() > 1e-12) {
+            continue;
+        }
+        let z = along.normalized();
+        let x = z.any_perpendicular();
+        let y = z.cross(x);
+        let segments: Vec<(Vec2, Vec2, usize, usize)> = here
+            .iter()
+            .enumerate()
+            .flat_map(|(w, outline)| {
+                let flat: Vec<Vec2> = outline.iter().map(|p| v2(p.dot(x), p.dot(y))).collect();
+                let n = flat.len();
+                (0..n).map(move |i| (flat[i], flat[(i + 1) % n], w, i)).collect::<Vec<_>>()
+            })
+            .collect();
+        for (i, a) in segments.iter().enumerate() {
+            for b in &segments[i + 1..] {
+                if segments_cross(a.0, a.1, b.0, b.1) {
+                    return Err(Error::InvalidProfile(format!(
+                        "loft: its sides cross each other about {:.0}% of the way along, so the solid would pass through itself",
+                        v * 100.0
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A frame for a patch that's flat, whose normal is the patch's.

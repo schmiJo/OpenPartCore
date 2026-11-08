@@ -31,6 +31,10 @@ pub struct SampledCurve {
 }
 
 impl SampledCurve {
+    pub fn touches_free_form(&self) -> bool {
+        matches!(self.surfaces.0, Surface::Free { .. }) || matches!(self.surfaces.1, Surface::Free { .. })
+    }
+
     /// Cubic Hermite through segment `i`, at local coordinate `s`. It is evaluated
     /// without clamping, so it can be used a little past its ends.
     fn hermite_local(&self, i: usize, s: f64) -> Vec3 {

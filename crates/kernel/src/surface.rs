@@ -171,6 +171,23 @@ impl Surface {
         }
     }
 
+    /// How far a point near the surface is from it, given a chart position close to it. A mesh uses this to
+    /// measure its own sag. Only a free-form surface does anything but `sdf` here, since that's slow there.
+    pub fn distance_near(&self, _chart: &Chart, uv: Vec2, p: Vec3) -> f64 {
+        match self {
+            Surface::Free { frame, patch } => patch.distance_near(uv, frame.to_local(p)),
+            _ => self.sdf(p).abs(),
+        }
+    }
+
+    /// The normal at a point of the surface, given its chart position, which saves a search on a free-form one.
+    pub fn normal_near(&self, _chart: &Chart, uv: Vec2, p: Vec3) -> Vec3 {
+        match self {
+            Surface::Free { frame, patch } => frame.dir_to_world(patch.normal_at_chart(uv)),
+            _ => self.normal(p),
+        }
+    }
+
     /// Closest point on the surface, for points near it.
     pub fn project(&self, p: Vec3) -> Vec3 {
         let f = self.frame();

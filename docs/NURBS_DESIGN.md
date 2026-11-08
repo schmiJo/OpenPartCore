@@ -1,7 +1,7 @@
 # NURBS: a design note
 
-Written before any NURBS code, because the kernel's robustness rests on something NURBS don't have. Phases 1 and 2 are now built.
-See [What was built](#what-was-built) at the end, which also says where this note turned out wrong.
+Written before any NURBS code, because the kernel's robustness rests on something NURBS don't have. All three phases are now built.
+See [What was built](#what-was-built) and [Phase 3](#phase-3-free-form-patches) at the end, which also say where this note turned out wrong.
 
 ## What the kernel relies on today
 
@@ -140,7 +140,7 @@ point, and stays 1-Lipschitz through the change to those coordinates.
 
 | Piece | What it does |
 |---|---|
-| `Spline` | Rational B-splines up to degree 7: evaluate, closest point, sub-curves, reversal, affine maps, cubic through points, exact elliptical arcs |
+| `Spline` | Rational B-splines up to degree 16: evaluate, closest point, sub-curves, reversal, affine maps, cubic through points, exact elliptical arcs |
 | `Surface::Extruded`, `Surface::Revolved` | A curve swept along a line or around an axis. A curve may end on the axis, where the chart is polar about the tip |
 | Exact sections | A plane across an extrusion gives a spline, including at a slant, since a rational spline follows an affine map exactly. A plane along the sweep, or a parallel cylinder or extrusion, gives straight rulings. Coaxial surfaces give circles. A plane through the axis of a revolution gives the curve itself |
 | Everything else | The existing contour tracer, unchanged, which needs only a true distance and a chart |
@@ -152,5 +152,30 @@ point, and stays 1-Lipschitz through the change to those coordinates.
 **Refused:** fillets, chamfers, offset, shell and draft on spline faces, and two different splines sharing part of their length. A spline can
 touch a revolve axis only at its ends.
 
-**Phase 3 is still open.** OpenShape has now asked for lofts and for free-form surfaces from imported files, in that order, after extruded
-splines. Both are phase 3, and this note's warning stands: that's where this stops being a small kernel.
+## Phase 3: free-form patches
+
+Decided later, and built. `crates/kernel/src/patch.rs` holds it, and this note was wrong about what it would take.
+
+**The certificate survives, and no new intersection code was needed.** This note expected hull exclusion, normal cones and a subdivision tree between
+surfaces, with the distance gone. But a patch can still have a distance function that never overstates, by finding the true closest point:
+
+- **All of the interior's closest points are roots of two polynomials,** `(A - p w) . (A_s w - A w_s)` and its partner in `t`. In Bernstein form their coefficients are linear in `p`, so they're worked
+  out once and cut into small leaves ahead of time. A box where one polynomial has one sign holds no root.
+- **Krawczyk's test** rules out a box right beside the answer in one step, where cutting it up takes many. It's what made near-surface queries affordable.
+- **An interval Jacobian that can't vanish** means at most one root in a box, which Newton's method then finds.
+- **The rest of the closest points are on the four boundary curves,** which is the curve search from phase 1.
+
+With that, the contour tracer does free-form against analytic and free-form against free-form exactly as it does everything else. Spline against spline was expected to be the hard row of the table
+and turned out to be no different. The trace runs over the free-form side's chart when the other is analytic, since its chart is cheap and the other's distance is cheap.
+
+**A patch has no inside, and that turned out not to matter.** Past its boundary it carries on along its tangent planes, as a curve does along its end tangents, and the value there is the height above
+the tangent plane at the nearest boundary point. That's no larger than the distance to the patch, so the guarantee holds for every point of the patch, which is where faces are. It can jump far from the
+surface, where a bounded sheet has to, but only by a value that isn't near zero, so nothing mistakes it for a crossing. This note's ray test against patches wasn't needed for the same reason.
+
+**What this note got right:** keeping analytic surfaces analytic, so a flat piece of a loft is a plane. Representing a shape exactly as a patch is the cheapest strong test there is: a loft between two
+circles is a true cylinder or cone, and random Booleans on it have to match the real surface. Refusing poles at first. Fillets, offset, shell and draft are still refused.
+
+**The worst bug** was outside all of this: a face's bounding box came from its edges, which is right for ruled surfaces, but a free-form face bulges past them. A ray's hit on the bulge was thrown away
+by the box, so about one input in seventeen gave a wrong answer or a refusal. Fixing that one line took a fuzz run from 5 refused and 2 wrong to none of either.
+
+**Speed** took three steps, and is still the weakest part: see [KNOWN_LIMITS.md](KNOWN_LIMITS.md#free-form-surfaces-and-lofts).

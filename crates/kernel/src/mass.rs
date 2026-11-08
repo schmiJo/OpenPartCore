@@ -98,7 +98,13 @@ fn traced_nodes(body: &Body, edge: usize, e: &crate::topo::Edge, rule: &[(f64, f
         return found;
     }
     let mut nodes = Vec::new();
-    for w in quadrature_breaks(&e.curve, e.t0, e.t1).windows(2) {
+    // Between its samples and the knot lines it crosses, a traced curve's pieces are short and smooth, so a third
+    // of the points does it, and on a free-form surface each point costs enough to be worth saving. The comparison
+    // between the two rules still reports what's left.
+    let on_free = matches!(&e.curve, Curve::Sampled(c) if c.touches_free_form());
+    let fewer = on_free.then(|| gauss_legendre(rule.len() / 3));
+    let rule = fewer.as_deref().unwrap_or(rule);
+    for w in traced_breaks(e).windows(2) {
         let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
         for &(x, weight) in rule {
             let t = mid + half * x;
@@ -110,6 +116,50 @@ fn traced_nodes(body: &Body, edge: usize, e: &crate::topo::Edge, rule: &[(f64, f
         t.borrow_mut().insert(key, nodes.clone());
     });
     nodes
+}
+
+/// Where to break a traced edge for quadrature: at its samples, and wherever it crosses a knot line of a free-form
+/// surface it's on. What's integrated has a kink across one of those, since a surface's speed can jump at a knot,
+/// and a Gauss rule across a kink loses far more than a few points can buy back.
+fn traced_breaks(e: &crate::topo::Edge) -> Vec<f64> {
+    let mut breaks = quadrature_breaks(&e.curve, e.t0, e.t1);
+    let Curve::Sampled(c) = &e.curve else {
+        return breaks;
+    };
+    for surface in [&c.surfaces.0, &c.surfaces.1] {
+        let Surface::Free { frame, patch } = surface else { continue };
+        let at = |t: f64| {
+            let foot = patch.foot(frame.to_local(e.curve.eval(t)));
+            [foot.u, foot.v]
+        };
+        let knots = patch.interior_knots();
+        let mut crossings = Vec::new();
+        for w in breaks.windows(2) {
+            let (a, b) = (at(w[0]), at(w[1]));
+            for (direction, list) in knots.iter().enumerate() {
+                for &k in list.iter() {
+                    if (a[direction] - k) * (b[direction] - k) >= 0.0 {
+                        continue;
+                    }
+                    let (mut lo, mut hi, mut below) = (w[0], w[1], a[direction] < k);
+                    for _ in 0..40 {
+                        let m = (lo + hi) / 2.0;
+                        if (at(m)[direction] < k) == below {
+                            lo = m;
+                            below = at(m)[direction] < k;
+                        } else {
+                            hi = m;
+                        }
+                    }
+                    crossings.push((lo + hi) / 2.0);
+                }
+            }
+        }
+        breaks.extend(crossings);
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup();
+    }
+    breaks
 }
 
 fn forget_traced_nodes() {
@@ -276,7 +326,7 @@ fn face_integrals_with(body: &Body, face: &Face, reference: Vec3, along_edges: &
             let (lo, hi) = body_chart_range(body, face);
             let x_ref = (lo + hi) / 2.0;
             let knots = patch.chart_breaks_x();
-            let rule = gauss_24();
+            let rule = gauss_legendre(patch.quadrature_points());
             let (mut flux, mut area) = (0.0, 0.0);
             for lp in &face.loops {
                 for &c in lp {
@@ -293,7 +343,7 @@ fn face_integrals_with(body: &Body, face: &Face, reference: Vec3, along_edges: &
                         let (mut h_flux, mut h_area) = (0.0, 0.0);
                         for w in stops.windows(2) {
                             let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
-                            for &(x, weight) in rule {
+                            for &(x, weight) in &rule {
                                 let (q, sx, sy) = surface.chart_derivs(chart, v2(mid + half * x, uv.y));
                                 let n = sx.cross(sy);
                                 h_flux += weight * half * (q - reference).dot(n);

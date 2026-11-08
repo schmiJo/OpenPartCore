@@ -38,9 +38,11 @@ pub enum Category {
     SplineExtrusions,
     /// A spline profile revolved, against a primitive or another of its kind.
     SplineRevolves,
+    /// A loft through mixed sections, so free-form sides, against a primitive or another of its kind.
+    Lofts,
 }
 
-pub const SPLINE_CATEGORIES: [Category; 2] = [Category::SplineExtrusions, Category::SplineRevolves];
+pub const SPLINE_CATEGORIES: [Category; 3] = [Category::SplineExtrusions, Category::SplineRevolves, Category::Lofts];
 
 pub const ALL_CATEGORIES: [Category; 5] = [
     Category::GridBoxes,
@@ -130,9 +132,68 @@ fn revolve_profile(rng: &mut Rng, size: f64) -> Option<Profile> {
     Some(Profile::new(wire))
 }
 
+/// One outline for a loft's section, around the origin.
+fn loft_section(rng: &mut Rng, size: f64) -> Option<Profile> {
+    let wire = match rng.int(0, 4) {
+        0 => Wire::circle(v2(0.0, 0.0), size),
+        1 => Wire::rect(-size, -size * 0.7, size * 2.0, size * 1.4),
+        2 => {
+            let count = rng.int(3, 7);
+            let start = rng.range(0.0, TAU);
+            let points: Vec<Vec2> = (0..count)
+                .map(|i| {
+                    let a = start + TAU * i as f64 / count as f64;
+                    v2(a.cos(), a.sin()) * (size * rng.range(0.8, 1.0))
+                })
+                .collect();
+            Wire::polygon(&points)
+        }
+        3 => {
+            let c = Spline::ellipse_arc(Vec3::ZERO, Vec3::X, Vec3::Y, size, size * rng.range(0.5, 1.0), 0.0, TAU).ok()?;
+            Wire { segs: vec![Seg { geom: SegGeom::Spline(std::sync::Arc::new(c)), id: 0 }] }
+        }
+        _ => {
+            // A smooth outline that stays around its center, so the sides between sections don't cross.
+            let count = rng.int(4, 7);
+            let start = rng.range(0.0, TAU);
+            let mut points: Vec<Vec3> = (0..count)
+                .map(|i| {
+                    let a = start + TAU * i as f64 / count as f64;
+                    let r = size * rng.range(0.8, 1.0);
+                    v3(r * a.cos(), r * a.sin(), 0.0)
+                })
+                .collect();
+            points.push(points[0]);
+            let c = Spline::through(&points).ok()?;
+            Wire { segs: vec![Seg { geom: SegGeom::Spline(std::sync::Arc::new(c)), id: 0 }] }
+        }
+    };
+    Some(Profile::new(wire))
+}
+
 /// A shape from a category, built from the given generator.
 pub fn make_shape(category: Category, rng: &mut Rng) -> Option<Body> {
     let body = match category {
+        Category::Lofts => {
+            let f = random_frame(rng, 3.0);
+            let count = rng.int(2, 4) as usize;
+            let mut height = 0.0;
+            let mut sections = Vec::with_capacity(count);
+            for k in 0..count {
+                if k > 0 {
+                    height += rng.range(1.5, 3.5);
+                }
+                // A little to one side and a little tilted, within what keeps the sections apart.
+                let tilt = v3(rng.range(-0.15, 0.15), rng.range(-0.15, 0.15), 1.0);
+                let origin = f.point(rng.range(-0.4, 0.4), rng.range(-0.4, 0.4), height);
+                let z = f.dir_to_world(tilt);
+                let x = f.dir_to_world(v3(1.0, 0.0, 0.0));
+                let size = rng.range(1.5, 3.5);
+                sections.push((loft_section(rng, size)?, Frame::new(origin, z, x)));
+            }
+            let list: Vec<(&Profile, Frame)> = sections.iter().map(|(p, f)| (p, *f)).collect();
+            crate::loft::loft(&list, 1)
+        }
         Category::SplineExtrusions => {
             let f = random_frame(rng, 3.0);
             let size = rng.range(1.5, 4.0);

@@ -26,7 +26,7 @@ oracle, through a neighbouring FreeCAD build, read-only.
 - Fillets cover straight and circular edges, plus sphere patches at convex three-edge corners.
   A radius that would swallow a neighbouring face is an error.
 - The `sketch` feature takes explicitly dimensioned profiles, and `constrained_sketch` adds the constraint solver, which is a crate of its own.
-- STEP import reads analytic surfaces and swept curves. Free-form surfaces and assemblies are refused.
+- STEP import reads analytic surfaces, swept curves and free-form surfaces without poles. Assemblies are refused.
 - Two bodies touching only along an edge or at a point become a valid manifold result with
   duplicated topology. `Body::contact_vertices` reports it.
 
@@ -47,6 +47,7 @@ oracle, through a neighbouring FreeCAD build, read-only.
 | M11 | Sketch regions, distances to curves, reference dimensions, ellipses | Done, see `SKETCH_SOLVER.md` |
 | M12 | Splines in sketches, extruded and revolved (phases 1 and 2 of `NURBS_DESIGN.md`) | Done, with the limits in `KNOWN_LIMITS.md`. Phase 3 isn't decided |
 | M13 | STEP import of analytic surfaces and swept curves | Done, checked on OpenCASCADE's files only |
+| M14 | Free-form surfaces and lofts, read from and written to STEP (phase 3 of `NURBS_DESIGN.md`) | Done, with the limits in `KNOWN_LIMITS.md` |
 
 ## For code building on this repository
 
@@ -60,6 +61,7 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| Free-form surfaces | `Surface` gained `Free`, and `coreshape_document::Op` gained `Loft`. `Surface::name` gives `free-form surface`. `spline::MAX_DEGREE` went from 7 to 16 in the kernel, and stays 7 in the sketch solver | An exhaustive `match` needs the new arms. Nothing else changes for code that doesn't use them |
 | Face keys | `coreshape::topo::Face` gained `origin`, and `EdgeSelect` gained `OnFaceKey` and `BetweenKeys`. Names, tags, slots, `FaceRef` and files are unchanged | Reading is unaffected. Code building a `Face` by hand has to set `origin`, and an exhaustive `match` on `EdgeSelect` needs the new arms |
 | STEP import | `coreshape_document::Op` gained `ImportStep` | An exhaustive `match` needs the new arm |
 | Document shapes | `coreshape_document::Shape` gained `Ellipse` and `Move` gained `Spline` | An exhaustive `match` needs the new arms |
@@ -84,7 +86,6 @@ From OpenShape's list, in its order:
 1. Sketch regions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 2. Solver dimensions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 3. Ellipses and elliptical arcs in the solver, regions and kernel profiles: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
-4. Splines in sketches, extruded and revolved: done, see [NURBS_DESIGN.md](NURBS_DESIGN.md). OpenShape also wants lofts and free-form surfaces from
-   imported files. Both are phase 3 of that note, which isn't decided yet.
+4. Splines in sketches, extruded and revolved, then lofts and free-form surfaces from imported files: done, see [NURBS_DESIGN.md](NURBS_DESIGN.md).
 5. STEP import of analytic surfaces and swept curves: done, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). It refuses anything else, naming the surface type. Assemblies come next there.
-6. Modelling: offset, shell and draft that survive topology changes, helix, loft, delete face and thicken.
+6. Modelling: offset, shell and draft that survive topology changes, helix, delete face and thicken.

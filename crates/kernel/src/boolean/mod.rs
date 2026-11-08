@@ -506,7 +506,15 @@ fn intersect_faces(
                         && index[1].locate_on_face(fb, face_b.surface.project(q), 2.0 * TOL) == FaceLoc::Inside
                 })
             };
-            curves = if area_a <= area_b {
+            // A free-form surface's distance takes a search and its chart doesn't, so its chart is the one to
+            // trace over against anything else.
+            let use_a = match (&face_a.surface, &face_b.surface) {
+                (Surface::Free { .. }, Surface::Free { .. }) => area_a <= area_b,
+                (Surface::Free { .. }, _) => true,
+                (_, Surface::Free { .. }) => false,
+                _ => area_a <= area_b,
+            };
+            curves = if use_a {
                 ssi::contour(&face_a.surface, &face_a.chart, la, ha, &face_b.surface, &region, &relevant)?
             } else {
                 ssi::contour(&face_b.surface, &face_b.chart, lb, hb, &face_a.surface, &region, &relevant)?

@@ -207,9 +207,10 @@ def run_once(query, want_worker):
 
         def do_POST(self):
             body = self.rfile.read(int(self.headers["Content-Length"]))
-            # Requests can overtake each other, so nothing may replace the final report.
-            if self.path == "/done" or not finished.is_set():
-                results["log"] = body
+            # Requests can overtake each other and each has its own thread, so the final report is kept apart
+            # from progress reports, and nothing can replace it. A progress report could slip in between storing
+            # one in the same place and marking it final, which made this fail about one run in four.
+            results["final" if self.path == "/done" else "log"] = body
             self.send_response(204)
             self.end_headers()
             if self.path == "/done":
@@ -220,7 +221,8 @@ def run_once(query, want_worker):
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    with tempfile.TemporaryDirectory() as tmp:
+    # Chrome can still be writing its profile as it exits, which is no reason to fail the run.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         chrome = subprocess.Popen(
             ["google-chrome", "--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
              f"--user-data-dir={tmp}/profile", "--window-size=1100,1400", f"http://127.0.0.1:{server.server_port}/{query}"],
@@ -230,10 +232,11 @@ def run_once(query, want_worker):
         chrome.terminate()
         chrome.wait(timeout=20)
     server.shutdown()
-    if "log" not in results:
+    report = results.get("final", results.get("log"))
+    if report is None:
         print("The page never reported anything.")
         return False
-    log = json.loads(results["log"])
+    log = json.loads(report)
     bad = [c for c in log if not c["ok"]]
     if not ended or not log or log[-1]["name"] != "the self test ran to the end":
         bad.append({"name": "the self test stopped early", "ok": False, "detail": ""})

@@ -28,10 +28,17 @@ impl TessParams {
         TessParams { chord: (size * 4e-4).max(1e-4), angle: 18f64.to_radians() }
     }
 
-    /// A lighter mesh, for following a dimension as it's dragged: about a fifth of the triangles
-    /// on curved parts, and quick to make.
+    /// For showing on a screen, where a part a few hundred pixels across can't show anything finer than this:
+    /// the chord is under half a pixel at 400 pixels. A quarter to a half of the triangles of `for_size`,
+    /// which is for files that leave the program.
+    pub fn display_for_size(size: f64) -> TessParams {
+        TessParams { chord: (size * 1e-3).max(1e-4), angle: 24f64.to_radians() }
+    }
+
+    /// A lighter mesh, for following a dimension as it's dragged: a circle has eight sides, which is enough
+    /// to see while it's moving, and it's quick to make.
     pub fn draft_for_size(size: f64) -> TessParams {
-        TessParams { chord: (size * 1.2e-3).max(3e-4), angle: 30f64.to_radians() }
+        TessParams { chord: (size * 4e-3).max(3e-4), angle: 45f64.to_radians() }
     }
 }
 
@@ -539,9 +546,9 @@ fn refine(
                 // Distance from the chord to the surface. This is the mesh error;
                 // comparing against the chart midpoint would also count sliding
                 // along the surface, which is not an error at all.
-                let sag = surface.sdf((world[a] + world[b]) * 0.5).abs();
-                let na = *normals.entry(v[a]).or_insert_with(|| surface.normal(world[a]));
-                let nb = *normals.entry(v[b]).or_insert_with(|| surface.normal(world[b]));
+                let sag = surface.distance_near(chart, frame.from_grid(m), (world[a] + world[b]) * 0.5);
+                let na = *normals.entry(v[a]).or_insert_with(|| surface.normal_near(chart, frame.from_grid(ga), world[a]));
+                let nb = *normals.entry(v[b]).or_insert_with(|| surface.normal_near(chart, frame.from_grid(gb), world[b]));
                 let turn = na.dot(nb).clamp(-1.0, 1.0).acos();
                 let score = (sag / params.chord).max(turn / params.angle);
                 if score > 1.0 && score > worst {
@@ -553,7 +560,7 @@ fn refine(
             let c = [(grid[0][0] + grid[1][0] + grid[2][0]) / 3, (grid[0][1] + grid[1][1] + grid[2][1]) / 3];
             if c != grid[0] && c != grid[1] && c != grid[2] {
                 let flat = (world[0] + world[1] + world[2]) / 3.0;
-                let score = surface.sdf(flat).abs() / params.chord;
+                let score = surface.distance_near(chart, frame.from_grid(c), flat) / params.chord;
                 if score > 1.0 && score > worst {
                     candidate = Some(c);
                 }

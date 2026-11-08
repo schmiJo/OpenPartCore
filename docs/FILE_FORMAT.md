@@ -72,6 +72,7 @@ Common fields: `id`, `name`, and `suppressed` (default false).
 |---|---|
 | `sketch` | `plane` (default XY), `regions` |
 | `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`) |
+| `loft` | `sections`: a list of sketch ids, in order, each holding one outline, and `mode`. Straight between two, and a smooth cubic through three or more |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`. Profile x is the distance from the sketch's Z axis, and profile y the height along it. |
 | `sweep` | `sketch`, `path`, `mode`: see below |
 | `solid` | `shape`, its dimensions, `at` (default XY), `mode` |

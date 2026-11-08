@@ -165,7 +165,7 @@ fn clear_mesh(out: &mut Output) {
 
 fn fill_mesh(out: &mut Output, body: &Body, draft: bool) -> Result<coreshape::Mesh> {
     let size = body.aabb().diagonal();
-    let params = if draft { TessParams::draft_for_size(size) } else { TessParams::for_size(size) };
+    let params = if draft { TessParams::draft_for_size(size) } else { TessParams::display_for_size(size) };
     let mesh = tessellate(body, &params)?;
     clear_mesh(out);
     for p in &mesh.positions {

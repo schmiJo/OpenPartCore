@@ -257,6 +257,19 @@ fn bernstein_values(degree: usize, s: f64) -> Basis {
     b
 }
 
+/// Bernstein basis values and their first derivatives.
+fn bernstein_first(degree: usize, s: f64) -> (Basis, Basis) {
+    let mut d = [0.0; MAX_DEGREE + 1];
+    let l = bernstein_values(degree - 1, s);
+    let n = degree as f64;
+    d[0] = -n * l[0];
+    for i in 1..degree {
+        d[i] = n * (l[i - 1] - l[i]);
+    }
+    d[degree] = n * l[degree - 1];
+    (bernstein_values(degree, s), d)
+}
+
 /// Bernstein basis values and their first two derivatives.
 fn bernstein(degree: usize, s: f64) -> (Basis, Basis, Basis) {
     let (mut d1, mut d2) = ([0.0; MAX_DEGREE + 1], [0.0; MAX_DEGREE + 1]);
@@ -496,6 +509,28 @@ impl BezierCell {
         let dtt = (att.a - d_t * (2.0 * at.w) - p * att.w) / w;
         let dst = (ast.a - d_s * at.w - d_t * as_.w - p * ast.w) / w;
         Local { p, ds: d_s, dt: d_t, dss, dst, dtt }
+    }
+
+    /// The point and its first derivatives alone.
+    fn first(&self, s: f64, t: f64) -> (Vec3, Vec3, Vec3) {
+        let (bs, ds) = bernstein_first(self.m, s);
+        let (bt, dt) = bernstein_first(self.n, t);
+        let (mut a, mut a_s, mut a_t) = (Hom::ZERO, Hom::ZERO, Hom::ZERO);
+        let width = self.n + 1;
+        for i in 0..=self.m {
+            for j in 0..=self.n {
+                let q = self.h[i * width + j];
+                let (f, fs, ft) = (bs[i] * bt[j], ds[i] * bt[j], bs[i] * dt[j]);
+                a.a += q.a * f;
+                a.w += q.w * f;
+                a_s.a += q.a * fs;
+                a_s.w += q.w * fs;
+                a_t.a += q.a * ft;
+                a_t.w += q.w * ft;
+            }
+        }
+        let p = a.a / a.w;
+        (p, (a_s.a - p * a_s.w) / a.w, (a_t.a - p * a_t.w) / a.w)
     }
 
     fn point(&self, s: f64, t: f64) -> Vec3 {
@@ -740,8 +775,11 @@ impl Patch {
         // No normal anywhere means a pole or a fold, and the sign and the chart both need one. Sampled, along
         // with the tightest curve, which sets how fine a trace over this surface has to be.
         let mut min_radius = f64::INFINITY;
-        const SAMPLES: usize = 6;
+        const SAMPLES: usize = 12;
         for c in &cells {
+            // A fold is narrow and the normal doesn't have to come near zero at any sample, but it does turn over
+            // between two close ones, which no smooth surface does at this spacing.
+            let mut last_row = [Vec3::ZERO; SAMPLES + 1];
             for a in 0..=SAMPLES {
                 for b in 0..=SAMPLES {
                     let q = c.local(a as f64 / SAMPLES as f64, b as f64 / SAMPLES as f64);
@@ -753,6 +791,11 @@ impl Patch {
                         return bad(format!("it has no normal near u = {u:.6}, v = {v:.6}, which means a pole or a fold, and those aren't supported yet"));
                     }
                     let unit = n.normalized();
+                    if unit.dot(last_row[b]) < -0.5 || (b > 0 && unit.dot(last_row[b - 1]) < -0.5) {
+                        let (u, v) = (c.u.0 + (c.u.1 - c.u.0) * a as f64 / SAMPLES as f64, c.v.0 + (c.v.1 - c.v.0) * b as f64 / SAMPLES as f64);
+                        return bad(format!("it folds over itself near u = {u:.6}, v = {v:.6}, which means a pole or a fold, and those aren't supported yet"));
+                    }
+                    last_row[b] = unit;
                     let (l, m, r) = (q.dss.dot(unit), q.dst.dot(unit), q.dtt.dot(unit));
                     let mean = (e * r - 2.0 * f * m + g * l) / (2.0 * area2);
                     let gauss = (l * r - m * m) / area2;
@@ -808,6 +851,27 @@ impl Patch {
     pub fn domain(&self) -> ((f64, f64), (f64, f64)) {
         let (u, v) = (&self.knots.0, &self.knots.1);
         ((u[0], u[u.len() - 1]), (v[0], v[v.len() - 1]))
+    }
+
+    /// A box holding everything between these parameters, from the control points, so it's certain. A face
+    /// can bulge past its own edges here, so the edges alone don't give this.
+    pub fn bounds_over(&self, u: (f64, f64), v: (f64, f64)) -> (Vec3, Vec3) {
+        let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
+        for cell in &self.cells {
+            if cell.u.1 < u.0 || cell.u.0 > u.1 || cell.v.1 < v.0 || cell.v.0 > v.1 {
+                continue;
+            }
+            let (du, dv) = (cell.u.1 - cell.u.0, cell.v.1 - cell.v.0);
+            for leaf in cell.leaves() {
+                let (a, b) = (cell.u.0 + du * leaf.s.0, cell.u.0 + du * leaf.s.1);
+                let (c, d) = (cell.v.0 + dv * leaf.t.0, cell.v.0 + dv * leaf.t.1);
+                if b >= u.0 && a <= u.1 && d >= v.0 && c <= v.1 {
+                    lo = lo.min(leaf.lo);
+                    hi = hi.max(leaf.hi);
+                }
+            }
+        }
+        (lo, hi)
     }
 
     /// The tightest bend, as a radius, sampled. It guides how fine a trace is, and isn't a proof.
@@ -919,8 +983,8 @@ impl Patch {
     /// The point and its derivatives with respect to `u` and `v`.
     pub fn derivs(&self, u: f64, v: f64) -> (Vec3, Vec3, Vec3) {
         let (cell, s, t) = self.cell_at(u, v);
-        let q = cell.local(s, t);
-        (q.p, q.ds / (cell.u.1 - cell.u.0), q.dt / (cell.v.1 - cell.v.0))
+        let (p, ds, dt) = cell.first(s, t);
+        (p, ds / (cell.u.1 - cell.u.0), dt / (cell.v.1 - cell.v.0))
     }
 
     /// The closest point of the patch, found with certainty as the module's notes describe.
@@ -956,6 +1020,13 @@ impl Patch {
                     root = Some((std::ptr::from_ref(cell), s, t));
                 }
             }
+        }
+        // Within tolerance, nothing else can be closer in any way that counts, since two sheets of one surface
+        // that close aren't something this kernel can have. This is how every point on the surface goes, such as
+        // those along a face's own edges, and it's most queries while building something.
+        if root.is_some() && best.0 < TOL {
+            let (at, du, dv) = self.derivs(best.1, best.2);
+            return PatchFoot { u: best.1, v: best.2, at, normal: du.cross(dv).normalized(), distance: best.0, boundary: false };
         }
         // A boundary point closer than the best so far is in a leaf on that side whose box is closer too.
         let ((u0, u1), (v0, v1)) = self.domain();
@@ -1071,6 +1142,35 @@ impl Patch {
         self.foot(p).normal
     }
 
+    /// How far a point near the surface is from it, by Newton's method from a chart position that's already
+    /// close. No proof that it's the nearest part of the surface, which a mesh checking its own sag doesn't
+    /// need, and it's a good deal faster than one.
+    pub fn distance_near(&self, uv: Vec2, p: Vec3) -> f64 {
+        let ((u0, u1), (v0, v1)) = self.domain();
+        let (u, v) = ((uv.x / self.scale.0).clamp(u0, u1), (uv.y / self.scale.1).clamp(v0, v1));
+        let (cell, s, t) = self.cell_at(u, v);
+        match cell.newton(s, t, p) {
+            Some((s, t)) => cell.point(s, t).dist(p),
+            None => self.signed_distance(p).abs(),
+        }
+    }
+
+    /// The normal at a chart position in the domain.
+    pub fn normal_at_chart(&self, uv: Vec2) -> Vec3 {
+        let (_, dx, dy) = self.from_chart(uv);
+        dx.cross(dy).normalized()
+    }
+
+    /// How many Gauss points integrate one chart direction of a flux or area exactly, or nearly.
+    pub fn quadrature_points(&self) -> usize {
+        if self.is_polynomial() {
+            // A flux density is a polynomial of three times the degree here, and an n-point rule is exact to 2n - 1.
+            (3 * self.degree.0 + 2) / 2 + 1
+        } else {
+            16
+        }
+    }
+
     /// Chart position: `u` and `v` in units that keep 3D distance at or below chart distance. Past the
     /// boundary, by the tangent plane.
     pub fn to_chart(&self, p: Vec3) -> Vec2 {
@@ -1096,6 +1196,17 @@ impl Patch {
         let (cu, cv) = (u.clamp(u0, u1), v.clamp(v0, v1));
         let (q, du, dv) = self.derivs(cu, cv);
         (q + du * (u - cu) + dv * (v - cv), du / self.scale.0, dv / self.scale.1)
+    }
+
+    /// The knots strictly inside the range, along `u` and along `v`.
+    pub fn interior_knots(&self) -> [&[f64]; 2] {
+        let inner = |list: &'_ Vec<f64>| -> std::ops::Range<usize> { 1..list.len() - 1 };
+        [&self.breaks.0[inner(&self.breaks.0)], &self.breaks.1[inner(&self.breaks.1)]]
+    }
+
+    /// The parameters at a chart position.
+    pub fn parameters_at(&self, uv: Vec2) -> (f64, f64) {
+        (uv.x / self.scale.0, uv.y / self.scale.1)
     }
 
     /// The chart x positions of the knots, where a smooth rule of integration has to stop.
@@ -1526,6 +1637,22 @@ mod tests {
                 assert!(at_v.eval(u).dist(de_boor(&p, u, va)) < 1e-10);
             }
         }
+    }
+
+    #[test]
+    fn a_surface_folded_over_itself_is_refused() {
+        // A sheet that runs out along x, doubles back, and runs out again, like a letter z seen from the side,
+        // so its normal turns over along two narrow lines without being zero at any sample.
+        let row = [(0.0, 0.0), (14.0, 0.02), (-4.0, 0.04), (10.0, 0.06)];
+        let mut points = Vec::new();
+        for (x, z) in row {
+            for j in 0..4 {
+                points.push(v3(x, j as f64 * 3.0, z));
+            }
+        }
+        let knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let error = Patch::new((3, 3), (knots.clone(), knots), (4, 4), points, vec![1.0; 16]).err().expect("refused").to_string();
+        assert!(error.contains("fold"), "{error}");
     }
 
     #[test]

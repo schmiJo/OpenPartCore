@@ -330,6 +330,22 @@ impl Body {
             }
             b = b.inflated(dx.hypot(dy) / 2.0);
         }
+        // A free-form face can bulge past its edges as well. Its control points bound it, over the part of the
+        // surface its boundary reaches, with room for what points along that boundary can miss.
+        if let Surface::Free { frame, patch } = &face.surface {
+            let (lo, hi) = self.face_chart_bounds(f);
+            let (a, c) = patch.parameters_at(lo);
+            let (e, g) = patch.parameters_at(hi);
+            let (du, dv) = ((e - a) / 16.0, (g - c) / 16.0);
+            let (low, high) = patch.bounds_over((a - du, e + du), (c - dv, g + dv));
+            for x in [low.x, high.x] {
+                for y in [low.y, high.y] {
+                    for z in [low.z, high.z] {
+                        b.add(frame.to_world(v3(x, y, z)));
+                    }
+                }
+            }
+        }
         b
     }
 
