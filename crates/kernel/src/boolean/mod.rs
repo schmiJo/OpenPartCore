@@ -424,10 +424,32 @@ fn intersect_faces(
             // A point matters if it is on or near both faces. The tolerance here is
             // generous because a suspect point need not lie exactly on the surfaces.
             let relevant = |p: Vec3| {
+                let reach = (region.diagonal() * 1e-3).clamp(1e-4, 1e-2);
+                let near = reach / 2.0;
                 let qa = face_a.surface.project(p);
                 let qb = face_b.surface.project(p);
-                index[0].locate_on_face(fa, qa, 1e-3) != FaceLoc::Outside
-                    && index[1].locate_on_face(fb, qb, 1e-3) != FaceLoc::Outside
+                let (la, lb) = (
+                    index[0].locate_on_face(fa, qa, near),
+                    index[1].locate_on_face(fb, qb, near),
+                );
+                if la == FaceLoc::Outside || lb == FaceLoc::Outside {
+                    return false;
+                }
+                if la == FaceLoc::Inside || lb == FaceLoc::Inside {
+                    return true;
+                }
+                // On the boundary of both. If the faces lie on opposite sides there,
+                // they only touch at this point and no curve runs between them. Look
+                // around the point for anywhere that is inside both.
+                let n = face_a.surface.normal(qa);
+                let e1 = n.any_perpendicular();
+                let e2 = n.cross(e1);
+                (0..24).any(|k| {
+                    let (s, c) = (k as f64 * TAU / 24.0).sin_cos();
+                    let q = qa + (e1 * c + e2 * s) * reach;
+                    index[0].locate_on_face(fa, face_a.surface.project(q), 2.0 * TOL) == FaceLoc::Inside
+                        && index[1].locate_on_face(fb, face_b.surface.project(q), 2.0 * TOL) == FaceLoc::Inside
+                })
             };
             curves = if area_a <= area_b {
                 ssi::contour(&face_a.surface, &face_a.chart, la, ha, &face_b.surface, &region, &relevant)?

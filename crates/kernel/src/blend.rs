@@ -17,7 +17,7 @@ use crate::build::{box_solid, extrude, revolve, sphere};
 use crate::curve::Curve;
 use crate::error::{Error, Result};
 use crate::math::*;
-use crate::profile::{PathBuilder, Profile, Wire};
+use crate::profile::{PathBuilder, Profile};
 use crate::surface::Surface;
 use crate::topo::{Body, Edge};
 
@@ -95,19 +95,6 @@ fn same_curve(a: &Curve, b: &Curve) -> bool {
             (r - s).abs() <= TOL && f.origin.dist(g.origin) <= TOL && f.z.cross(g.z).norm() < 1e-9
         }
         _ => false,
-    }
-}
-
-/// Parameter of a point on a straight or circular curve, near a reference parameter.
-fn param_near(curve: &Curve, p: Vec3, reference: f64) -> f64 {
-    match curve {
-        Curve::Line { origin, dir } => (p - *origin).dot(*dir),
-        Curve::Circle { frame, .. } => {
-            let l = frame.to_local(p);
-            let a = l.y.atan2(l.x);
-            a + ((reference - a) / TAU).round() * TAU
-        }
-        _ => reference,
     }
 }
 
@@ -898,10 +885,3 @@ impl Body {
     }
 }
 
-/// Parameter helper used by tests.
-pub fn _edge_param(curve: &Curve, p: Vec3, reference: f64) -> f64 {
-    param_near(curve, p, reference)
-}
-
-#[allow(dead_code)]
-fn _unused(_: &Wire) {}

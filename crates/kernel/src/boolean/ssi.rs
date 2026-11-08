@@ -650,12 +650,23 @@ fn contour_at(
                 links.entry(found[1]).or_default().push(found[0]);
             }
             4 => {
-                // A saddle: two branches pass through one cell.
-                return Err(Trouble::TooCoarse(format!(
-                    "{} and {} intersect near a tangency",
-                    a.name(),
-                    b.name()
-                )));
+                // A saddle: two branches pass through one cell. That only matters if
+                // the point is on the faces being intersected. Elsewhere, any pairing
+                // will do, because those pieces get discarded.
+                let centre = corner(i, j) + v2(dx / 2.0, dy / 2.0);
+                let at = critical_point(a, chart, b, centre, 2.0 * dx.hypot(dy))
+                    .map_or(centre, |(uv, _)| uv);
+                if relevant(b.project(a.from_chart(chart, at))) {
+                    return Err(Trouble::TooCoarse(format!(
+                        "{} and {} intersect near a tangency",
+                        a.name(),
+                        b.name()
+                    )));
+                }
+                for pair in found.chunks_exact(2) {
+                    links.entry(pair[0]).or_default().push(pair[1]);
+                    links.entry(pair[1]).or_default().push(pair[0]);
+                }
             }
             _ => {
                 return Err(Trouble::Fatal(Error::Internal("odd crossing count in a contour cell".into())));
@@ -717,11 +728,14 @@ fn contour_at(
         for edge in &chain {
             let guess = a.from_chart(chart, crossing[edge]);
             let Some(p) = refine_on_two(a, b, guess) else {
-                return Err(Trouble::TooCoarse(format!(
-                    "{} and {} are tangent along their intersection",
-                    a.name(),
-                    b.name()
-                )));
+                if relevant(b.project(guess)) {
+                    return Err(Trouble::TooCoarse(format!(
+                        "{} and {} are tangent along their intersection",
+                        a.name(),
+                        b.name()
+                    )));
+                }
+                continue;
             };
             if points.last().is_none_or(|q: &Vec3| q.dist(p) > 1e-9) {
                 points.push(p);

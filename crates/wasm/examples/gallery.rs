@@ -31,7 +31,35 @@ fn extras() -> Vec<(&'static str, Result<Body>)> {
         let b = box_solid(&Frame { origin: f.to_world(v3(-50.0, -50.0, 0.0)), ..f }, 100.0, 100.0, 50.0, 2).unwrap();
         subtract(&a, &b)
     };
+    let rounded_cube = {
+        let b = box_solid(&Frame::WORLD, 20.0, 20.0, 20.0, 1).unwrap();
+        let all: Vec<usize> = (0..b.edges.len()).collect();
+        fillet(&b, &all, 4.0, 2)
+    };
+    let boss_flare = {
+        let plate = box_solid(&Frame::translation(v3(-20.0, -20.0, 0.0)), 40.0, 40.0, 5.0, 1).unwrap();
+        let boss = cylinder(&Frame::translation(v3(0.0, 0.0, 5.0)), 6.0, 10.0, 2).unwrap();
+        let t = union(&plate, &boss).unwrap();
+        let foot = t.edges_where(|i, _| (t.edge_midpoint(i).z - 5.0).abs() < 1e-9 && t.edge_is_arc_of_radius(i, 6.0))[0];
+        fillet(&t, &[foot], 2.0, 3)
+    };
+    let chamfered_rim = {
+        let p = Profile::new(Wire::rounded_rect(40.0, 30.0, 5.0));
+        let plate = extrude(&p, &Frame::WORLD, 8.0, 1).unwrap();
+        let rim = plate.edges_where(|i, _| (plate.edge_midpoint(i).z - 8.0).abs() < 1e-9);
+        chamfer(&plate, &rim, 1.5, 2)
+    };
+    let filleted_rim = {
+        let p = Profile::new(Wire::rounded_rect(40.0, 30.0, 5.0));
+        let plate = extrude(&p, &Frame::WORLD, 8.0, 1).unwrap();
+        let rim = plate.edges_where(|i, _| (plate.edge_midpoint(i).z - 8.0).abs() < 1e-9);
+        fillet(&plate, &rim, 2.0, 2)
+    };
     vec![
+        ("rounded_cube", rounded_cube),
+        ("boss_flare", boss_flare),
+        ("chamfered_rim", chamfered_rim),
+        ("filleted_rim", filleted_rim),
         ("box", box_solid(&Frame::WORLD, 20.0, 30.0, 10.0, 1)),
         ("sphere", sphere(&Frame::WORLD, 15.0, 1)),
         ("torus", torus(&Frame::WORLD, 20.0, 5.0, 1)),
