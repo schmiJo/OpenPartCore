@@ -540,6 +540,9 @@ pub enum Op {
     /// profile y the height along it.
     Revolve { sketch: FeatureId, degrees: Expr, mode: Mode },
     Solid { primitive: Primitive, at: Placement, mode: Mode },
+    /// The solids in a STEP file, kept here in full so that the document stands alone. Their faces are named by their
+    /// place in the file: `f3:side.0` is the first. A piece cut from a wide face keeps that face's name.
+    ImportStep { text: String, mode: Mode },
     Fillet { edges: EdgeSelect, radius: Expr, propagate: bool },
     Chamfer { edges: EdgeSelect, distance: Expr, propagate: bool },
     /// Sweeps a sketch along a smooth path of lines and arcs, starting at the sketch plane and
@@ -613,6 +616,7 @@ impl Op {
             Op::Extrude { .. } => "extrude",
             Op::Revolve { .. } => "revolve",
             Op::Solid { .. } => "solid",
+            Op::ImportStep { .. } => "import_step",
             Op::Fillet { .. } => "fillet",
             Op::Chamfer { .. } => "chamfer",
             Op::Sweep { .. } => "sweep",
@@ -635,6 +639,7 @@ impl Op {
             Op::Extrude { .. } => "Extrude",
             Op::Revolve { .. } => "Revolve",
             Op::Solid { .. } => "Solid",
+            Op::ImportStep { .. } => "Imported STEP",
             Op::Fillet { .. } => "Fillet",
             Op::Chamfer { .. } => "Chamfer",
             Op::Sweep { .. } => "Sweep",
@@ -691,6 +696,7 @@ impl Op {
             }
         }
         match self {
+            Op::ImportStep { .. } => {}
             Op::Sketch { plane, regions } => {
                 place(plane, &mut out);
                 for r in regions {
@@ -1311,6 +1317,10 @@ impl Document {
                 }
                 let m = Mirror::new(at(point)?, n);
                 solid(self.copied(body.as_deref(), of, |b| vec![b.mirrored(&m)])?).wrap()
+            }
+            Op::ImportStep { text, mode } => {
+                let solids = coreshape::import::step::read_step(text, tag)?;
+                applied(body.as_deref(), solids, *mode)
             }
             Op::Solid { primitive, at, mode } => {
                 let frame = at.resolve(env)?;
@@ -2044,6 +2054,7 @@ pub fn op_value(op: &Op) -> Value {
             ("degrees", expr_value(degrees)),
             ("mode", mode_value(*mode)),
         ]),
+        Op::ImportStep { text, mode } => Value::obj(vec![("type", Value::str("import_step")), ("text", Value::str(text)), ("mode", mode_value(*mode))]),
         Op::Solid { primitive, at, mode } => {
             let mut items = vec![("type", Value::str("solid"))];
             match primitive {
@@ -2235,6 +2246,13 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)),
                 mode: read_mode(v)?,
             })
+        }
+        "import_step" => {
+            with(&["type", "text", "mode"])?;
+            let text = field(v, "text", "an imported file")?
+                .as_str()
+                .ok_or_else(|| Error::InvalidInput("an imported file's \"text\" must be the STEP file as text".into()))?;
+            Ok(Op::ImportStep { text: text.to_string(), mode: read_mode(v)? })
         }
         "solid" => {
             let shape = field(v, "shape", "a solid")?.as_str().unwrap_or("");

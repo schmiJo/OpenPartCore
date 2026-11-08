@@ -711,6 +711,20 @@ impl Spline {
     /// turned too far to stay a graph. Straight stretches come out as lines, since a plane is the
     /// exact surface for them. Refuses a curve that stops dead, since it has no tangent there.
     pub fn face_pieces(&self) -> Result<Vec<FacePiece>> {
+        self.face_ranges()?
+            .into_iter()
+            .map(|(a, b, line)| {
+                if line {
+                    Ok(FacePiece::Line(self.eval(a), self.eval(b)))
+                } else {
+                    Ok(FacePiece::Curve(self.sub(a, b)?))
+                }
+            })
+            .collect()
+    }
+
+    /// The parameter ranges of [`Spline::face_pieces`], with whether each is straight.
+    pub fn face_ranges(&self) -> Result<Vec<(f64, f64, bool)>> {
         // Stretches over which the tangent's direction is certainly within a small cone.
         struct Stretch {
             t0: f64,
@@ -794,16 +808,7 @@ impl Spline {
             }
         }
         pieces.push((start, stretches[stretches.len() - 1].t1, is_straight));
-        pieces
-            .into_iter()
-            .map(|(a, b, line)| {
-                if line {
-                    Ok(FacePiece::Line(self.eval(a), self.eval(b)))
-                } else {
-                    Ok(FacePiece::Curve(self.sub(a, b)?))
-                }
-            })
-            .collect()
+        Ok(pieces)
     }
 
     /// Points along the curve, for checking whether an outline crosses itself. They get closer and closer

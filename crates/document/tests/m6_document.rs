@@ -977,3 +977,32 @@ fn offset_shell_and_draft_work_as_features_and_follow_dimensions() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn an_imported_step_file_is_a_feature_like_any_other() {
+    // A block, written out, read back as the first feature, with a hole cut in it by name.
+    let block = coreshape::box_solid(&Frame::WORLD, 30.0, 20.0, 10.0, 1).unwrap();
+    let text = coreshape::export::step::write_step(&block, "block");
+    let mut doc = Document::new();
+    let part = doc.with(Op::ImportStep { text, mode: Mode::Add });
+    let s = doc.with(Op::sketch(Placement::xy(-1.0), vec![Region::new(Shape::circle(15.0, 10.0, 4.0))]));
+    doc.with(Op::extrude(s, 0.0, 12.0, Mode::Remove));
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    let want = 6000.0 - PI * 16.0 * 10.0;
+    assert!((vol(&o) - want).abs() < 1e-9, "{} vs {want}", vol(&o));
+    let body = o.body.as_ref().unwrap();
+    assert!(body.faces.iter().any(|f| f.tag.feature == part.0), "its faces are named for the feature");
+    // It saves with the document, and comes back the same.
+    let mut back = Document::load_text(&doc.save_text()).unwrap();
+    let o = back.rebuild(None);
+    assert!((vol(&o) - want).abs() < 1e-9, "{}", vol(&o));
+    // A file it can't read fails the feature, and says why.
+    let mut bad = Document::new();
+    bad.with(Op::ImportStep { text: "not a file".into(), mode: Mode::Add });
+    let o = bad.rebuild(None);
+    match &o.steps[0].state {
+        StepState::Failed(why) => assert!(why.contains("STEP"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}

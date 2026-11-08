@@ -33,7 +33,7 @@ fn boundary_points(body: &Body, face: &Face) -> Vec<Vec3> {
 }
 
 /// Whether these points, all on one surface, fit within a single face's limits.
-fn within_half_turn(surface: &Surface, points: &[Vec3]) -> bool {
+pub(crate) fn within_half_turn(surface: &Surface, points: &[Vec3]) -> bool {
     let span = |angles: &[f64]| {
         let centre = angular_center(angles);
         angles.iter().map(|a| wrap_pi(a - centre).abs()).fold(0.0, f64::max)

@@ -20,6 +20,7 @@ It runs natively and in the browser through WebAssembly.
   redundant and conflicting constraints, supports dragging, and is fast enough for every mouse
   move. Checked against FreeCAD's PlaneGCS: see [docs/SKETCH_SOLVER.md](docs/SKETCH_SOLVER.md).
 - **Output:** exact volume and area, a watertight mesh, STL and STEP, and offscreen PNG images.
+- **Input:** STEP files with analytic surfaces and swept curves. Anything else is refused by name.
 - **For agents:** an MCP server for building, editing and inspecting parts by stable names. See
   [docs/MCP.md](docs/MCP.md).
 
@@ -41,6 +42,7 @@ cargo run --release -p coreshape-wasm --example scan -- 150      # random slider
 python3 scripts/build_web.py                 # build the viewer into dist/
 python3 scripts/selftest_web.py              # drive it in headless Chrome
 scripts/check_step.sh /tmp/step-check        # read every model's STEP file in OpenCASCADE
+scripts/check_step_import.sh /tmp/step-in    # read files OpenCASCADE wrote, and send the results back
 
 cargo run --release -p coreshape-sketch --example fuzz -- 5000     # randomized sketches, with a report
 cargo run --release -p coreshape-sketch --example bench            # solver speed
@@ -105,6 +107,8 @@ The file format is described in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
 | `crates/kernel/src/mass.rs` | Volume and area from the B-rep through Green's theorem |
 | `crates/kernel/src/tess/` | Exact-predicate triangulator and meshing |
 | `crates/kernel/src/export/` | STL and STEP |
+| `crates/kernel/src/import/` | STEP, analytic surfaces and swept curves |
+| `crates/kernel/src/spline.rs` | Rational B-splines, with a certified closest point |
 | `crates/kernel/src/fuzz.rs` | Replayable randomized Boolean testing |
 | `crates/sketch/` | The constraint solver, with expressions and JSON. Knows nothing about the kernel |
 | `crates/document/` | Parameters, features, rebuilding and the file format, joining the kernel and solver |

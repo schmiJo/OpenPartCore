@@ -26,7 +26,7 @@ oracle, through a neighbouring FreeCAD build, read-only.
 - Fillets cover straight and circular edges, plus sphere patches at convex three-edge corners.
   A radius that would swallow a neighbouring face is an error.
 - Sketches are explicitly dimensioned profiles. There is no constraint solver.
-- STEP is export only.
+- STEP import reads analytic surfaces and swept curves. Free-form surfaces and assemblies are refused.
 - Two bodies touching only along an edge or at a point become a valid manifold result with
   duplicated topology. `Body::contact_vertices` reports it.
 
@@ -57,6 +57,7 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| STEP import | `coreshape_document::Op` gained `ImportStep` | An exhaustive `match` needs the new arm |
 | Document shapes | `coreshape_document::Shape` gained `Ellipse` and `Move` gained `Spline` | An exhaustive `match` needs the new arms |
 | Sketch splines | `Geometry`, `SegKind` and `coreshape_sketch::Seg` are no longer `Copy`. `Geometry` gained `Spline`, `SegKind` gained `Spline`, and `Part` gained `Control` | Clone them, or match on a reference. An exhaustive `match` needs the new arms. Existing sketch JSON is unchanged |
 | Ellipses | `Geometry` gained `Ellipse` and `EllipticalArc`, `SegKind` gained `Ellipse`, `Part` gained `Major`, and `Rule` gained `MajorRadius` and `MinorRadius` | An exhaustive `match` needs the new arms. Existing sketch JSON is unchanged. A region's loop can now hold an ellipse, which `profiles_from_regions` handles |
@@ -81,5 +82,5 @@ From OpenShape's list, in its order:
 3. Ellipses and elliptical arcs in the solver, regions and kernel profiles: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 4. Splines in sketches, extruded and revolved: done, see [NURBS_DESIGN.md](NURBS_DESIGN.md). OpenShape also wants lofts and free-form surfaces from
    imported files. Both are phase 3 of that note, which isn't decided yet.
-5. STEP import: analytic surfaces first, refusing anything else and naming the surface type.
+5. STEP import of analytic surfaces and swept curves: done, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). It refuses anything else, naming the surface type. Assemblies come next there.
 6. Modelling: offset, shell and draft that survive topology changes, helix, loft, delete face and thicken.

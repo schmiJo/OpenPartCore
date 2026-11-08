@@ -49,7 +49,7 @@ fn moved_surface(s: &Surface, d: f64) -> Result<Surface> {
 /// The new position of a vertex: nearest to where it was, on all the surfaces given. Each pass
 /// takes the smallest step that meets all of them to first order, skipping any whose normal adds nothing,
 /// as a tangent neighbour's doesn't.
-fn point_on_surfaces(surfaces: &[Surface], start: Vec3) -> Option<Vec3> {
+pub(crate) fn point_on_surfaces(surfaces: &[Surface], start: Vec3) -> Option<Vec3> {
     let mut p = start;
     for _ in 0..40 {
         // Gram-Schmidt on the normals, carrying the right-hand sides along.

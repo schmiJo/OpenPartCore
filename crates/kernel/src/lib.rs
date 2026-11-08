@@ -16,6 +16,7 @@ pub mod error;
 pub mod export;
 pub mod fuzz;
 pub mod hash;
+pub mod import;
 pub mod mass;
 pub mod math;
 pub mod multi;

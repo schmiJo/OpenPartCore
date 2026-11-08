@@ -56,6 +56,18 @@ reported volume is 1.8e-4 and 1.6e-4 above this kernel's. Its own numbers settle
 of OpenCASCADE's own edges gives a cap area of 812.6155, and this kernel's is 812.6155, while its `Area` for that face says 812.9296. A mesh of the solid made by OpenCASCADE
 has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
 
+## STEP import
+
+`coreshape::import::step::read_step`, or the `import_step` feature. It reads closed solids on planes, cylinders, cones, spheres, tori, and curves swept along a line or around an axis, in millimetres, metres, inches and so on.
+
+- **Refused, naming the surface and how many faces use it:** any other surface, such as `B_SPLINE_SURFACE`, so that no result has faces missing. That's free-form surfaces, which is phase 3 of [NURBS_DESIGN.md](NURBS_DESIGN.md).
+- **Refused:** assemblies, since parts placed by transforms aren't read yet; open shells; any other edge curve, such as a hyperbola; a vertex over 1e-3 mm off the surfaces around it; a surface of revolution whose curve turns too far for one face, which an extrusion's curve can do because it gets cut up.
+- **Faces change shape on the way in.** This kernel's edges have two different ends and its curved faces stay within half a turn, so a seamed full cylinder comes in as two halves under one name, and so on. Volumes and areas don't change.
+- **Traced edges.** A B-spline edge between two surfaces, which is how other systems store an intersection curve, gets resampled onto both surfaces, so it follows them to this kernel's tolerance and not the file's. That's why `tee` and `cross_drilled` differ from OpenCASCADE by about 1e-6 relative.
+- **A file's orientation flags aren't trusted.** OpenCASCADE writes `FACE_BOUND` flags that its own reader repairs by looking at the shape, so this works out each loop's direction from its neighbours, and from a flat face to set the sign.
+
+**Checked** by `scripts/check_step_import.sh`, which has OpenCASCADE write 22 shapes, then reads each, compares volume and area, meshes it, cuts a box out of it, writes it back, and has OpenCASCADE check the result. All 21 that can be represented match, with volumes within 2.2e-6 relative and most about 1e-13, watertight meshes, and results valid in OpenCASCADE. The one free-form loft is refused by name. 3,000 randomly damaged files were each read as a valid solid or refused, with no panics, and everything this kernel writes comes back the same. Other writers than OpenCASCADE haven't been tried.
+
 ## Spline surfaces
 
 Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.md).
