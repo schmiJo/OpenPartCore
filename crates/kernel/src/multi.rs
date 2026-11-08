@@ -172,6 +172,10 @@ fn mapped(wire: &Wire, m: [[f64; 2]; 2], offset: Vec2) -> Wire {
                         let start = turn(a0.cos(), a0.sin());
                         SegGeom::Arc { center: at(center), radius, a0: start, a1: start + sense * (a1 - a0) }
                     }
+                    SegGeom::Spline(ref c) => SegGeom::Spline(std::sync::Arc::new(c.mapped(|p| {
+                        let q = at(v2(p.x, p.y));
+                        v3(q.x, q.y, p.z)
+                    }))),
                 };
                 Seg { geom, id: s.id }
             })

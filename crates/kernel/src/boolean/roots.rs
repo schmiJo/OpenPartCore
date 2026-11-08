@@ -24,6 +24,7 @@ fn curve_feature(curve: &Curve) -> f64 {
         Curve::Circle { radius, .. } => *radius,
         Curve::Ellipse { major, minor, .. } => minor * minor / major,
         Curve::Sampled(c) => c.speed_bound() * 2.5,
+        Curve::Spline(s) => s.min_radius(),
     }
 }
 
@@ -36,6 +37,11 @@ fn surface_feature(s: &Surface, p: Vec3) -> f64 {
             l.x.hypot(l.y).max(1e-3)
         }
         Surface::Torus { minor, .. } => minor,
+        Surface::Extruded { ref curve, .. } => curve.min_radius(),
+        Surface::Revolved { frame, ref curve } => {
+            let l = frame.to_local(p);
+            curve.min_radius().min(l.x.hypot(l.y).max(1e-3))
+        }
     }
 }
 

@@ -41,8 +41,8 @@ fn within_half_turn(surface: &Surface, points: &[Vec3]) -> bool {
     let limit = PI / 2.0 + 1e-6;
     let frame = surface.frame();
     match *surface {
-        Surface::Plane(_) => true,
-        Surface::Cylinder { .. } | Surface::Cone { .. } => {
+        Surface::Plane(_) | Surface::Extruded { .. } => true,
+        Surface::Cylinder { .. } | Surface::Cone { .. } | Surface::Revolved { .. } => {
             let us: Vec<f64> = points
                 .iter()
                 .filter_map(|&p| {
@@ -106,7 +106,7 @@ fn merge_faces(body: Body) -> Result<Body> {
             continue;
         }
         let (fa, fb) = (&body.faces[a.0], &body.faces[b.0]);
-        if coincident(&fa.surface, &fb.surface, size).is_none() {
+        if coincident(&fa.surface, &fb.surface, size).is_none() || !one_surface_fits_both(&fa.surface, &fb.surface) {
             continue;
         }
         let mid = body.edges[ei].eval_mid();
@@ -161,16 +161,27 @@ fn merge_faces(body: Body) -> Result<Body> {
         let chart = body.fit_face_chart(&lead.surface, lead.flipped, &all_loops);
         let fc = FaceChart { surface: &lead.surface, chart: &chart, flipped: lead.flipped };
         for loops in trace_faces(&fc, &body.edges, &body.vertices, &half)? {
-            out.add_face(lead.surface, lead.flipped, loops, tag);
+            out.add_face(lead.surface.clone(), lead.flipped, loops, tag);
         }
     }
     out.compute_shells();
     Ok(out)
 }
 
+/// A swept curve exists only along its curve. So a piece of one can coincide with a true cylinder, or with
+/// another piece, without being able to describe the other's face. Merged faces need the same curve.
+fn one_surface_fits_both(a: &Surface, b: &Surface) -> bool {
+    match (a, b) {
+        (Surface::Extruded { curve: c, .. }, Surface::Extruded { curve: d, .. }) | (Surface::Revolved { curve: c, .. }, Surface::Revolved { curve: d, .. }) => c == d,
+        (Surface::Extruded { .. } | Surface::Revolved { .. }, _) | (_, Surface::Extruded { .. } | Surface::Revolved { .. }) => false,
+        _ => true,
+    }
+}
+
 /// Whether two edges lie on the same curve, so they can become one.
 fn same_curve(a: &Edge, b: &Edge) -> bool {
     match (&a.curve, &b.curve) {
+        (Curve::Spline(x), Curve::Spline(y)) => x == y,
         (Curve::Line { origin, dir }, Curve::Line { origin: o2, dir: d2 }) => {
             let d = *o2 - *origin;
             dir.cross(*d2).norm() < 1e-9 && (d - *dir * d.dot(*dir)).norm() <= TOL

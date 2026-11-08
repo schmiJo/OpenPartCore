@@ -290,7 +290,7 @@ impl Body {
         // A ruled surface reaches its extremes on the boundary. Spheres and tori
         // can bulge past it, so bound the interior through the chart: 3D distance
         // never exceeds chart distance.
-        if matches!(face.surface, Surface::Sphere { .. } | Surface::Torus { .. }) {
+        if matches!(face.surface, Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolved { .. }) {
             let (lo, hi) = self.face_chart_bounds(f);
             let n = 8;
             let (dx, dy) = ((hi.x - lo.x) / n as f64, (hi.y - lo.y) / n as f64);

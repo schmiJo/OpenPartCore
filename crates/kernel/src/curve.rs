@@ -3,6 +3,7 @@
 //! samples that are snapped back onto both defining surfaces on evaluation.
 
 use crate::math::*;
+use crate::spline::Spline;
 use crate::surface::{refine_on_two, Surface};
 use std::sync::Arc;
 
@@ -16,6 +17,8 @@ pub enum Curve {
     Ellipse { frame: Frame, major: f64, minor: f64 },
     /// `t` runs over `[0, n-1]`, one unit per sample.
     Sampled(Arc<SampledCurve>),
+    /// A rational B-spline, exact. `t` is the spline's own parameter.
+    Spline(Arc<Spline>),
 }
 
 /// An intersection curve between two surfaces, held as samples on both.
@@ -91,6 +94,7 @@ impl Curve {
                 frame.origin + frame.x * (major * c) + frame.y * (minor * s)
             }
             Curve::Sampled(c) => c.eval(t),
+            Curve::Spline(s) => s.eval(t),
         }
     }
 
@@ -107,6 +111,7 @@ impl Curve {
                 frame.y * (minor * c) - frame.x * (major * s)
             }
             Curve::Sampled(c) => c.derivative(t),
+            Curve::Spline(s) => s.derivative(t),
         }
     }
 
@@ -117,6 +122,7 @@ impl Curve {
             Curve::Circle { radius, .. } => *radius,
             Curve::Ellipse { major, .. } => *major,
             Curve::Sampled(c) => c.speed_bound(),
+            Curve::Spline(s) => s.speed_bound(),
         }
     }
 
@@ -187,6 +193,7 @@ impl Curve {
                 }
                 result
             }
+            Curve::Spline(s) => s.closest(p, t0, t1),
         }
     }
 
@@ -202,6 +209,7 @@ impl Curve {
                 tangents: c.tangents.iter().map(|d| m.of_dir(*d)).collect(),
                 surfaces: (c.surfaces.0.mirrored(m), c.surfaces.1.mirrored(m)),
             })),
+            Curve::Spline(s) => Curve::Spline(Arc::new(s.mapped(|p| m.of_point(p)))),
         }
     }
 
@@ -217,6 +225,7 @@ impl Curve {
                 tangents: c.tangents.iter().map(|d| t.dir_to_world(*d)).collect(),
                 surfaces: (c.surfaces.0.transformed(t), c.surfaces.1.transformed(t)),
             })),
+            Curve::Spline(s) => Curve::Spline(Arc::new(s.mapped(|p| t.to_world(p)))),
         }
     }
 }

@@ -1,4 +1,5 @@
-//! The five analytic surfaces, each with three things every algorithm relies on:
+//! The surfaces: five analytic ones, and curves swept along a line or around an axis. Each has three
+//! things every algorithm relies on:
 //!
 //! * an exact **signed distance** (`sdf`). It is 1-Lipschitz in 3D, so a value
 //!   of `d` at a point proves there is no surface within distance `d`. Root
@@ -10,10 +11,15 @@
 //!
 //! Charts are right handed with respect to the surface normal, and 3D distance
 //! never exceeds chart distance. Algorithms depend on both properties.
+//!
+//! A swept curve keeps all three because its distance is a distance in the plane: to the curve itself,
+//! which `crate::spline` finds with certainty. See that module for why it's a true distance.
 
 use crate::math::*;
+use crate::spline::PlaneCurve;
+use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
     /// Normal is `frame.z`.
     Plane(Frame),
@@ -32,11 +38,19 @@ pub enum Surface {
     /// the surface ends in a tip on the axis at each end. A rolling ball makes one when
     /// its radius exceeds the radius of the rim it follows.
     Torus { frame: Frame, major: f64, minor: f64 },
+    /// A curve in the frame's XY plane, swept along `frame.z`. Normal is to the right of the curve's
+    /// direction of travel.
+    Extruded { frame: Frame, curve: Arc<PlaneCurve> },
+    /// A curve swept around `frame.z`, its x being the distance from the axis and its y the height along
+    /// it. Normal is to the right of the curve's direction of travel in that half-plane. The curve may end
+    /// on the axis, and only there.
+    Revolved { frame: Frame, curve: Arc<PlaneCurve> },
 }
 
 /// Per-face chart parameters. Only some fields apply to each surface: `u0` and
 /// `v0` are the centres of the angular ranges, and `frame` is the stereographic
-/// frame on a sphere.
+/// frame on a sphere. On a revolved curve, `v0` says which end of it is on the axis: 1 for its start,
+/// -1 for its end, 0 for neither.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Chart {
     pub u0: f64,
@@ -57,7 +71,9 @@ impl Surface {
             | Surface::Cylinder { frame, .. }
             | Surface::Cone { frame, .. }
             | Surface::Sphere { frame, .. }
-            | Surface::Torus { frame, .. } => frame,
+            | Surface::Torus { frame, .. }
+            | Surface::Extruded { frame, .. }
+            | Surface::Revolved { frame, .. } => frame,
         }
     }
 
@@ -68,12 +84,19 @@ impl Surface {
             Surface::Cone { .. } => "cone",
             Surface::Sphere { .. } => "sphere",
             Surface::Torus { .. } => "torus",
+            Surface::Extruded { .. } => "extrusion",
+            Surface::Revolved { .. } => "revolution",
         }
     }
 
     /// Signed distance, positive on the side the normal points to.
     pub fn sdf(&self, p: Vec3) -> f64 {
         let l = self.frame().to_local(p);
+        match self {
+            Surface::Extruded { curve, .. } => return curve.signed_distance(v2(l.x, l.y)),
+            Surface::Revolved { curve, .. } => return curve.signed_distance(v2(l.x.hypot(l.y), l.z)),
+            _ => {}
+        }
         match *self {
             Surface::Plane(_) => l.z,
             Surface::Cylinder { radius, .. } => l.x.hypot(l.y) - radius,
@@ -87,6 +110,7 @@ impl Surface {
             }
             Surface::Sphere { radius, .. } => l.norm() - radius,
             Surface::Torus { major, minor, .. } => (l.x.hypot(l.y) - major).hypot(l.z) - minor,
+            Surface::Extruded { .. } | Surface::Revolved { .. } => unreachable!(),
         }
     }
 
@@ -129,11 +153,34 @@ impl Surface {
                     radial(l.x, l.y) * (a / n) + f.z * (b / n)
                 }
             }
+            Surface::Extruded { ref curve, .. } => {
+                let n = curve.foot(v2(l.x, l.y)).tangent.right();
+                f.x * n.x + f.y * n.y
+            }
+            Surface::Revolved { ref curve, .. } => {
+                let n = curve.foot(v2(l.x.hypot(l.y), l.z)).tangent.right();
+                radial(l.x, l.y) * n.x + f.z * n.y
+            }
         }
     }
 
     /// Closest point on the surface, for points near it.
     pub fn project(&self, p: Vec3) -> Vec3 {
+        let f = self.frame();
+        let l = f.to_local(p);
+        match self {
+            Surface::Extruded { curve, .. } => {
+                let at = curve.foot(v2(l.x, l.y)).at;
+                return f.point(at.x, at.y, l.z);
+            }
+            Surface::Revolved { curve, .. } => {
+                let rho = l.x.hypot(l.y);
+                let at = curve.foot(v2(rho, l.z)).at;
+                let radial = if rho > 1e-300 { f.x * (l.x / rho) + f.y * (l.y / rho) } else { f.x };
+                return f.origin + radial * at.x + f.z * at.y;
+            }
+            _ => {}
+        }
         p - self.normal(p) * self.sdf(p)
     }
 
@@ -141,7 +188,7 @@ impl Surface {
     /// symmetric about every line through its centre and returns `None`.
     pub fn axis(&self) -> Option<(Vec3, Vec3)> {
         match self {
-            Surface::Cylinder { frame, .. } | Surface::Cone { frame, .. } | Surface::Torus { frame, .. } => {
+            Surface::Cylinder { frame, .. } | Surface::Cone { frame, .. } | Surface::Torus { frame, .. } | Surface::Revolved { frame, .. } => {
                 Some((frame.origin, frame.z))
             }
             _ => None,
@@ -220,6 +267,25 @@ impl Surface {
                 };
                 chart.frame = Frame::new(f.origin, c, c.any_perpendicular());
             }
+            Surface::Extruded { .. } => {}
+            Surface::Revolved { ref curve, .. } => {
+                let us: Vec<f64> = points
+                    .iter()
+                    .filter_map(|&p| {
+                        let l = f.to_local(p);
+                        (l.x.hypot(l.y) > 1e-9).then(|| l.y.atan2(l.x))
+                    })
+                    .collect();
+                chart.u0 = angular_center(&us);
+                let (t0, t1) = curve.spline.domain();
+                chart.v0 = if curve.eval(t0).x.abs() <= TOL {
+                    1.0
+                } else if curve.eval(t1).x.abs() <= TOL {
+                    -1.0
+                } else {
+                    0.0
+                };
+            }
         }
         chart
     }
@@ -267,6 +333,24 @@ impl Surface {
                     (major + minor) * wrap_pi(l.y.atan2(l.x) - ch.u0),
                     minor * wrap_pi(l.z.atan2(l.x.hypot(l.y) - major) - ch.v0),
                 )
+            }
+            Surface::Extruded { ref curve, .. } => {
+                let l = f.to_local(p);
+                v2(curve.foot(v2(l.x, l.y)).t * curve.speed, l.z)
+            }
+            Surface::Revolved { ref curve, .. } => {
+                let l = f.to_local(p);
+                let rho = l.x.hypot(l.y);
+                let t = curve.foot(v2(rho, l.z)).t;
+                let phi = if rho > 1e-300 { wrap_pi(l.y.atan2(l.x) - ch.u0) } else { 0.0 };
+                if ch.v0 == 0.0 {
+                    return v2(curve.reach * phi, curve.speed * t);
+                }
+                // Polar about the tip, so that it's one ordinary point of the chart. The chart stays
+                // right handed by mirroring when the curve runs away from the tip.
+                let (t0, t1) = curve.spline.domain();
+                let distance = (curve.speed * if ch.v0 > 0.0 { t - t0 } else { t1 - t }).max(0.0);
+                v2(distance * phi.cos(), -ch.v0 * distance * phi.sin())
             }
         }
     }
@@ -346,6 +430,38 @@ impl Surface {
                 let rho = major + minor * cv;
                 (f.origin + radial * rho + f.z * (minor * sv), theta * (rho / (major + minor)), radial * -sv + f.z * cv)
             }
+            Surface::Extruded { ref curve, .. } => {
+                let t = uv.x / curve.speed;
+                let (at, d) = (curve.eval(t), curve.derivative(t) / curve.speed);
+                (f.point(at.x, at.y, uv.y), f.x * d.x + f.y * d.y, f.z)
+            }
+            Surface::Revolved { ref curve, .. } if ch.v0 == 0.0 => {
+                let t = uv.y / curve.speed;
+                let (su, cu) = (ch.u0 + uv.x / curve.reach).sin_cos();
+                let radial = f.x * cu + f.y * su;
+                let theta = f.y * cu - f.x * su;
+                let (at, d) = (curve.eval(t), curve.derivative(t) / curve.speed);
+                (f.origin + radial * at.x + f.z * at.y, theta * (at.x / curve.reach), radial * d.x + f.z * d.y)
+            }
+            Surface::Revolved { ref curve, .. } => {
+                let (t0, t1) = curve.spline.domain();
+                let distance = uv.x.hypot(uv.y);
+                let mirror = -ch.v0;
+                let phi = if distance > 1e-300 { (mirror * uv.y).atan2(uv.x) } else { 0.0 };
+                let t = if ch.v0 > 0.0 { t0 + distance / curve.speed } else { t1 - distance / curve.speed };
+                let (su, cu) = (ch.u0 + phi).sin_cos();
+                let radial = f.x * cu + f.y * su;
+                let theta = f.y * cu - f.x * su;
+                let (at, d) = (curve.eval(t), curve.derivative(t) / curve.speed);
+                // Moving away from the tip along the curve, and turning about the axis.
+                let meridian = (radial * d.x + f.z * d.y) * ch.v0;
+                let (ux, uy, spread) = if distance > 1e-12 {
+                    (uv.x / distance, uv.y / distance, at.x / distance)
+                } else {
+                    (1.0, 0.0, d.x.abs())
+                };
+                (f.origin + radial * at.x + f.z * at.y, meridian * ux + theta * (-mirror * uy * spread), meridian * uy + theta * (mirror * ux * spread))
+            }
         }
     }
 
@@ -354,6 +470,13 @@ impl Surface {
     /// image's normal is the reflection of the original's.
     pub fn mirrored(&self, m: &Mirror) -> Surface {
         match *self {
+            // The sweep direction turns over, which keeps the normal on the right of the mirrored curve
+            // the reflection of the original normal. x and y reflect, so the curve keeps its coordinates.
+            Surface::Extruded { frame, ref curve } => Surface::Extruded {
+                frame: Frame { origin: m.of_point(frame.origin), x: m.of_dir(frame.x), y: m.of_dir(frame.y), z: -m.of_dir(frame.z) },
+                curve: curve.clone(),
+            },
+            Surface::Revolved { frame, ref curve } => Surface::Revolved { frame: m.of_surface_frame(&frame), curve: curve.clone() },
             Surface::Plane(f) => Surface::Plane(m.of_surface_frame(&f)),
             Surface::Cylinder { frame, radius } => Surface::Cylinder { frame: m.of_surface_frame(&frame), radius },
             Surface::Cone { frame, radius, half_angle } => Surface::Cone { frame: m.of_surface_frame(&frame), radius, half_angle },
@@ -371,6 +494,8 @@ impl Surface {
             }
             Surface::Sphere { frame, radius } => Surface::Sphere { frame: t.compose(&frame), radius },
             Surface::Torus { frame, major, minor } => Surface::Torus { frame: t.compose(&frame), major, minor },
+            Surface::Extruded { frame, ref curve } => Surface::Extruded { frame: t.compose(&frame), curve: curve.clone() },
+            Surface::Revolved { frame, ref curve } => Surface::Revolved { frame: t.compose(&frame), curve: curve.clone() },
         }
     }
 }
@@ -411,7 +536,16 @@ mod tests {
             Surface::Cone { frame: f, radius: 4.0, half_angle: 0.5 },
             Surface::Sphere { frame: f, radius: 4.0 },
             Surface::Torus { frame: f, major: 6.0, minor: 2.0 },
+            Surface::Extruded { frame: f, curve: swept_curve(0.0) },
+            Surface::Revolved { frame: f, curve: swept_curve(9.0) },
         ]
+    }
+
+    /// A curve around x = 4 + `shift`, running up the y axis direction, for sweeping.
+    fn swept_curve(shift: f64) -> Arc<PlaneCurve> {
+        let pts = [(4.5, -9.0), (3.6, -3.0), (4.4, 3.0), (3.8, 9.0)];
+        let spline = crate::spline::Spline::uniform(3, pts.iter().map(|p| v3(p.0 + shift, p.1, 0.0)).collect()).unwrap();
+        Arc::new(PlaneCurve::new(spline))
     }
 
     /// The lemon's chart is polar about its tip, in both the upper and lower lobe.
@@ -453,6 +587,17 @@ mod tests {
             // Keep to the positive side of the apex, and inside the half-angle.
             pts = pts.iter().map(|p| v2(p.x + 6.0, p.y)).collect();
         }
+        // On a swept curve, the chart runs along the curve's own parameter.
+        if let Surface::Extruded { curve, .. } = s {
+            let (t0, t1) = curve.spline.domain();
+            let mid = (t0 + t1) / 2.0 * curve.speed;
+            pts = pts.iter().map(|p| v2(mid + p.x, p.y)).collect();
+        }
+        if let Surface::Revolved { curve, .. } = s {
+            let (t0, t1) = curve.spline.domain();
+            let mid = (t0 + t1) / 2.0 * curve.speed;
+            pts = pts.iter().map(|p| v2(p.x, mid + p.y)).collect();
+        }
         let _ = ch;
         pts
     }
@@ -464,7 +609,7 @@ mod tests {
             let ch = s.fit_chart(&[s.project(probe)]);
             for uv in sample_chart_points(&s, &ch) {
                 let p = s.from_chart(&ch, uv);
-                assert!(s.sdf(p).abs() < 1e-12, "{} {:?} sdf={}", s.name(), uv, s.sdf(p));
+                assert!(s.sdf(p).abs() < 1e-10, "{} {:?} sdf={}", s.name(), uv, s.sdf(p));
                 let back = s.to_chart(&ch, p);
                 assert!(back.dist(uv) < 1e-9, "{} {:?} -> {:?}", s.name(), uv, back);
             }

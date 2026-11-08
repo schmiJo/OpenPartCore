@@ -7,10 +7,12 @@ use crate::curve::Curve;
 use crate::error::{Error, Result};
 use crate::math::*;
 use crate::profile::{Profile, Seg, SegGeom, Wire};
+use crate::spline::PlaneCurve;
 use crate::surface::Surface;
 use crate::topo::{Body, Coedge, FaceTag};
 use crate::validate::validate;
 use crate::hash::HashMap;
+use std::sync::Arc;
 
 pub const SLOT_START_CAP: u32 = 0;
 pub const SLOT_END_CAP: u32 = 1;
@@ -28,6 +30,10 @@ fn lift_seg(seg: &Seg, frame: &Frame, z: f64) -> (Curve, f64, f64) {
         SegGeom::Arc { center, radius, a0, a1 } => {
             let f = Frame { origin: frame.point(center.x, center.y, z), ..*frame };
             (Curve::Circle { frame: f, radius }, a0, a1)
+        }
+        SegGeom::Spline(ref c) => {
+            let (u0, u1) = c.domain();
+            (Curve::Spline(Arc::new(c.mapped(|p| frame.point(p.x, p.y, z)))), u0, u1)
         }
     }
 }
@@ -108,6 +114,8 @@ pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> R
                     // outward normal is the radial direction.
                     (Surface::Cylinder { frame: f, radius }, a1 < a0)
                 }
+                // Outward is to the right of travel, which is the surface's normal by definition.
+                SegGeom::Spline(ref c) => (Surface::Extruded { frame, curve: Arc::new(PlaneCurve::new((**c).clone())) }, false),
             };
             body.add_face(
                 surface,
@@ -144,11 +152,19 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
     let angle = if full { TAU } else { angle };
     let steps: usize = if full || angle > PI + 1e-9 { 2 } else { 1 };
     let f = *frame;
-    let wires = profile.wires_for_faces();
+    let wires = wires_for_revolving(profile)?;
 
     // Every wire must stay on the positive side of the axis.
     for w in &wires {
         for s in &w.segs {
+            if let SegGeom::Spline(ref c) = s.geom {
+                // Its ends may be on the axis, but a surface pinched in the middle has no single chart.
+                let line = c.polyline(16);
+                let inner = &line[1..line.len() - 1];
+                if inner.iter().any(|p| p.x <= TOL) {
+                    return Err(Error::InvalidProfile("a spline in a revolved profile can only touch the axis at its ends".into()));
+                }
+            }
             for i in 0..=32 {
                 if s.at(i as f64 / 32.0).x < -TOL {
                     return Err(Error::InvalidProfile("profile crosses the revolve axis".into()));
@@ -224,6 +240,11 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
                 let frame = Frame { origin: f.origin + r * center.x + f.z * center.y, x: r, y: f.z, z: r.cross(f.z) };
                 body.add_edge(Curve::Circle { frame, radius }, a0, a1, a, b)
             }
+            SegGeom::Spline(ref c) => {
+                let (u0, u1) = c.domain();
+                let lifted = c.mapped(|p| f.origin + r * p.x + f.z * p.y);
+                body.add_edge(Curve::Spline(Arc::new(lifted)), u0, u1, a, b)
+            }
         };
         cache.insert(key, c);
         c
@@ -236,7 +257,7 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
     for (w, wire) in wires.iter().enumerate() {
         let n = wire.segs.len();
         for i in 0..n {
-            let seg = wire.segs[i];
+            let seg = wire.segs[i].clone();
             if is_on_axis(&seg) {
                 continue;
             }
@@ -322,7 +343,7 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
                     lp.push(
                         meridian(&mut body, &mut meridians, &vertex_ids, &f, sweep_angle(k), (w, i, k), wire).flipped(),
                     );
-                    body.add_face(surface, flipped, vec![lp], tag(SLOT_SEG_BASE + seg.id));
+                    body.add_face(surface.clone(), flipped, vec![lp], tag(SLOT_SEG_BASE + seg.id));
                 }
             }
         }
@@ -331,10 +352,10 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
             let mut start = Vec::with_capacity(n);
             let mut end = Vec::with_capacity(n);
             for i in 0..n {
-                let seg = wire.segs[i];
-                let key0 = (w, i, on_axis_key(0, &seg));
-                let key1 = (w, i, on_axis_key(steps, &seg));
-                let phi1 = if is_on_axis(&seg) { 0.0 } else { sweep_angle(steps) };
+                let seg = &wire.segs[i];
+                let key0 = (w, i, on_axis_key(0, seg));
+                let key1 = (w, i, on_axis_key(steps, seg));
+                let phi1 = if is_on_axis(seg) { 0.0 } else { sweep_angle(steps) };
                 start.push(meridian(&mut body, &mut meridians, &vertex_ids, &f, 0.0, key0, wire));
                 end.push(meridian(&mut body, &mut meridians, &vertex_ids, &f, phi1, key1, wire).flipped());
             }
@@ -359,9 +380,34 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
     Ok(body)
 }
 
+/// A profile's wires ready to revolve. A spline with both ends on the axis is cut in two, since the
+/// chart of a revolved face is polar about one tip and so can only hold one.
+fn wires_for_revolving(profile: &Profile) -> Result<Vec<Wire>> {
+    let mut wires = profile.wires_for_faces();
+    for wire in &mut wires {
+        let mut segs = Vec::with_capacity(wire.segs.len());
+        for s in wire.segs.drain(..) {
+            if let SegGeom::Spline(ref c) = s.geom {
+                if c.start().x.abs() <= TOL && c.end().x.abs() <= TOL {
+                    let (u0, u1) = c.domain();
+                    let mid = (u0 + u1) / 2.0;
+                    for part in [c.sub(u0, mid)?, c.sub(mid, u1)?] {
+                        segs.push(Seg { geom: SegGeom::Spline(Arc::new(part)), id: s.id });
+                    }
+                    continue;
+                }
+            }
+            segs.push(s);
+        }
+        wire.segs = segs;
+    }
+    Ok(wires)
+}
+
 /// The surface swept by a profile segment revolving about `f.z`.
 fn surface_of_seg(seg: &Seg, f: &Frame) -> Surface {
     match seg.geom {
+        SegGeom::Spline(ref c) => Surface::Revolved { frame: *f, curve: Arc::new(PlaneCurve::new((**c).clone())) },
         SegGeom::Line { a, b } => {
             let (dr, dz) = (b.x - a.x, b.y - a.y);
             if dz.abs() < TOL {

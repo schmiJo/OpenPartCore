@@ -10,9 +10,11 @@
 //! the faces. Its output is refined onto both surfaces, and it gives up with an
 //! error at tangencies rather than returning a wrong topology.
 
+use super::roots::{curve_surface_contact, Contact};
 use crate::curve::{Curve, SampledCurve};
 use crate::error::{Error, Result};
 use crate::math::*;
+use crate::spline::PlaneCurve;
 use crate::surface::{refine_on_two, Chart, Surface};
 use crate::hash::HashMap;
 use std::sync::Arc;
@@ -35,6 +37,9 @@ pub enum Ssi {
     Curves { curves: Vec<SsiCurve>, crossings: Vec<Vec3> },
     /// No closed form applies. Use the contour tracer.
     General,
+    /// Two surfaces run together over a stretch but aren't the same surface, as two splines sharing
+    /// part of their length do. This point is on that stretch.
+    PartlyCoincident { at: Vec3 },
 }
 
 fn empty() -> Ssi {
@@ -57,11 +62,21 @@ fn parallel(a: Vec3, b: Vec3, size: f64) -> bool {
     a.cross(b).norm() * size.max(1.0) <= TOL
 }
 
+/// Whether a swept curve's whole length lies on a surface, and if so whether their normals agree there.
+fn swept_on(lift: &dyn Fn(Vec2) -> Vec3, curve: &PlaneCurve, own: &Surface, other: &Surface) -> Option<bool> {
+    let samples = curve.samples();
+    if !samples.iter().all(|&q| other.sdf(lift(q)).abs() <= TOL) {
+        return None;
+    }
+    let p = lift(samples[samples.len() / 2]);
+    Some(own.normal(p).dot(other.normal(p)) > 0.0)
+}
+
 /// Whether two surfaces are the same within tolerance over a region of this size.
 pub fn coincident(a: &Surface, b: &Surface, size: f64) -> Option<bool> {
     let close = |x: f64, y: f64| (x - y).abs() <= TOL;
-    match (*a, *b) {
-        (Surface::Plane(f), Surface::Plane(g)) => {
+    match (a, b) {
+        (&Surface::Plane(f), &Surface::Plane(g)) => {
             if parallel(f.z, g.z, size)
                 && (f.origin - g.origin).dot(g.z).abs() <= TOL
                 && (g.origin - f.origin).dot(f.z).abs() <= TOL
@@ -71,22 +86,53 @@ pub fn coincident(a: &Surface, b: &Surface, size: f64) -> Option<bool> {
                 None
             }
         }
-        (Surface::Cylinder { frame: f, radius: r }, Surface::Cylinder { frame: g, radius: s }) => {
+        (&Surface::Cylinder { frame: f, radius: r }, &Surface::Cylinder { frame: g, radius: s }) => {
             let d = g.origin - f.origin;
             (close(r, s) && parallel(f.z, g.z, size) && (d - f.z * d.dot(f.z)).norm() <= TOL).then_some(true)
         }
-        (Surface::Cone { frame: f, half_angle: x, .. }, Surface::Cone { frame: g, half_angle: y, .. }) => {
+        (&Surface::Cone { frame: f, half_angle: x, .. }, &Surface::Cone { frame: g, half_angle: y, .. }) => {
             let same = f.z.dot(g.z) > 0.0
                 && parallel(f.z, g.z, size)
                 && (x - y).abs() * size.max(1.0) <= TOL
                 && a.apex().unwrap().dist(b.apex().unwrap()) <= TOL;
             same.then_some(true)
         }
-        (Surface::Sphere { frame: f, radius: r }, Surface::Sphere { frame: g, radius: s }) => {
+        (&Surface::Sphere { frame: f, radius: r }, &Surface::Sphere { frame: g, radius: s }) => {
             (close(r, s) && f.origin.dist(g.origin) <= TOL).then_some(true)
         }
-        (Surface::Torus { frame: f, major: m, minor: r }, Surface::Torus { frame: g, major: n, minor: s }) => {
+        (&Surface::Torus { frame: f, major: m, minor: r }, &Surface::Torus { frame: g, major: n, minor: s }) => {
             (close(m, n) && close(r, s) && parallel(f.z, g.z, size) && f.origin.dist(g.origin) <= TOL).then_some(true)
+        }
+        // A swept curve is the same surface as another if each one's curve lies on the other, where the
+        // curves exist. That covers a rational circle swept into a true cylinder too.
+        (Surface::Extruded { frame: f, curve: c }, Surface::Extruded { frame: g, curve: d }) => {
+            if !parallel(f.z, g.z, size) {
+                return None;
+            }
+            let (on_b, on_a): (&dyn Fn(Vec2) -> Vec3, &dyn Fn(Vec2) -> Vec3) = (&|q| f.point(q.x, q.y, 0.0), &|q| g.point(q.x, q.y, 0.0));
+            swept_on(on_a, d, b, a)?;
+            swept_on(on_b, c, a, b)
+        }
+        (Surface::Extruded { frame: f, curve: c }, &Surface::Cylinder { frame: g, .. }) => {
+            parallel(f.z, g.z, size).then(|| swept_on(&|q| f.point(q.x, q.y, 0.0), c, a, b)).flatten()
+        }
+        (&Surface::Cylinder { frame: g, .. }, Surface::Extruded { frame: f, curve: c }) => {
+            parallel(f.z, g.z, size).then(|| swept_on(&|q| f.point(q.x, q.y, 0.0), c, b, a)).flatten()
+        }
+        (Surface::Revolved { frame: f, curve: c }, Surface::Revolved { frame: g, curve: d }) => {
+            if !common_axis(a, b, size).is_some() {
+                return None;
+            }
+            swept_on(&|q| g.origin + g.x * q.x + g.z * q.y, d, b, a)?;
+            swept_on(&|q| f.origin + f.x * q.x + f.z * q.y, c, a, b)
+        }
+        (Surface::Revolved { frame: f, curve: c }, Surface::Cylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. }) => {
+            common_axis(a, b, size)?;
+            swept_on(&|q| f.origin + f.x * q.x + f.z * q.y, c, a, b)
+        }
+        (Surface::Cylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. }, Surface::Revolved { frame: f, curve: c }) => {
+            common_axis(a, b, size)?;
+            swept_on(&|q| f.origin + f.x * q.x + f.z * q.y, c, b, a)
         }
         _ => None,
     }
@@ -106,11 +152,8 @@ fn common_axis(a: &Surface, b: &Surface, size: f64) -> Option<(Vec3, Vec3)> {
         let d = q - o;
         (d - z * d.dot(z)).norm() <= TOL
     };
-    match (*a, *b) {
-        (Surface::Plane(f), Surface::Plane(_)) => {
-            let _ = f;
-            None
-        }
+    match (a, b) {
+        (Surface::Plane(_), Surface::Plane(_)) => None,
         (Surface::Plane(f), Surface::Sphere { frame, .. }) | (Surface::Sphere { frame, .. }, Surface::Plane(f)) => {
             Some((frame.origin, f.z))
         }
@@ -152,6 +195,7 @@ fn meridian_of(s: &Surface, o: Vec3, z: Vec3) -> Option<Meridian> {
         Surface::Torus { frame, major, minor } => {
             Some(Meridian::Circle { c: v2(major, height(frame.origin)), r: minor })
         }
+        Surface::Extruded { .. } | Surface::Revolved { .. } => None,
     }
 }
 
@@ -199,7 +243,35 @@ fn meridian_points(a: Meridian, b: Meridian) -> Vec<Vec2> {
     }
 }
 
+/// Two surfaces about one axis, one of them a revolved curve: they meet in a circle wherever the curve
+/// meets the other surface in any one half-plane through the axis. That's a curve against a true distance,
+/// which finds every contact, including touching ones.
+fn coaxial_with_curve(frame: &Frame, curve: &PlaneCurve, other: &Surface, o: Vec3, z: Vec3) -> Ssi {
+    let reference = z.any_perpendicular();
+    let lifted = Curve::Spline(Arc::new(curve.spline.mapped(|q| frame.origin + reference * q.x + frame.z * q.y)));
+    let (t0, t1) = curve.spline.domain();
+    let Contact::Roots(found) = curve_surface_contact(&lifted, t0, t1, other, TOL) else {
+        return empty();
+    };
+    let mut curves = Vec::new();
+    for t in found {
+        let p = lifted.eval(t);
+        let radius = (p - o).dot(reference);
+        if radius <= TOL {
+            continue; // On the axis: a point of contact at most, never an edge.
+        }
+        curves.push(closed_circle(Frame::new(o + z * (p - o).dot(z), z, reference), radius));
+    }
+    Ssi::Curves { curves, crossings: Vec::new() }
+}
+
 fn coaxial(a: &Surface, b: &Surface, o: Vec3, z: Vec3) -> Ssi {
+    if let Surface::Revolved { frame, curve } = a {
+        return coaxial_with_curve(frame, curve, b, o, z);
+    }
+    if let Surface::Revolved { frame, curve } = b {
+        return coaxial_with_curve(frame, curve, a, o, z);
+    }
     let (Some(ma), Some(mb)) = (meridian_of(a, o, z), meridian_of(b, o, z)) else {
         return empty();
     };
@@ -394,6 +466,78 @@ fn cylinder_cylinder(f: &Frame, r: f64, g: &Frame, s: f64, region: &Aabb) -> Ssi
     }
 }
 
+/// A plane cutting across the sweep of a swept curve. Every point moves along the sweep direction by an
+/// amount that's linear in its position, so the section is an affine image of the curve, which a rational
+/// spline represents exactly.
+fn plane_across_extrusion(f: &Frame, frame: &Frame, curve: &PlaneCurve) -> Ssi {
+    let (a, n) = (frame.z, f.z);
+    let dot = a.dot(n);
+    let section = curve.spline.mapped(|q| {
+        let base = frame.point(q.x, q.y, 0.0);
+        base + a * ((f.origin - base).dot(n) / dot)
+    });
+    let (t0, t1) = curve.spline.domain();
+    Ssi::Curves { curves: vec![SsiCurve { curve: Curve::Spline(Arc::new(section)), closed: false, t0, t1 }], crossings: Vec::new() }
+}
+
+/// A swept curve and a surface that doesn't change along the sweep either. They meet in straight rulings,
+/// at the points where the curve meets the other surface.
+fn along_rulings(frame: &Frame, curve: &PlaneCurve, other: &Surface, region: &Aabb) -> Ssi {
+    let height = (region.center() - frame.origin).dot(frame.z);
+    let lifted = Curve::Spline(Arc::new(curve.spline.mapped(|q| frame.point(q.x, q.y, height))));
+    let (t0, t1) = curve.spline.domain();
+    let Contact::Roots(found) = curve_surface_contact(&lifted, t0, t1, other, TOL) else {
+        return empty();
+    };
+    // Between two contacts, the curve lying on the other surface means a stretch they share.
+    for w in found.windows(2) {
+        let probes = [0.25, 0.5, 0.75].map(|f| lifted.eval(w[0] + (w[1] - w[0]) * f));
+        if lifted.eval(w[0]).dist(lifted.eval(w[1])) > 10.0 * TOL && probes.iter().all(|&p| other.sdf(p).abs() <= TOL) {
+            return Ssi::PartlyCoincident { at: probes[1] };
+        }
+    }
+    // A single contact can stand for such a stretch too, since close contacts are merged into one.
+    for &t in &found {
+        let step = (t1 - t0) * 1e-3;
+        let p = lifted.eval(t);
+        let flat = [t - step, t + step].iter().any(|&u| {
+            let q = lifted.eval(u.clamp(t0, t1));
+            q.dist(p) > 10.0 * TOL && other.sdf(q).abs() <= TOL * 0.1
+        });
+        if flat {
+            return Ssi::PartlyCoincident { at: p };
+        }
+    }
+    let curves = found.iter().map(|&t| line_in_region(lifted.eval(t), frame.z, region)).collect();
+    Ssi::Curves { curves, crossings: Vec::new() }
+}
+
+/// Whether a surface stays the same along a direction.
+fn unchanged_along(s: &Surface, d: Vec3, size: f64) -> bool {
+    match s {
+        Surface::Plane(f) => f.z.dot(d).abs() * size.max(1.0) <= TOL,
+        Surface::Cylinder { frame, .. } | Surface::Extruded { frame, .. } => parallel(frame.z, d, size),
+        _ => false,
+    }
+}
+
+/// A plane through the axis of a revolved curve: the curve itself, on both sides of the axis.
+fn plane_through_revolution(f: &Frame, frame: &Frame, curve: &PlaneCurve, size: f64) -> Ssi {
+    let (a, n) = (frame.z, f.z);
+    if a.dot(n).abs() * size.max(1.0) > TOL || (frame.origin - f.origin).dot(n).abs() > TOL {
+        return Ssi::General;
+    }
+    let e = a.cross(n).normalized();
+    let (t0, t1) = curve.spline.domain();
+    let side = |r: Vec3| SsiCurve {
+        curve: Curve::Spline(Arc::new(curve.spline.mapped(|q| frame.origin + r * q.x + a * q.y))),
+        closed: false,
+        t0,
+        t1,
+    };
+    Ssi::Curves { curves: vec![side(e), side(-e)], crossings: Vec::new() }
+}
+
 /// Closed-form intersection where one exists.
 pub fn intersect(a: &Surface, b: &Surface, region: &Aabb) -> Ssi {
     let size = region.diagonal();
@@ -414,6 +558,15 @@ pub fn intersect(a: &Surface, b: &Surface, region: &Aabb) -> Ssi {
         (Surface::Cylinder { frame: f, radius: r }, Surface::Cylinder { frame: g, radius: s }) => {
             cylinder_cylinder(f, *r, g, *s, region)
         }
+        (Surface::Extruded { frame, curve }, other) | (other, Surface::Extruded { frame, curve }) if unchanged_along(other, frame.z, size) => {
+            along_rulings(frame, curve, other, region)
+        }
+        (Surface::Plane(f), Surface::Extruded { frame, curve }) | (Surface::Extruded { frame, curve }, Surface::Plane(f)) => {
+            plane_across_extrusion(f, frame, curve)
+        }
+        (Surface::Plane(f), Surface::Revolved { frame, curve }) | (Surface::Revolved { frame, curve }, Surface::Plane(f)) => {
+            plane_through_revolution(f, frame, curve, size)
+        }
         _ => Ssi::General,
     }
 }
@@ -425,6 +578,8 @@ fn surface_feature(s: &Surface) -> f64 {
         Surface::Plane(_) => f64::INFINITY,
         Surface::Cylinder { radius, .. } | Surface::Sphere { radius, .. } | Surface::Cone { radius, .. } => radius,
         Surface::Torus { minor, .. } => minor,
+        Surface::Extruded { ref curve, .. } => curve.min_radius(),
+        Surface::Revolved { ref curve, .. } => curve.min_radius().min(curve.reach),
     }
 }
 
@@ -774,5 +929,5 @@ pub fn sampled_from_points(points: Vec<Vec3>, a: &Surface, b: &Surface) -> Resul
         }
     }
     let tangents = curve_tangents(&points, a, b)?;
-    Ok(Curve::Sampled(Arc::new(SampledCurve { points, tangents, surfaces: (*a, *b) })))
+    Ok(Curve::Sampled(Arc::new(SampledCurve { points, tangents, surfaces: (a.clone(), b.clone()) })))
 }

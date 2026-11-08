@@ -346,6 +346,7 @@ fn edge_signature(body: &Body, e: usize) -> u64 {
         Curve::Circle { .. } => 2,
         Curve::Ellipse { .. } => 3,
         Curve::Sampled(_) => 4,
+        Curve::Spline(_) => 5,
     };
     let (p, q) = (body.vertices[edge.v0], body.vertices[edge.v1]);
     let mut h: u64 = 0xcbf29ce484222325 ^ kind;
@@ -440,6 +441,21 @@ fn intersect_faces(
     let curves: Vec<SsiCurve>;
     let crossings: Vec<Vec3>;
     match result {
+        Ssi::PartlyCoincident { at } => {
+            // Only a problem where both faces actually are.
+            let there = |s: usize, f: usize, face: &Face| index[s].locate_on_face(f, face.surface.project(at), 4.0 * TOL) != FaceLoc::Outside;
+            if there(0, fa, face_a) && there(1, fb, face_b) {
+                return Err(Error::NearDegenerate(format!(
+                    "a {} and a {} run together over part of their width near ({:.4}, {:.4}, {:.4}), which isn't handled yet",
+                    face_a.surface.name(),
+                    face_b.surface.name(),
+                    at.x,
+                    at.y,
+                    at.z
+                )));
+            }
+            return Ok(());
+        }
         Ssi::Coincident { .. } => {
             // Coincident surfaces: each face's edges imprint onto the other.
             for (s, f, other, g) in [(0usize, fa, 1usize, fb), (1, fb, 0, fa)] {
@@ -853,7 +869,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
         } else {
             piece.loops.clone()
         };
-        faces.push(Out { surface: f.surface, flipped: f.flipped != flip, chart: f.chart, tag: f.tag, loops });
+        faces.push(Out { surface: f.surface.clone(), flipped: f.flipped != flip, chart: f.chart, tag: f.tag, loops });
     }
 
     // Each use of an arrangement edge: (face, loop, position, reversed).

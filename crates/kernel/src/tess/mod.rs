@@ -137,6 +137,42 @@ impl Mesh {
 /// square of the distance from their shared vertex, so below about the square root of
 /// the mesher's grid they can't be told apart, and rounding could put them in the wrong
 /// order. Leaving those samples out moves the mesh far less than the chord tolerance.
+/// Where to sample a spline: closer together where it bends, so that both the chord and the turning
+/// between samples stay within their limits. Spaced by accumulating how many samples each stretch needs.
+fn spline_params(s: &crate::spline::Spline, t0: f64, t1: f64, params: &TessParams, density: usize) -> Vec<f64> {
+    let mut breaks = vec![t0];
+    breaks.extend(s.breaks_between(t0, t1));
+    breaks.push(t1);
+    const PER_SPAN: usize = 24;
+    let mut stations: Vec<(f64, f64)> = vec![(t0, 0.0)];
+    let mut total = 0.0;
+    for w in breaks.windows(2) {
+        let dt = (w[1] - w[0]) / PER_SPAN as f64;
+        for i in 0..PER_SPAN {
+            let t = w[0] + dt * (i as f64 + 0.5);
+            let (_, d1, d2) = s.derivs(t);
+            let speed = d1.norm().max(1e-12);
+            let curvature = d1.cross(d2).norm() / (speed * speed * speed);
+            let per_length = (curvature / params.angle).max((curvature / (8.0 * params.chord)).sqrt());
+            total += per_length * speed * dt;
+            stations.push((w[0] + dt * (i + 1) as f64, total));
+        }
+    }
+    let steps = (total.ceil() as usize).max(2) * density;
+    let mut out = Vec::with_capacity(steps);
+    let mut k = 1;
+    for i in 1..steps {
+        let want = total * i as f64 / steps as f64;
+        while k + 1 < stations.len() && stations[k].1 < want {
+            k += 1;
+        }
+        let ((ta, a), (tb, b)) = (stations[k - 1], stations[k]);
+        let f = if b > a { (want - a) / (b - a) } else { 0.5 };
+        out.push(ta + (tb - ta) * f);
+    }
+    out
+}
+
 pub fn edge_polyline(
     e: &Edge,
     vertices: &[Vec3],
@@ -158,9 +194,14 @@ pub fn edge_polyline(
             ((dt / by_chord.min(by_angle).max(1e-3)).ceil() as usize).max(2)
         }
         Curve::Sampled(_) => (dt.ceil() as usize).max(2),
+        Curve::Spline(_) => 0,
     };
     let steps = base * density;
-    let mut params_on_curve: Vec<f64> = (1..steps).map(|i| e.t0 + dt * i as f64 / steps as f64).collect();
+    let mut params_on_curve: Vec<f64> = if let Curve::Spline(s) = &e.curve {
+        spline_params(s, e.t0, e.t1, params, density)
+    } else {
+        (1..steps).map(|i| e.t0 + dt * i as f64 / steps as f64).collect()
+    };
     if graded {
         let length_guess = dt * e.curve.derivative(e.t0 + dt / 2.0).norm();
         let (speed0, speed1) = (e.curve.derivative(e.t0).norm().max(1e-12), e.curve.derivative(e.t1).norm().max(1e-12));

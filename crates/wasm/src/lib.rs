@@ -60,6 +60,7 @@ fn surface_kind(s: &Surface) -> u8 {
         Surface::Cone { .. } => 2,
         Surface::Sphere { .. } => 3,
         Surface::Torus { .. } => 4,
+        Surface::Extruded { .. } | Surface::Revolved { .. } => 5,
     }
 }
 

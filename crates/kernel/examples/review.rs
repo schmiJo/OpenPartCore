@@ -745,7 +745,7 @@ fn chain(dir: &str, first: u64, count: u64) {
                         let mut text = format!("center {} {} {}\n", c.x, c.y, c.z);
                         for (k, (v, a)) in coreshape::mass::per_face(&body, c).iter().enumerate() {
                             let f = &body.faces[k];
-                            let _ = writeln!(text, "{k} {} {a:.9} flux {v:.9} loops {:?} edges {:?}", f.surface.name(), f.loops.iter().map(|l| l.len()).collect::<Vec<_>>(), f.loops.iter().flatten().map(|c| match body.edges[c.edge].curve { Curve::Line { .. } => 'L', Curve::Circle { .. } => 'C', Curve::Ellipse { .. } => 'E', Curve::Sampled(_) => 'S' }).collect::<String>());
+                            let _ = writeln!(text, "{k} {} {a:.9} flux {v:.9} loops {:?} edges {:?}", f.surface.name(), f.loops.iter().map(|l| l.len()).collect::<Vec<_>>(), f.loops.iter().flatten().map(|c| match body.edges[c.edge].curve { Curve::Line { .. } => 'L', Curve::Circle { .. } => 'C', Curve::Ellipse { .. } => 'E', Curve::Sampled(_) | Curve::Spline(_) => 'S' }).collect::<String>());
                         }
                         let fine = tessellate(&body, &TessParams { chord: 0.002, angle: 2f64.to_radians() }).unwrap();
                         let _ = writeln!(text, "exact volume {} fine mesh volume {} open {}", mass_properties(&body).volume, fine.volume(), fine.open_edge_count());

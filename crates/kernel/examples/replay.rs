@@ -38,6 +38,11 @@ fn main() {
                     "torus o=({:.2} {:.2} {:.2}) z=({:.2} {:.2} {:.2}) R={major:.3} r={minor:.3}",
                     frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z
                 ),
+                Surface::Extruded { frame, .. } | Surface::Revolved { frame, .. } => format!(
+                    "{} o=({:.2} {:.2} {:.2}) z=({:.2} {:.2} {:.2})",
+                    f.surface.name(),
+                    frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z
+                ),
             };
             if !d.starts_with("plane") && !seen.contains(&d) {
                 println!("  {n} {d}");

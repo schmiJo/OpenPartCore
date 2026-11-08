@@ -518,6 +518,8 @@ fn surface_name(s: &Surface) -> &'static str {
         Surface::Cone { .. } => "cone",
         Surface::Sphere { .. } => "sphere",
         Surface::Torus { .. } => "torus",
+        Surface::Extruded { .. } => "extrusion",
+        Surface::Revolved { .. } => "revolution",
     }
 }
 
@@ -551,7 +553,7 @@ fn faces_value(body: &Body) -> R<Value> {
                 items.push(("major", num(major)));
                 items.push(("minor", num(minor)));
             }
-            Surface::Plane(_) => {}
+            Surface::Plane(_) | Surface::Extruded { .. } | Surface::Revolved { .. } => {}
         }
         out.push(Value::obj(items));
     }
@@ -596,6 +598,7 @@ fn edges_value(body: &Body) -> R<Value> {
             }
             Curve::Ellipse { .. } => items.push(("curve", Value::str("ellipse"))),
             Curve::Sampled(_) => items.push(("curve", Value::str("traced"))),
+            Curve::Spline(_) => items.push(("curve", Value::str("spline"))),
         }
         out.push(Value::obj(items));
     }

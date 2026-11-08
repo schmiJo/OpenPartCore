@@ -70,8 +70,36 @@ impl Writer {
         self.entity(&format!("AXIS2_PLACEMENT_3D('',#{o},#{z},#{x})"))
     }
 
+    /// A B-spline curve, with the complex form STEP uses when it has weights.
+    fn spline(&mut self, c: &crate::spline::Spline) -> usize {
+        let ids: Vec<String> = c.points().iter().map(|&p| format!("#{}", self.point(p))).collect();
+        let (mut values, mut mults): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+        let knots = c.knots();
+        let mut i = 0;
+        while i < knots.len() {
+            let mut j = i;
+            while j < knots.len() && knots[j] == knots[i] {
+                j += 1;
+            }
+            values.push(real(knots[i]));
+            mults.push((j - i).to_string());
+            i = j;
+        }
+        let (ids, mults, values) = (ids.join(","), mults.join(","), values.join(","));
+        let degree = c.degree();
+        if c.is_polynomial() {
+            return self.entity(&format!("B_SPLINE_CURVE_WITH_KNOTS('',{degree},({ids}),.UNSPECIFIED.,.F.,.F.,({mults}),({values}),.UNSPECIFIED.)"));
+        }
+        let weights: Vec<String> = c.weights().iter().map(|&w| real(w)).collect();
+        self.entity(&format!(
+            "(BOUNDED_CURVE() B_SPLINE_CURVE({degree},({ids}),.UNSPECIFIED.,.F.,.F.) B_SPLINE_CURVE_WITH_KNOTS(({mults}),({values}),.UNSPECIFIED.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE(({})) REPRESENTATION_ITEM(''))",
+            weights.join(",")
+        ))
+    }
+
     fn curve(&mut self, c: &Curve) -> usize {
         match c {
+            Curve::Spline(s) => self.spline(s),
             Curve::Line { origin, dir } => {
                 let p = self.point(*origin);
                 let d = self.direction(*dir);
@@ -124,6 +152,21 @@ impl Writer {
 
     fn surface(&mut self, s: &Surface) -> usize {
         match s {
+            Surface::Extruded { frame, curve } => {
+                let lifted = curve.spline.mapped(|q| frame.point(q.x, q.y, 0.0));
+                let c = self.spline(&lifted);
+                let d = self.direction(frame.z);
+                let v = self.entity(&format!("VECTOR('',#{d},1.)"));
+                self.entity(&format!("SURFACE_OF_LINEAR_EXTRUSION('',#{c},#{v})"))
+            }
+            Surface::Revolved { frame, curve } => {
+                let lifted = curve.spline.mapped(|q| frame.origin + frame.x * q.x + frame.z * q.y);
+                let c = self.spline(&lifted);
+                let o = self.point(frame.origin);
+                let d = self.direction(frame.z);
+                let a = self.entity(&format!("AXIS1_PLACEMENT('',#{o},#{d})"));
+                self.entity(&format!("SURFACE_OF_REVOLUTION('',#{c},#{a})"))
+            }
             Surface::Plane(f) => {
                 let a = self.axis(f);
                 self.entity(&format!("PLANE('',#{a})"))

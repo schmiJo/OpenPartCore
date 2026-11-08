@@ -32,7 +32,11 @@ fn moved_surface(s: &Surface, d: f64) -> Result<Surface> {
             Err(refuse(format!("offsetting by {d} shrinks a curved face away to nothing")))
         }
     };
+    if matches!(s, Surface::Extruded { .. } | Surface::Revolved { .. }) {
+        return Err(Error::Unsupported("offset and shell on spline faces aren't available yet: an offset of a spline isn't a spline, and this kernel gives an exact answer or none".into()));
+    }
     Ok(match *s {
+        Surface::Extruded { .. } | Surface::Revolved { .. } => unreachable!(),
         Surface::Plane(f) => Surface::Plane(Frame { origin: f.origin + f.z * d, ..f }),
         Surface::Cylinder { frame, radius } => Surface::Cylinder { frame, radius: positive(radius + d)? },
         // Moving along a cone's slanted normal shifts it sideways by more than d.
@@ -115,7 +119,7 @@ fn fitted(curve: &Curve, a: Vec3, b: Vec3, middle: Vec3) -> Option<(Curve, f64, 
             }
             best.map(|b| b.1)
         }
-        Curve::Sampled(_) => None,
+        Curve::Sampled(_) | Curve::Spline(_) => None,
     }
 }
 
@@ -259,7 +263,7 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
         let mut faces: Vec<usize> = edges.iter().flat_map(|&e| uses[e].iter().map(|u| u.0)).collect();
         faces.sort_unstable();
         faces.dedup();
-        let mut list: Vec<Surface> = faces.iter().map(|&f| surfaces[f]).collect();
+        let mut list: Vec<Surface> = faces.iter().map(|&f| surfaces[f].clone()).collect();
         // A vertex on a seam has to stay in the seam's plane, or the seam couldn't reach it.
         for &e in edges {
             if same[e] {
@@ -274,7 +278,7 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
             Some((e, c)) => {
                 let others: Vec<Surface> = {
                     let tangent_pair = (uses[e][0].0, uses[e][1].0);
-                    faces.iter().filter(|&&f| f != tangent_pair.0 && f != tangent_pair.1).map(|&f| surfaces[f]).collect()
+                    faces.iter().filter(|&&f| f != tangent_pair.0 && f != tangent_pair.1).map(|&f| surfaces[f].clone()).collect()
                 };
                 let (mut t, _) = c.closest(tangent_map(e, start)?, -1e9f64.min(0.0), 1e9);
                 if matches!(c, Curve::Circle { .. }) {
@@ -324,7 +328,7 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
         out.edges.push(Edge { curve, t0, t1, v0: edge.v0, v1: edge.v1 });
     }
     for (f, face) in body.faces.iter().enumerate() {
-        out.add_face(surfaces[f], face.flipped, face.loops.clone(), face.tag);
+        out.add_face(surfaces[f].clone(), face.flipped, face.loops.clone(), face.tag);
     }
     out.shells = body.shells.clone();
     validate(&out).map_err(|defects| refuse(format!("the result isn't a valid solid: {}", defects.join("; "))))?;
@@ -414,7 +418,7 @@ pub fn draft(body: &Body, faces: &[usize], pull: Vec3, neutral: Vec3, angle: f64
         return Err(refuse(format!("a draft of {:.3} degrees is out of range", angle.to_degrees())));
     }
     let pull = pull.normalized();
-    let mut surfaces: Vec<Surface> = body.faces.iter().map(|f| f.surface).collect();
+    let mut surfaces: Vec<Surface> = body.faces.iter().map(|f| f.surface.clone()).collect();
     for &i in faces {
         let face = body.faces.get(i).ok_or_else(|| refuse(format!("there is no face {i}")))?;
         surfaces[i] = match face.surface {

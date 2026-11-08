@@ -16,6 +16,16 @@ use crate::topo::{Body, Coedge, Face};
 pub struct MassProps {
     pub volume: f64,
     pub area: f64,
+    /// An estimate of how far `volume` could be from the true value because of numerical integration, on
+    /// a body with spline faces or traced intersection curves. It's the difference between integrating
+    /// with two rules, so it's an estimate and not a proof, but tests hold it against known volumes.
+    /// Zero on a body with neither, whose volume is good to rounding.
+    pub volume_error: f64,
+}
+
+fn gauss_12() -> &'static [(f64, f64)] {
+    static RULE: std::sync::OnceLock<Vec<(f64, f64)>> = std::sync::OnceLock::new();
+    RULE.get_or_init(|| gauss_legendre(12))
 }
 
 /// Where to break an edge's parameter range for quadrature. Each piece must be smooth,
@@ -23,6 +33,12 @@ pub struct MassProps {
 /// edge has been split, so the breaks follow the samples rather than the range.
 fn quadrature_breaks(curve: &Curve, t0: f64, t1: f64) -> Vec<f64> {
     match curve {
+        Curve::Spline(s) => {
+            let mut breaks = vec![t0];
+            breaks.extend(s.breaks_between(t0, t1));
+            breaks.push(t1);
+            breaks
+        }
         Curve::Sampled(_) => {
             let mut breaks = vec![t0];
             let mut k = t0.floor() + 1.0;
@@ -48,9 +64,8 @@ fn quadrature_breaks(curve: &Curve, t0: f64, t1: f64) -> Vec<f64> {
 /// Calls `f(point, tangent-with-weight)` at quadrature nodes along a coedge, in
 /// the direction of the loop. The tangent is `dp/dt * weight` with the sign of
 /// travel, so summing `g(p) * tangent` integrates `g dp`.
-fn for_each_boundary_node(body: &Body, c: Coedge, mut f: impl FnMut(Vec3, Vec3)) {
+fn for_each_boundary_node(body: &Body, c: Coedge, rule: &[(f64, f64)], mut f: impl FnMut(Vec3, Vec3)) {
     let e = &body.edges[c.edge];
-    let rule = gauss_24();
     let sign = if c.reversed { -1.0 } else { 1.0 };
     for w in quadrature_breaks(&e.curve, e.t0, e.t1).windows(2) {
         let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
@@ -62,11 +77,78 @@ fn for_each_boundary_node(body: &Body, c: Coedge, mut f: impl FnMut(Vec3, Vec3))
 }
 
 fn face_integrals(body: &Body, face: &Face, reference: Vec3) -> (f64, f64) {
+    face_integrals_with(body, face, reference, gauss_24())
+}
+
+fn face_integrals_with(body: &Body, face: &Face, reference: Vec3, along_edges: &[(f64, f64)]) -> (f64, f64) {
     let sign = if face.flipped { -1.0 } else { 1.0 };
     let surface = &face.surface;
     let chart = &face.chart;
 
     match surface {
+        Surface::Extruded { frame, curve } => {
+            // In terms of the curve's parameter t and the height z, the flux density is the same at every
+            // height: (C - r) . right(C'), since the normal has no part along z. So the inner integral is
+            // along z and needs no quadrature, and the boundary integral runs over t. A ruling has dt = 0
+            // and adds nothing. Region to boundary is Green's theorem for a counter-clockwise loop in (t, z).
+            let r = frame.to_local(reference);
+            let (mut flux, mut area) = (0.0, 0.0);
+            for lp in &face.loops {
+                for &c in lp {
+                    for_each_boundary_node(body, c, along_edges, |p, dp| {
+                        let across = v2(dp.dot(frame.x), dp.dot(frame.y));
+                        if across.dot(across) <= 1e-28 * dp.norm2() {
+                            return;
+                        }
+                        let l = frame.to_local(p);
+                        let foot = curve.foot(v2(l.x, l.y));
+                        let d = curve.derivative(foot.t);
+                        let dt = across.dot(d) / d.dot(d);
+                        let height = l.z - r.z;
+                        flux -= (foot.at - v2(r.x, r.y)).dot(d.right()) * height * dt;
+                        area -= d.norm() * height * dt;
+                    });
+                }
+            }
+            (flux / 3.0, area * sign)
+        }
+        Surface::Revolved { frame, curve } => {
+            // In terms of the angle and the curve's parameter t, the flux density is
+            // rho ((rho + d . radial) h' - (h + d . z) rho'), for a curve (rho, h) and the frame's origin at d
+            // from the reference. That integrates over the angle in closed form, measured from the chart's
+            // center, and the boundary integral runs over t. A sweep around the axis has dt = 0 and adds
+            // nothing, and a tip adds nothing since rho is zero there.
+            let d = frame.to_local(frame.origin) - frame.to_local(reference);
+            let u0 = chart.u0;
+            let (s0, c0) = u0.sin_cos();
+            let (mut flux, mut area) = (0.0, 0.0);
+            for lp in &face.loops {
+                for &c in lp {
+                    for_each_boundary_node(body, c, along_edges, |p, dp| {
+                        let l = frame.to_local(p);
+                        let rho = l.x.hypot(l.y);
+                        if rho < 1e-12 {
+                            return;
+                        }
+                        let (cu, su) = (l.x / rho, l.y / rho);
+                        let radial = frame.x * cu + frame.y * su;
+                        let along = v2(dp.dot(radial), dp.dot(frame.z));
+                        if along.dot(along) <= 1e-28 * dp.norm2() {
+                            return;
+                        }
+                        let foot = curve.foot(v2(rho, l.z));
+                        let v = curve.derivative(foot.t);
+                        let dt = along.dot(v) / v.dot(v);
+                        let (r, h) = (foot.at.x, foot.at.y);
+                        let phi = wrap_pi(l.y.atan2(l.x) - u0);
+                        let inner = r * ((r * v.y - (h + d.z) * v.x) * phi + v.y * (d.x * (su - s0) - d.y * (cu - c0)));
+                        flux += inner * dt;
+                        area += r * v.norm() * phi * dt;
+                    });
+                }
+            }
+            (flux / 3.0, area * sign)
+        }
         Surface::Plane(frame) => {
             // Flux is constant on a plane, so only the boundary area integral is
             // needed: area = integral(x dy) in the plane frame.
@@ -74,7 +156,7 @@ fn face_integrals(body: &Body, face: &Face, reference: Vec3) -> (f64, f64) {
             let mut area = 0.0;
             for lp in &face.loops {
                 for &c in lp {
-                    for_each_boundary_node(body, c, |p, dp| {
+                    for_each_boundary_node(body, c, along_edges, |p, dp| {
                         let l = frame.to_local(p);
                         area += l.x * dp.dot(frame.y);
                     });
@@ -93,7 +175,7 @@ fn face_integrals(body: &Body, face: &Face, reference: Vec3) -> (f64, f64) {
             let mut chart_area = 0.0;
             for lp in &face.loops {
                 for &c in lp {
-                    for_each_boundary_node(body, c, |p, dp| {
+                    for_each_boundary_node(body, c, along_edges, |p, dp| {
                         vector_area += (p - reference).cross(dp) * 0.5;
                         // The chart is isometric, so area is plain chart area.
                         let (uv, duv) = chart_velocity(surface, chart, p, dp);
@@ -115,7 +197,7 @@ fn face_integrals(body: &Body, face: &Face, reference: Vec3) -> (f64, f64) {
             let mut area = 0.0;
             for lp in &face.loops {
                 for &c in lp {
-                    for_each_boundary_node(body, c, |p, dp| {
+                    for_each_boundary_node(body, c, along_edges, |p, dp| {
                         let l = frame.to_local(p);
                         let rho = l.x.hypot(l.y);
                         if rho < 1e-9 {
@@ -156,7 +238,7 @@ fn face_integrals(body: &Body, face: &Face, reference: Vec3) -> (f64, f64) {
             let mut area = 0.0;
             for lp in &face.loops {
                 for &c in lp {
-                    for_each_boundary_node(body, c, |p, dp| {
+                    for_each_boundary_node(body, c, along_edges, |p, dp| {
                         let (uv, duv) = chart_velocity(surface, chart, p, dp);
                         if duv.y == 0.0 {
                             return;
@@ -216,6 +298,13 @@ pub fn mass_properties(body: &Body) -> MassProps {
         out.volume += v;
         out.area += a;
     }
+    let numeric = body.faces.iter().any(|f| matches!(f.surface, Surface::Extruded { .. } | Surface::Revolved { .. }))
+        || body.edges.iter().any(|e| matches!(e.curve, Curve::Sampled(_)));
+    if numeric {
+        let coarse: f64 = body.faces.iter().map(|f| face_integrals_with(body, f, reference, gauss_12()).0).sum();
+        // What's left at the coarser rule, plus what rounding can leave behind in a sum of this size.
+        out.volume_error = (coarse - out.volume).abs() + 1e-13 * out.volume.abs();
+    }
     out
 }
 
@@ -224,7 +313,7 @@ pub fn mass_properties(body: &Body) -> MassProps {
 pub fn loop_closure_error(body: &Body, lp: &[Coedge]) -> f64 {
     let mut sum = Vec3::ZERO;
     for &c in lp {
-        for_each_boundary_node(body, c, |_, dp| sum += dp);
+        for_each_boundary_node(body, c, gauss_24(), |_, dp| sum += dp);
     }
     sum.norm()
 }

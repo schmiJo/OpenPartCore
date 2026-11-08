@@ -1,10 +1,12 @@
-//! 2D profiles: closed wires of lines and arcs, one outer and any number of
+//! 2D profiles: closed wires of lines, arcs and splines, one outer and any number of
 //! holes. Extrude and revolve consume these.
 
 use crate::error::{Error, Result};
 use crate::math::*;
+use crate::spline::{FacePiece, Spline};
+use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SegGeom {
     Line {
         a: Vec2,
@@ -18,11 +20,14 @@ pub enum SegGeom {
         a0: f64,
         a1: f64,
     },
+    /// A rational B-spline in the XY plane, which is how an ellipse comes here too. Runs in the direction
+    /// of its own parameter.
+    Spline(Arc<Spline>),
 }
 
 /// One profile segment. `id` names it stably: the side face it generates carries
 /// this id, however the segment's dimensions change.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Seg {
     pub geom: SegGeom,
     pub id: u32,
@@ -45,6 +50,11 @@ impl Seg {
                 let t = a0 + (a1 - a0) * s;
                 center + v2(t.cos(), t.sin()) * radius
             }
+            SegGeom::Spline(ref c) => {
+                let (u0, u1) = c.domain();
+                let p = c.eval(u0 + (u1 - u0) * s);
+                v2(p.x, p.y)
+            }
         }
     }
 
@@ -61,6 +71,11 @@ impl Seg {
                     -d
                 }
             }
+            SegGeom::Spline(ref c) => {
+                let (u0, u1) = c.domain();
+                let d = c.derivative(u0 + (u1 - u0) * s);
+                v2(d.x, d.y).normalized()
+            }
         }
     }
 
@@ -68,6 +83,10 @@ impl Seg {
         match self.geom {
             SegGeom::Line { a, b } => a.dist(b),
             SegGeom::Arc { radius, a0, a1, .. } => radius * (a1 - a0).abs(),
+            SegGeom::Spline(ref c) => {
+                let (u0, u1) = c.domain();
+                c.length(u0, u1)
+            }
         }
     }
 
@@ -75,14 +94,29 @@ impl Seg {
         let geom = match self.geom {
             SegGeom::Line { a, b } => SegGeom::Line { a: b, b: a },
             SegGeom::Arc { center, radius, a0, a1 } => SegGeom::Arc { center, radius, a0: a1, a1: a0 },
+            SegGeom::Spline(ref c) => SegGeom::Spline(Arc::new(c.reversed())),
         };
         Seg { geom, id: self.id }
     }
 
     /// Splits an arc into pieces of at most 180 degrees. Curved faces must not
-    /// span more than that, so this happens before any surface is created.
+    /// span more than that, so this happens before any surface is created. A spline is
+    /// cut at its corners and wherever it turns too far, and its straight parts become lines.
     fn split_for_faces(&self, out: &mut Vec<Seg>) {
         match self.geom {
+            SegGeom::Spline(ref c) => match c.face_pieces() {
+                Ok(pieces) => {
+                    for piece in pieces {
+                        let geom = match piece {
+                            FacePiece::Line(a, b) => SegGeom::Line { a: v2(a.x, a.y), b: v2(b.x, b.y) },
+                            FacePiece::Curve(part) => SegGeom::Spline(Arc::new(part)),
+                        };
+                        out.push(Seg { geom, id: self.id });
+                    }
+                }
+                // `Profile::validate` has refused this before anything gets here.
+                Err(_) => out.push(self.clone()),
+            },
             SegGeom::Arc { center, radius, a0, a1 } if (a1 - a0).abs() > PI + 1e-9 => {
                 let n = ((a1 - a0).abs() / PI).ceil() as usize;
                 for i in 0..n {
@@ -91,7 +125,7 @@ impl Seg {
                     out.push(Seg { geom: SegGeom::Arc { center, radius, a0: s0, a1: s1 }, id: self.id });
                 }
             }
-            _ => out.push(*self),
+            _ => out.push(self.clone()),
         }
     }
 
@@ -102,6 +136,22 @@ impl Seg {
             SegGeom::Arc { center, radius, a0, a1 } => {
                 0.5 * (radius * radius * (a1 - a0) + radius * center.x * (a1.sin() - a0.sin())
                     - radius * center.y * (a1.cos() - a0.cos()))
+            }
+            SegGeom::Spline(ref c) => {
+                let (u0, u1) = c.domain();
+                let mut breaks = vec![u0];
+                breaks.extend(c.breaks_between(u0, u1));
+                breaks.push(u1);
+                let mut sum = 0.0;
+                for w in breaks.windows(2) {
+                    let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
+                    for &(x, weight) in gauss_24() {
+                        let t = mid + half * x;
+                        let (p, d, _) = c.derivs(t);
+                        sum += (p.x * d.y - p.y * d.x) * weight * half;
+                    }
+                }
+                sum * 0.5
             }
         }
     }
@@ -174,6 +224,7 @@ impl Wire {
                     geom: match s.geom {
                         SegGeom::Line { a, b } => SegGeom::Line { a: a + by, b: b + by },
                         SegGeom::Arc { center, radius, a0, a1 } => SegGeom::Arc { center: center + by, radius, a0, a1 },
+                        SegGeom::Spline(ref c) => SegGeom::Spline(Arc::new(c.mapped(|p| v3(p.x + by.x, p.y + by.y, p.z)))),
                     },
                     id: s.id,
                 })
@@ -184,9 +235,16 @@ impl Wire {
     fn flatten(&self) -> Vec<(Vec2, Vec2, usize)> {
         let mut out = Vec::new();
         for (i, s) in self.segs.iter().enumerate() {
+            if let SegGeom::Spline(ref c) = s.geom {
+                for w in c.polyline(FLAT_PER_SPAN).windows(2) {
+                    out.push((v2(w[0].x, w[0].y), v2(w[1].x, w[1].y), i));
+                }
+                continue;
+            }
             let n = match s.geom {
                 SegGeom::Line { .. } => 1,
                 SegGeom::Arc { a0, a1, .. } => (((a1 - a0).abs() * 24.0 / PI).ceil() as usize).max(4),
+                SegGeom::Spline(_) => unreachable!(),
             };
             for k in 0..n {
                 out.push((s.at(k as f64 / n as f64), s.at((k + 1) as f64 / n as f64), i));
@@ -233,8 +291,18 @@ impl Wire {
                 // Pieces of one segment and neighbouring segments meet at their
                 // shared endpoint by construction.
                 let n = self.segs.len();
-                if si == sj || (si + 1) % n == sj || (sj + 1) % n == si {
-                    continue;
+                let neighbours = (si + 1) % n == sj || (sj + 1) % n == si;
+                let curved = |k: usize| matches!(self.segs[k].geom, SegGeom::Spline(_));
+                if si == sj || neighbours {
+                    // Lines and arcs can't cross themselves, and these meet at their shared end. A spline
+                    // can do either, so only the pieces right beside each other are left out.
+                    if !(curved(si) || curved(sj)) {
+                        continue;
+                    }
+                    let side_by_side = (b - c).norm() <= TOL || (a - d).norm() <= TOL;
+                    if j == i + 1 || side_by_side {
+                        continue;
+                    }
                 }
                 if segments_cross(a, b, c, d) {
                     return Err(Error::InvalidProfile(format!(
@@ -246,6 +314,9 @@ impl Wire {
         Ok(())
     }
 }
+
+/// Pieces per knot interval when a spline is checked for crossings.
+const FLAT_PER_SPAN: usize = 16;
 
 fn segments_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     let side = |p: Vec2, q: Vec2, r: Vec2| (q - p).cross(r - p);
@@ -295,6 +366,15 @@ impl PathBuilder {
         self
     }
 
+    /// A spline from the cursor. It has to start there, and the cursor moves to its end.
+    pub fn spline_to(mut self, spline: Spline) -> PathBuilder {
+        let end = spline.end();
+        self.segs.push(Seg { geom: SegGeom::Spline(Arc::new(spline)), id: self.next_id });
+        self.next_id += 1;
+        self.cursor = v2(end.x, end.y);
+        self
+    }
+
     /// Finishes the wire, adding a closing line if the cursor is not at the start.
     pub fn close(mut self) -> Wire {
         if self.cursor.dist(self.start) > TOL {
@@ -323,7 +403,7 @@ impl Profile {
         let hole = if hole.signed_area() > 0.0 { hole.reversed() } else { hole };
         // Give each hole's segments ids that no other wire in the profile uses.
         let base = 1000 * (self.holes.len() as u32 + 1);
-        let segs = hole.segs.iter().map(|s| Seg { geom: s.geom, id: s.id + base }).collect();
+        let segs = hole.segs.iter().map(|s| Seg { geom: s.geom.clone(), id: s.id + base }).collect();
         self.holes.push(Wire { segs });
         self
     }
@@ -352,6 +432,13 @@ impl Profile {
                 let radius = match seg.geom {
                     SegGeom::Arc { center, radius, .. } => radius.max(center.x.abs()).max(center.y.abs()),
                     SegGeom::Line { .. } => 0.0,
+                    SegGeom::Spline(ref c) => {
+                        if c.points().iter().any(|p| p.z != 0.0) {
+                            return Err(Error::InvalidProfile("a spline in a profile has to lie in the plane of the profile".to_string()));
+                        }
+                        c.face_pieces()?;
+                        0.0
+                    }
                 };
                 let (a, b) = (seg.start(), seg.end());
                 // Written so that a NaN fails too.

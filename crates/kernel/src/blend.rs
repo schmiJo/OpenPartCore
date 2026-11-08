@@ -324,8 +324,12 @@ fn trace_of(surface: &Surface, section: &Section, size: f64) -> Result<Trace> {
         let d = q - f.origin;
         (d - f.z * d.dot(f.z)).norm() <= 1e-5
     };
+    if matches!(surface, Surface::Extruded { .. } | Surface::Revolved { .. }) {
+        return Err(Error::Unsupported("fillets and chamfers on spline faces aren't available yet: their exact shape isn't a spline, and this kernel gives an exact answer or none".into()));
+    }
     if section.circular {
         match *surface {
+            Surface::Extruded { .. } | Surface::Revolved { .. } => unreachable!(),
             Surface::Plane(p) => {
                 if parallel(p.z, f.z) {
                     Ok(Trace::Line)
