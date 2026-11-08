@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::math::*;
 use crate::profile::{PathBuilder, Profile};
 use crate::surface::Surface;
-use crate::topo::{Body, Edge};
+use crate::topo::{Body, Edge, FaceOrigin, FaceTag};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
@@ -745,6 +745,18 @@ fn sweep(profile: &Profile, run: &Run, section: &Section, ends: [End; 2], featur
     Ok(tool)
 }
 
+/// Records which faces a blend's tool stands in for, and which copy it's in. A neighbour merged across a
+/// mirror plane has lost its copy step, so the one with the most specific steps says.
+fn mark_source(tool: &mut Body, body: &Body, faces: &[usize]) {
+    let mut between: Vec<FaceTag> = faces.iter().map(|&f| body.faces[f].tag).collect();
+    between.sort_unstable();
+    between.dedup();
+    let copies = faces.iter().map(|&f| &body.faces[f].origin.copies).max().cloned().unwrap_or_default();
+    for f in &mut tool.faces {
+        f.origin = FaceOrigin { copies: copies.clone(), between: between.clone() };
+    }
+}
+
 fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body> {
     if edges.is_empty() {
         return Ok(body.clone());
@@ -791,7 +803,8 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
                 end_condition(body, &index, run, &runs, &section, &points, corner.convex, run.v1, d1, s1)?,
             ]
         };
-        let tool = sweep(&profile, run, &section, ends, feature)?;
+        let mut tool = sweep(&profile, run, &section, ends, feature)?;
+        mark_source(&mut tool, body, &run.faces);
         if corner.convex {
             cuts.push(tool);
         } else {
@@ -804,7 +817,10 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
     // ball actually makes. The tools alone would leave a sharp peak there.
     if let Kind::Fillet(r) = kind {
         for v in 0..body.vertices.len() {
-            if let Some(tool) = sphere_corner(body, &runs, &corners, v, r, feature)? {
+            if let Some(mut tool) = sphere_corner(body, &runs, &corners, v, r, feature)? {
+                let meeting: Vec<usize> =
+                    runs.iter().filter(|run| !run.closed && (run.v0 == v || run.v1 == v)).flat_map(|run| run.faces).collect();
+                mark_source(&mut tool, body, &meeting);
                 cuts.push(tool);
             }
         }

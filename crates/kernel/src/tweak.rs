@@ -328,7 +328,8 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
         out.edges.push(Edge { curve, t0, t1, v0: edge.v0, v1: edge.v1 });
     }
     for (f, face) in body.faces.iter().enumerate() {
-        out.add_face(surfaces[f].clone(), face.flipped, face.loops.clone(), face.tag);
+        let i = out.add_face(surfaces[f].clone(), face.flipped, face.loops.clone(), face.tag);
+        out.faces[i].origin = face.origin.clone();
     }
     out.shells = body.shells.clone();
     validate(&out).map_err(|defects| refuse(format!("the result isn't a valid solid: {}", defects.join("; "))))?;
@@ -397,6 +398,10 @@ pub fn shell(body: &Body, open: &[usize], thickness: f64, feature: u32) -> Resul
         }
     }
     for f in &mut inner.faces {
+        // The slot alone can't say which face this follows, since two features can use the same slot.
+        if f.origin.between.is_empty() {
+            f.origin.between = vec![f.tag];
+        }
         f.tag.feature = feature;
     }
     let result = subtract(body, &inner)?;

@@ -60,6 +60,7 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| Face keys | `coreshape::topo::Face` gained `origin`, and `EdgeSelect` gained `OnFaceKey` and `BetweenKeys`. Names, tags, slots, `FaceRef` and files are unchanged | Reading is unaffected. Code building a `Face` by hand has to set `origin`, and an exhaustive `match` on `EdgeSelect` needs the new arms |
 | STEP import | `coreshape_document::Op` gained `ImportStep` | An exhaustive `match` needs the new arm |
 | Document shapes | `coreshape_document::Shape` gained `Ellipse` and `Move` gained `Spline` | An exhaustive `match` needs the new arms |
 | Sketch splines | `Geometry`, `SegKind` and `coreshape_sketch::Seg` are no longer `Copy`. `Geometry` gained `Spline`, `SegKind` gained `Spline`, and `Part` gained `Control` | Clone them, or match on a reference. An exhaustive `match` needs the new arms. Existing sketch JSON is unchanged |

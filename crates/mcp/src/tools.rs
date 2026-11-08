@@ -29,7 +29,7 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("feature_move", "Moves a feature in the history, if that keeps every reference pointing backward, then rebuilds.", r#"{"id": {"type": "integer"}, "position": {"type": "integer"}}"#, r#"["id", "position"]"#),
     ("features_list", "The history: each feature's id, name, type, state and any error.", "{}", "[]"),
     ("rebuild", "Rebuilds, reusing whatever didn't change. Gives each feature's state and the solid's volume, area, size and validity.", r#"{"upto": {"type": "integer", "description": "Stop after the feature at this position, to see an earlier state."}}"#, "[]"),
-    ("faces_list", "The solid's faces with their stable names, surface type, area, center and outward normal. One name can cover several pieces.", "{}", "[]"),
+    ("faces_list", "The solid's faces with their stable names, surface type, area, center and outward normal. One name can cover several faces, such as a pattern's copies. Each face's key is its own, and an edge selection takes a key wherever it takes a face name.", "{}", "[]"),
     ("edges_list", "The solid's edges with their stable names, curve type, length and ends, and a selection for each, ready to use in a fillet or chamfer.", "{}", "[]"),
     ("export", "Exports the solid. STEP and the native format can come back as text; STL needs a path. Paths are under the server's root folder.", r#"{"format": {"type": "string", "enum": ["step", "stl", "coreshape"]}, "path": {"type": "string"}}"#, r#"["format"]"#),
     ("render", "Draws the solid and returns a PNG. Views: iso, front, back, left, right, top, bottom or four (top, iso, front and right together), or an azimuth and elevation in degrees.", r#"{"view": {"type": "string"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "labels": {"type": "boolean", "description": "Write each visible face's name on it."}, "colors": {"type": "string", "enum": ["plain", "faces"], "description": "faces gives each face its own tint."}, "highlight_faces": {"type": "array", "items": {"type": "string"}, "description": "Face names to pick out."}, "highlight_edges": {"description": "An edge selection to pick out, as in a fillet."}, "path": {"type": "string", "description": "Also save the PNG here, under the server's root folder."}}"#, "[]"),
@@ -452,9 +452,9 @@ impl Session {
         if let Some(list) = args.get("highlight_faces") {
             for item in list.as_array().ok_or("\"highlight_faces\" must be a list of face names")? {
                 let name = item.as_str().ok_or("\"highlight_faces\" must be a list of face names")?;
-                FaceRef::parse(name).map_err(|x| x.to_string())?;
+                let key = FaceKey::parse(name).map_err(|x| x.to_string())?;
                 let before = highlight_faces.len();
-                highlight_faces.extend(names.iter().enumerate().filter(|(_, n)| n.as_str() == name).map(|(i, _)| i));
+                highlight_faces.extend(find_faces(body.as_ref(), &key));
                 if highlight_faces.len() == before {
                     return Err(format!("no face is named {name}. faces_list gives the names there are."));
                 }
@@ -535,6 +535,7 @@ fn faces_value(body: &Body) -> R<Value> {
         sum[f as usize] += (a + b + c) * (w / 3.0);
     }
     let mut out = Vec::with_capacity(n);
+    let keys = face_keys(body);
     for (i, face) in body.faces.iter().enumerate() {
         let name = FaceRef::from_tag(face.tag).name();
         let center = sum[i] * (1.0 / area[i].max(1e-300));
@@ -542,6 +543,7 @@ fn faces_value(body: &Body) -> R<Value> {
         let normal = face.surface.normal(on) * if face.flipped { -1.0 } else { 1.0 };
         let mut items = vec![
             ("name", Value::str(name)),
+            ("key", Value::str(keys[i].text())),
             ("surface", Value::str(surface_name(&face.surface))),
             ("area", num(area[i])),
             ("center", vec3(on)),
@@ -565,14 +567,27 @@ fn edges_value(body: &Body) -> R<Value> {
     let uses = body.edge_uses();
     let mut out = Vec::with_capacity(body.edges.len());
     let names: Vec<String> = (0..body.edges.len()).map(|e| edge_name(body, e, &uses)).collect();
+    let keys = face_keys(body);
+    let key_pairs: Vec<Vec<String>> = (0..body.edges.len())
+        .map(|e| {
+            let mut pair: Vec<String> = uses[e].iter().map(|u| keys[u.0].text()).collect();
+            pair.sort();
+            pair
+        })
+        .collect();
     for (e, edge) in body.edges.iter().enumerate() {
         let faces: Vec<Value> = names[e].split('|').map(Value::str).collect();
         let midpoint = body.edge_midpoint(e);
         let length: f64 = mesh.edge_lines.get(e).map_or(0.0, |l| l.windows(2).map(|w| (w[1] - w[0]).norm()).sum());
-        // A name that fits more than one edge needs a place to pick out this one.
+        // A name that fits more than one edge needs the faces' keys, and a place if even those fit several,
+        // since two faces can meet more than once.
         let shared = names.iter().filter(|n| **n == names[e]).count() > 1;
-        let between = Value::obj(vec![("between", Value::Arr(faces.clone()))]);
-        let select = if shared {
+        let between = if shared {
+            Value::obj(vec![("between", Value::Arr(key_pairs[e].iter().map(Value::str).collect()))])
+        } else {
+            Value::obj(vec![("between", Value::Arr(faces.clone()))])
+        };
+        let select = if shared && key_pairs.iter().filter(|p| **p == key_pairs[e]).count() > 1 {
             let near = Value::obj(vec![("near", vec3(midpoint)), ("tolerance", Value::Num(1e-3))]);
             Value::obj(vec![("both", Value::Arr(vec![between, near]))])
         } else {

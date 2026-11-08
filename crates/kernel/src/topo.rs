@@ -43,6 +43,25 @@ pub struct FaceTag {
     pub slot: u32,
 }
 
+/// One pattern or mirror that copied a face: `index` 1 is its first copy. A face in the original has no
+/// step for that feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CopyStep {
+    pub feature: u32,
+    pub index: u32,
+}
+
+/// Where a face came from, for telling apart faces with the same tag. A tag is stable but not unique.
+/// This changes no tag and no slot, and geometry never depends on it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FaceOrigin {
+    /// The patterns and mirrors this face was copied by, oldest first.
+    pub copies: Vec<CopyStep>,
+    /// For a fillet or chamfer, the sorted tags of the faces whose shared edge or corner it replaced. For
+    /// a shell's inner wall, the tag of the face it follows, unless that face already has these.
+    pub between: Vec<FaceTag>,
+}
+
 /// A trimmed piece of a surface.
 ///
 /// `loops[0]` is the outer boundary. Every loop keeps the face on its left when
@@ -56,6 +75,7 @@ pub struct Face {
     pub chart: Chart,
     pub loops: Vec<Vec<Coedge>>,
     pub tag: FaceTag,
+    pub origin: FaceOrigin,
 }
 
 /// A solid: any number of closed shells. Outer shells enclose positive volume
@@ -181,7 +201,7 @@ impl Body {
     /// Adds a face and fits its chart to its boundary.
     pub fn add_face(&mut self, surface: Surface, flipped: bool, loops: Vec<Vec<Coedge>>, tag: FaceTag) -> usize {
         let chart = self.fit_face_chart(&surface, flipped, &loops);
-        self.faces.push(Face { surface, flipped, chart, loops, tag });
+        self.faces.push(Face { surface, flipped, chart, loops, tag, origin: FaceOrigin::default() });
         self.faces.len() - 1
     }
 
@@ -256,10 +276,18 @@ impl Body {
                 .iter()
                 .map(|lp| lp.iter().rev().map(|c| Coedge { edge: c.edge, reversed: !c.reversed }).collect())
                 .collect();
-            out.add_face(f.surface.mirrored(m), f.flipped, loops, f.tag);
+            let i = out.add_face(f.surface.mirrored(m), f.flipped, loops, f.tag);
+            out.faces[i].origin = f.origin.clone();
         }
         out.shells = self.shells.clone();
         out
+    }
+
+    /// Records that every face here is copy `index` made by `feature`.
+    pub fn mark_copy(&mut self, feature: u32, index: u32) {
+        for f in &mut self.faces {
+            f.origin.copies.push(CopyStep { feature, index });
+        }
     }
 
     /// Rigidly transforms the body.

@@ -96,8 +96,29 @@ the last ended in, so a path is always smooth. A step is `{"line": length}`, or 
 sketch's x axis. Bends must stay wider than the profile, or the profile would cross the center.
 
 **Copies keep names.** A face in a pattern's or mirror's copy has the name of the face it came from, so `f2:end` covers
-the original and every copy, and a fillet between two named faces applies to them all. To pick one, combine the name
-with `near` or `in_box`. A pattern of features applies each one's solids as it did, adding or removing.
+the original and every copy, and a fillet between two named faces applies to them all. To pick one, use a [face key](#face-keys).
+A pattern of features applies each one's solids as it did, adding or removing.
+
+## Face keys
+
+A name can cover several faces. A key adds what tells them apart, and each part only narrows, so a plain name is still a key that means all of them:
+
+| Key | Picks |
+|---|---|
+| `f2:end` | Every face with that name |
+| `f2:end@f5.1` | Copy 1 made by pattern or mirror `f5`. Copy 0 is the original |
+| `f2:end@f5.1@f7.0` | A copy of a copy: copy 1 of `f5`, in the original of `f7` |
+| `f3:side.1[f2:end\|f2:side.0]` | The fillet or chamfer face that replaced the edge between those two faces |
+| `f4:side.1[f2:side.1]` | A shell's inner wall following `f2:side.1` |
+| `f4:side.0#1` | Piece 1, counting faces that agree on everything else |
+
+`face_keys(body)` gives each face a key that picks only that face, and `find_faces(body, key)` goes the other way. `{"on_face": key}` and `{"between": [key, key]}` take keys, so a
+fillet can round one copy. `shell` and `draft` still take plain names, and refuse a key.
+
+- **A key is worked out from the model and isn't stored,** except where a selection uses one. It adds nothing to files that don't.
+- **A copy number stays with the copy,** so `@f5.1` stays the first copy when the pattern's count or spacing changes.
+- **A piece number goes by position,** in the surface's own coordinates. It's the weakest part: it renumbers if pieces are added or removed, or pass each other. Prefer anything else that tells them apart.
+- **A face merged across a mirror plane** keeps the original's key, since it's now both.
 
 ## Sketch regions
 

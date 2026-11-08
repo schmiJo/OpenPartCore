@@ -27,7 +27,7 @@ use crate::curve::Curve;
 use crate::error::{Error, Result};
 use crate::math::*;
 use crate::surface::{Chart, Surface};
-use crate::topo::{Body, Coedge, Edge, Face, FaceTag};
+use crate::topo::{Body, Coedge, Edge, Face, FaceOrigin, FaceTag};
 use crate::validate::validate;
 use classify::{BodyLoc, FaceLoc, Index};
 use roots::{curve_surface_contact, Contact};
@@ -858,6 +858,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
         flipped: bool,
         chart: Chart,
         tag: FaceTag,
+        origin: FaceOrigin,
         loops: Vec<Vec<Coedge>>,
     }
     let mut faces: Vec<Out> = Vec::with_capacity(selected.len());
@@ -869,7 +870,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
         } else {
             piece.loops.clone()
         };
-        faces.push(Out { surface: f.surface.clone(), flipped: f.flipped != flip, chart: f.chart, tag: f.tag, loops });
+        faces.push(Out { surface: f.surface.clone(), flipped: f.flipped != flip, chart: f.chart, tag: f.tag, origin: f.origin.clone(), loops });
     }
 
     // Each use of an arrangement edge: (face, loop, position, reversed).
@@ -1000,7 +1001,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
                 l.iter().enumerate().map(|(k, c)| Coedge { edge: assign[&(fi, li, k)], reversed: c.reversed }).collect()
             })
             .collect();
-        body.faces.push(Face { surface: f.surface, flipped: f.flipped, chart: f.chart, loops, tag: f.tag });
+        body.faces.push(Face { surface: f.surface, flipped: f.flipped, chart: f.chart, loops, tag: f.tag, origin: f.origin });
     }
     body.compute_shells();
     Ok(body)

@@ -18,7 +18,6 @@ These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 - **Offset, shell and draft that change a body's topology.** They refuse instead: see [below](#offset-shell-and-draft).
 - **Fillets and chamfers beyond straight and circular edges.** No ellipses, traced curves or spline faces, no variable radius, and no general vertex blends: see [below](#fillets-and-chamfers).
 - **Assemblies and drawings.** A STEP assembly is refused.
-- **A name for each single face.** A face name can cover several faces: see [Documents](#documents).
 
 ## Fuzz results
 
@@ -208,8 +207,13 @@ are no faster than before. 400 holes: 0.44 s at once, 7.9 s one by one, and 19.7
   feature share a name; a whole circle's wall is two faces under one name; and a later cut leaves pieces under one name. Offset
   and draft keep one face per name, and a shell's inner walls are `f3:side.N` after the face they follow. A name disappears when its face does.
   [FILE_FORMAT.md](FILE_FORMAT.md) has the table and `crates/document/tests/face_names.rs` holds it to that.
-- **So a sketch attached to a face by name can't say which copy it means.** Selecting edges by name takes all of them, and adding
-  `near` or `in_box` picks by position, which can pick something else after a dimension changes. Copy numbers aren't built.
+- **A face key tells them apart,** such as `f2:end@f5.1` or `f3:side.1[f2:end|f2:side.0]`: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
+- **Where keys stop being reliable.** A piece number, `#1`, goes by position, so it renumbers if pieces are added or removed or pass each other. At an exact coincidence, a cylinder's two halves can
+  also swap for a different pair: a step away from the crossed-cylinders demo's exactly coaxial default turned them 90 degrees. A key whose face is gone is refused and doesn't move to another face, but a piece
+  number can land on a different piece without any error. A face merged across a mirror plane answers only to the original's key.
+- **`shell` and `draft` take plain names,** so they can't open or tilt the face of only one copy, and refuse a key rather than ignore part of it.
+- **How well keys hold,** on all the demos, comparing every key before and after one step of a random slider: 2,294 of 2,364 stayed on the same kind of face in about the same place. Of the other 70, 40 were
+  a bolt count changing, which moves the bolts, and 30 were the crossed cylinders leaving their exactly coaxial default, where faces vanish or change shape.
 - Coordinates beyond 10 km are refused, because tolerances stop meaning anything there.
 - A sketch can make at most 4000 regions, and a region can have at most 999 holes before names stop
   being unique. Constrained sketches name faces by entity, so they have no such limit.

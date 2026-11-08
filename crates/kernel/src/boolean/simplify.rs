@@ -154,14 +154,15 @@ fn merge_faces(body: Body) -> Result<Body> {
         half.retain(|c| !present.contains(&(c.edge, !c.reversed)));
 
         let lead = &body.faces[group[0]];
-        // The smallest tag names the merged face, so names stay stable.
-        let tag = group.iter().map(|&f| body.faces[f].tag).min().unwrap_or(lead.tag);
+        // The smallest tag names the merged face, so names stay stable, and its origin goes with it.
+        let (tag, origin) = group.iter().map(|&f| (body.faces[f].tag, &body.faces[f].origin)).min().unwrap_or((lead.tag, &lead.origin));
         // A chart centred on the whole group, not on any one of its faces.
         let all_loops: Vec<Vec<Coedge>> = group.iter().flat_map(|&f| body.faces[f].loops.iter().cloned()).collect();
         let chart = body.fit_face_chart(&lead.surface, lead.flipped, &all_loops);
         let fc = FaceChart { surface: &lead.surface, chart: &chart, flipped: lead.flipped };
         for loops in trace_faces(&fc, &body.edges, &body.vertices, &half)? {
-            out.add_face(lead.surface.clone(), lead.flipped, loops, tag);
+            let i = out.add_face(lead.surface.clone(), lead.flipped, loops, tag);
+            out.faces[i].origin = origin.clone();
         }
     }
     out.compute_shells();

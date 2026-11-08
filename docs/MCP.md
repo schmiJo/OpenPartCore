@@ -26,6 +26,9 @@ under the root, which is the current folder unless given. A path that leaves it,
 | `render` | A PNG: iso, front, back, left, right, top, bottom, four views at once, or any angle. Optional face labels, one tint per face, and highlighted faces and edges |
 | `sketch_solve`, `sketch_drag`, `sketch_regions`, `sketch_arrangement` | The sketch solver, without changing the document. `sketch_arrangement` lists every closed region with its id, and the curves that make none |
 
+Each face in `faces_list` has a `key` as well as a `name`, since a name can cover several faces, and `highlight_faces` and edge selections take either. An edge's `select` uses keys when names alone
+would fit several edges: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
+
 ## How a session goes
 
 1. `parameter_set`, then `feature_add` a sketch and an extrude.

@@ -486,4 +486,89 @@ mod tests {
             eprintln!("{}: {failures} of {runs} random slider positions were refused", m.id);
         }
     }
+
+    /// Every face of every demo has a key that picks out only that face, wherever the sliders are.
+    #[test]
+    fn every_face_has_a_key_of_its_own_at_random_slider_positions() {
+        use coreshape_document::{face_keys, find_faces, FaceKey};
+        let mut rng = coreshape::Rng::new(77);
+        for m in models::catalog() {
+            let mut docs = std::collections::HashMap::new();
+            for _ in 0..12 {
+                let values: Vec<f64> = m
+                    .params
+                    .iter()
+                    .map(|p| p.min + rng.int(0, ((p.max - p.min) / p.step).round() as i64) as f64 * p.step)
+                    .collect();
+                let variant = m.variant(&values);
+                let doc = docs.entry(variant).or_insert_with(|| m.document(variant));
+                m.apply(doc, &values);
+                let Some(body) = doc.rebuild(None).body else { continue };
+                for (i, key) in face_keys(&body).iter().enumerate() {
+                    let back = FaceKey::parse(&key.text()).unwrap();
+                    assert_eq!(find_faces(&body, &back), vec![i], "{} {values:?}: {}", m.id, key.text());
+                }
+            }
+        }
+    }
+
+    /// A small slider move keeps every key on the same kind of face in about the same place, which is what
+    /// makes a key worth saving. Two things are left out because a key isn't what changes there: a slider
+    /// that's a count, which moves what it repeats, and the crossed cylinders, whose default is exactly
+    /// coaxial, so one step can remove a face or change which seam a cylinder keeps.
+    #[test]
+    fn a_key_means_the_same_face_after_a_small_slider_move() {
+        use coreshape_document::{face_keys, FaceKey};
+        use std::collections::HashMap;
+        let mut rng = coreshape::Rng::new(78);
+        let (mut compared, mut kept, mut lost, mut moved) = (0usize, 0usize, Vec::new(), Vec::new());
+        for m in models::catalog() {
+            if m.id == "crossed" {
+                continue;
+            }
+            for _ in 0..12 {
+                let mut values: Vec<f64> = m.params.iter().map(|p| p.default).collect();
+                let which = rng.int(0, m.params.len() as i64 - 1) as usize;
+                let p = &m.params[which];
+                if p.unit.is_empty() {
+                    continue;
+                }
+                let step = if values[which] + p.step <= p.max { p.step } else { -p.step };
+                let index = |b: &coreshape::Body| -> HashMap<FaceKey, (&'static str, coreshape::math::Vec3)> {
+                    face_keys(b).into_iter().enumerate().map(|(i, k)| (k, (b.faces[i].surface.name(), b.face_aabb(i).center()))).collect()
+                };
+                let mut doc = m.document(m.variant(&values));
+                m.apply(&mut doc, &values);
+                let Some(before) = doc.rebuild(None).body else { continue };
+                values[which] += step;
+                if m.variant(&values) != m.variant(&m.params.iter().map(|p| p.default).collect::<Vec<_>>()) {
+                    continue;
+                }
+                m.apply(&mut doc, &values);
+                let outcome = doc.rebuild(None);
+                if outcome.failed.is_some() {
+                    continue;
+                }
+                let Some(after) = outcome.body else { continue };
+                let (a, b) = (index(&before), index(&after));
+                for (key, (kind, at)) in &a {
+                    compared += 1;
+                    match b.get(key) {
+                        None => lost.push(format!("{} {}: {}", m.id, p.key, key.text())),
+                        Some((other, _)) if other != kind => moved.push(format!("{} {}: {} became a {other}", m.id, p.key, key.text())),
+                        // A face can shift with the dimension, but not by far more than the step.
+                        Some((_, to)) if to.dist(*at) > 8.0 * step.abs() + 1.0 => {
+                            moved.push(format!("{} {}: {} moved {:.2} for a step of {step}", m.id, p.key, key.text(), to.dist(*at)))
+                        }
+                        _ => kept += 1,
+                    }
+                }
+            }
+        }
+        eprintln!("{kept} of {compared} keys kept; lost {}, moved {}", lost.len(), moved.len());
+        for line in lost.iter().chain(&moved) {
+            eprintln!("  {line}");
+        }
+        assert!(moved.is_empty() && lost.is_empty(), "{} lost, {} moved", lost.len(), moved.len());
+    }
 }

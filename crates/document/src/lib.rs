@@ -30,6 +30,10 @@ pub use coreshape_sketch::json::{self, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod keys;
+use keys::Keys;
+pub use keys::{face_keys, find_faces, FaceKey};
+
 /// The file format's name and the version this code writes.
 pub const FORMAT: &str = "coreshape-document";
 pub const FORMAT_VERSION: f64 = 1.0;
@@ -408,6 +412,10 @@ pub enum EdgeSelect {
     Between(FaceRef, FaceRef),
     /// All edges bounding a named face.
     OnFace(FaceRef),
+    /// All edges bounding the faces a key picks, which a plain name can't narrow to one copy.
+    OnFaceKey(FaceKey),
+    /// Edges between the faces two keys pick.
+    BetweenKeys(FaceKey, FaceKey),
     /// Edges whose midpoint is within a distance of a point.
     Near { point: Point3, tolerance: Expr },
     /// Edges whose midpoint lies in a box.
@@ -423,7 +431,7 @@ pub enum EdgeSelect {
 }
 
 impl EdgeSelect {
-    fn matches(&self, body: &Body, e: usize, uses: &[Vec<(usize, usize, usize, bool)>], env: &Env) -> Result<bool> {
+    fn matches(&self, body: &Body, e: usize, uses: &[Vec<(usize, usize, usize, bool)>], env: &Env, keys: &Keys) -> Result<bool> {
         let touches = |r: &FaceRef| uses[e].iter().any(|u| body.faces[u.0].tag == r.tag());
         let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
         Ok(match self {
@@ -436,6 +444,13 @@ impl EdgeSelect {
                 }
             }
             EdgeSelect::OnFace(f) => touches(f),
+            EdgeSelect::OnFaceKey(k) => uses[e].iter().any(|u| keys.matches(body, u.0, k)),
+            EdgeSelect::BetweenKeys(a, b) => match uses[e].as_slice() {
+                [x, y] => {
+                    (keys.matches(body, x.0, a) && keys.matches(body, y.0, b)) || (keys.matches(body, x.0, b) && keys.matches(body, y.0, a))
+                }
+                _ => false,
+            },
             EdgeSelect::Near { point, tolerance } => body.edge_midpoint(e).dist(at(point)?) <= num(tolerance, env)?,
             EdgeSelect::InBox { min, max } => {
                 let (lo, hi, m) = (at(min)?, at(max)?, body.edge_midpoint(e));
@@ -451,7 +466,7 @@ impl EdgeSelect {
             EdgeSelect::Radius(r) => body.edge_is_arc_of_radius(e, num(r, env)?),
             EdgeSelect::Any(list) => {
                 for q in list {
-                    if q.matches(body, e, uses, env)? {
+                    if q.matches(body, e, uses, env, keys)? {
                         return Ok(true);
                     }
                 }
@@ -459,7 +474,7 @@ impl EdgeSelect {
             }
             EdgeSelect::Both(list) => {
                 for q in list {
-                    if !q.matches(body, e, uses, env)? {
+                    if !q.matches(body, e, uses, env, keys)? {
                         return Ok(false);
                     }
                 }
@@ -476,6 +491,11 @@ impl EdgeSelect {
                 out.push(b.feature);
             }
             EdgeSelect::OnFace(f) => out.push(f.feature),
+            EdgeSelect::OnFaceKey(k) => k.references(out),
+            EdgeSelect::BetweenKeys(a, b) => {
+                a.references(out);
+                b.references(out);
+            }
             EdgeSelect::Any(list) | EdgeSelect::Both(list) => {
                 for q in list {
                     q.references(out);
@@ -1307,7 +1327,7 @@ impl Document {
             }
             Op::Pattern { of, along } => {
                 let moves = pattern_moves(along, env)?;
-                solid(self.copied(body.as_deref(), of, |b| moves.iter().map(|m| b.transformed(m)).collect())?).wrap()
+                solid(self.copied(body.as_deref(), of, tag, |b| moves.iter().map(|m| b.transformed(m)).collect())?).wrap()
             }
             Op::Mirror { of, point, normal } => {
                 let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
@@ -1316,7 +1336,7 @@ impl Document {
                     return Err(Error::InvalidInput("a mirror's normal must have a sensible, non-zero length".into()));
                 }
                 let m = Mirror::new(at(point)?, n);
-                solid(self.copied(body.as_deref(), of, |b| vec![b.mirrored(&m)])?).wrap()
+                solid(self.copied(body.as_deref(), of, tag, |b| vec![b.mirrored(&m)])?).wrap()
             }
             Op::ImportStep { text, mode } => {
                 let solids = coreshape::import::step::read_step(text, tag)?;
@@ -1368,8 +1388,16 @@ impl Document {
 
     /// The body with copies added: of listed features' solids, applied as they were, or of the
     /// whole body if none are listed. `copies` makes the images of one solid.
-    fn copied(&self, body: Option<&Body>, of: &[FeatureId], copies: impl Fn(&Body) -> Vec<Body>) -> Result<Body> {
+    fn copied(&self, body: Option<&Body>, of: &[FeatureId], feature: u32, copies: impl Fn(&Body) -> Vec<Body>) -> Result<Body> {
         let mut current = body.ok_or_else(|| Error::InvalidInput("there is no body yet to copy".into()))?.clone();
+        // Numbered from 1, since the original is copy 0 and has no mark.
+        let copies = |b: &Body| -> Vec<Body> {
+            let mut made = copies(b);
+            for (k, copy) in made.iter_mut().enumerate() {
+                copy.mark_copy(feature, k as u32 + 1);
+            }
+            made
+        };
         if of.is_empty() {
             return boolean_many(&current, &copies(&current), BoolOp::Union);
         }
@@ -1627,9 +1655,10 @@ fn named_faces(body: &Body, names: &[FaceRef]) -> Result<Vec<usize>> {
 /// The edges of a body a selection picks out.
 pub fn select_edges(query: &EdgeSelect, body: &Body, env: &Env) -> Result<Vec<usize>> {
     let uses = body.edge_uses();
+    let keys = Keys::default();
     let mut list = Vec::new();
     for e in 0..body.edges.len() {
-        if query.matches(body, e, &uses, env)? {
+        if query.matches(body, e, &uses, env, &keys)? {
             list.push(e);
         }
     }
@@ -1935,6 +1964,8 @@ pub fn edge_select_value(e: &EdgeSelect) -> Value {
     match e {
         EdgeSelect::All => Value::str("all"),
         EdgeSelect::Between(a, b) => Value::obj(vec![("between", Value::Arr(vec![Value::str(a.name()), Value::str(b.name())]))]),
+        EdgeSelect::OnFaceKey(k) => Value::obj(vec![("on_face", Value::str(k.text()))]),
+        EdgeSelect::BetweenKeys(a, b) => Value::obj(vec![("between", Value::Arr(vec![Value::str(a.text()), Value::str(b.text())]))]),
         EdgeSelect::OnFace(f) => Value::obj(vec![("on_face", Value::str(f.name()))]),
         EdgeSelect::Near { point, tolerance } => {
             Value::obj(vec![("near", point3_value(point)), ("tolerance", expr_value(tolerance))])
@@ -1965,10 +1996,11 @@ pub fn read_edge_select(v: &Value) -> Result<EdgeSelect> {
         known_keys(v, &["between"])?;
         return match pair.as_array() {
             Some([a, b]) => {
-                let name = |x: &Value| {
-                    x.as_str().ok_or_else(|| Error::InvalidInput("\"between\" takes two face names".into())).and_then(FaceRef::parse)
+                let key = |x: &Value| {
+                    x.as_str().ok_or_else(|| Error::InvalidInput("\"between\" takes two face names".into())).and_then(FaceKey::parse)
                 };
-                Ok(EdgeSelect::Between(name(a)?, name(b)?))
+                let (a, b) = (key(a)?, key(b)?);
+                Ok(if a.is_plain() && b.is_plain() { EdgeSelect::Between(a.face, b.face) } else { EdgeSelect::BetweenKeys(a, b) })
             }
             _ => Err(Error::InvalidInput("\"between\" takes two face names".into())),
         };
@@ -1976,7 +2008,8 @@ pub fn read_edge_select(v: &Value) -> Result<EdgeSelect> {
     if let Some(f) = v.get("on_face") {
         known_keys(v, &["on_face"])?;
         let name = f.as_str().ok_or_else(|| Error::InvalidInput("\"on_face\" takes a face name".into()))?;
-        return Ok(EdgeSelect::OnFace(FaceRef::parse(name)?));
+        let key = FaceKey::parse(name)?;
+        return Ok(if key.is_plain() { EdgeSelect::OnFace(key.face) } else { EdgeSelect::OnFaceKey(key) });
     }
     if let Some(p) = v.get("near") {
         known_keys(v, &["near", "tolerance"])?;
@@ -2168,7 +2201,18 @@ fn read_face_list(v: &Value, key: &str) -> Result<Vec<FaceRef>> {
     let bad = || Error::InvalidInput(format!("\"{key}\" must be a list of face names"));
     match v.get(key) {
         None => Ok(Vec::new()),
-        Some(list) => list.as_array().ok_or_else(bad)?.iter().map(|n| n.as_str().ok_or_else(bad).and_then(FaceRef::parse)).collect(),
+        Some(list) => list
+            .as_array()
+            .ok_or_else(bad)?
+            .iter()
+            .map(|n| {
+                let name = n.as_str().ok_or_else(bad)?;
+                if name.contains(['@', '[', '#']) {
+                    return Err(Error::InvalidInput(format!("\"{key}\" takes plain face names for now, so it can't take the key {name}")));
+                }
+                FaceRef::parse(name)
+            })
+            .collect(),
     }
 }
 
