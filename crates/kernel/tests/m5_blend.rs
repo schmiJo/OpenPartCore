@@ -448,3 +448,28 @@ fn rim_fillet_larger_than_the_corner_radius() {
     }
     close(vol(&f), 4.0 * total, 1e-5, "r > corner radius against integration");
 }
+
+#[test]
+fn a_chamfer_follows_a_tangent_chain_too() {
+    // One straight edge of a rounded rim brings the whole rim, as a fillet does.
+    let plate = extrude(&Profile::new(Wire::rounded_rect(60.0, 40.0, 8.0)), &Frame::WORLD, 10.0, 1).unwrap();
+    let rim = plate.edges_where(|i, _| (plate.edge_midpoint(i).z - 10.0).abs() < 1e-9);
+    let whole = chamfer(&plate, &rim, 2.0, 2).unwrap();
+    let one = plate.edges_where(|i, _| {
+        let m = plate.edge_midpoint(i);
+        (m.z - 10.0).abs() < 1e-9 && (m.y + 20.0).abs() < 1e-9
+    });
+    assert_eq!(one.len(), 1);
+    let chain = chamfer(&plate, &one, 2.0, 2).unwrap();
+    assert!((vol(&chain) - vol(&whole)).abs() < 1e-9, "{} against {}", vol(&chain), vol(&whole));
+    // Pappus for the four cones' worth of corner, and straight prisms along the sides.
+    let triangle = 2.0 * 2.0 / 2.0;
+    let straight = 2.0 * (60.0 - 16.0) + 2.0 * (40.0 - 16.0);
+    let centroid = 8.0 - 2.0 / 3.0;
+    let want = vol(&plate) - triangle * (straight + std::f64::consts::TAU * centroid);
+    assert!((vol(&chain) - want).abs() < 1e-7, "{} against {want}", vol(&chain));
+    // Turned off, it stops at the end of the edge.
+    let lone = chamfer_with(&plate, &one, 2.0, BlendOptions { propagate: false }, 2).unwrap();
+    assert!(vol(&lone) > vol(&chain) + 100.0, "{} against {}", vol(&lone), vol(&chain));
+    validate(&lone).unwrap();
+}

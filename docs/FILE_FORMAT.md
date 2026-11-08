@@ -62,7 +62,7 @@ Common fields: `id`, `name`, and `suppressed` (default false).
 | `pattern` | `of` (feature ids; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. |
 | `mirror` | `of` (as above), `point` (default origin), `normal` |
 | `fillet` | `edges`, `radius`, `propagate` (default true: follow tangent neighbours) |
-| `chamfer` | `edges`, `distance` |
+| `chamfer` | `edges`, `distance`, `propagate` (default true: follow tangent neighbours) |
 | `offset` | `distance`: every face moves out, or in if negative. Sharp edges stay sharp. |
 | `shell` | `thickness`, `open` (face names, default none). An inner wall is named for this feature, with the slot of the face it follows: `f9:side.3` lies behind `f2:side.3`. |
 | `draft` | `faces` (names), `degrees`, `pull` (default +z), `neutral` (a point on the plane where faces stay put; default the origin). A positive angle narrows the part along the pull, and widens a hole. |

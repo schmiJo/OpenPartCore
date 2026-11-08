@@ -151,12 +151,19 @@ fn propagate_tangents(body: &Body, selected: &[usize]) -> Result<Vec<usize>> {
     Ok(out)
 }
 
-/// Bevels the given edges, cutting back by a distance along each face.
+/// Bevels the given edges, cutting back by a distance along each face, following them around
+/// tangent corners.
 pub fn chamfer(body: &Body, edges: &[usize], distance: f64, feature: u32) -> Result<Body> {
+    chamfer_with(body, edges, distance, BlendOptions { propagate: true }, feature)
+}
+
+/// Bevels edges, with control over tangent propagation.
+pub fn chamfer_with(body: &Body, edges: &[usize], distance: f64, options: BlendOptions, feature: u32) -> Result<Body> {
     if !(distance.is_finite() && distance >= MIN_FEATURE) {
         return Err(Error::InvalidInput(format!("chamfer distance {distance} is too small")));
     }
-    blend(body, edges, Kind::Chamfer(distance), feature)
+    let selected = if options.propagate { propagate_tangents(body, edges)? } else { edges.to_vec() };
+    blend(body, &selected, Kind::Chamfer(distance), feature)
 }
 
 fn same_curve(a: &Curve, b: &Curve) -> bool {

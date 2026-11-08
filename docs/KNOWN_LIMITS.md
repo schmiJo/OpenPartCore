@@ -82,8 +82,6 @@ Not supported, returning an error:
 
 - Edges on traced intersection curves or ellipses, such as the rim of a hole through a cylinder.
 - Variable radius.
-- Chamfers do not follow tangent neighbours. Fillets do by default (`fillet_with` turns it off).
-  That is deliberate for now, and easy to change.
 - A radius that runs off a neighbouring face. Real kernels can absorb the overrun and restructure
   the neighbours. This one refuses.
 

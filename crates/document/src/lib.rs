@@ -13,7 +13,7 @@
 //! the key covers everything a result depends on, this one rule is correct for dimension
 //! changes, edits, suppression and reordering alike.
 
-use coreshape::blend::{chamfer, fillet_with, BlendOptions};
+use coreshape::blend::{chamfer_with, fillet_with, BlendOptions};
 use coreshape::boolean::BoolOp;
 use coreshape::multi::{boolean_many, merged_tools, sweep, PathStep};
 use coreshape::build::{
@@ -520,7 +520,7 @@ pub enum Op {
     Revolve { sketch: FeatureId, degrees: Expr, mode: Mode },
     Solid { primitive: Primitive, at: Placement, mode: Mode },
     Fillet { edges: EdgeSelect, radius: Expr, propagate: bool },
-    Chamfer { edges: EdgeSelect, distance: Expr },
+    Chamfer { edges: EdgeSelect, distance: Expr, propagate: bool },
     /// Sweeps a sketch along a smooth path of lines and arcs, starting at the sketch plane and
     /// heading along its normal.
     Sweep { sketch: FeatureId, path: Vec<SweepStep>, mode: Mode },
@@ -580,8 +580,9 @@ impl Op {
         Op::Fillet { edges, radius: radius.into(), propagate: true }
     }
 
+    /// A chamfer that follows tangent neighbours, the default.
     pub fn chamfer(edges: EdgeSelect, distance: impl Into<Expr>) -> Op {
-        Op::Chamfer { edges, distance: distance.into() }
+        Op::Chamfer { edges, distance: distance.into(), propagate: true }
     }
 
     pub fn kind(&self) -> &'static str {
@@ -731,7 +732,7 @@ impl Op {
                 edges.collect_exprs(&mut out);
                 out.push(radius);
             }
-            Op::Chamfer { edges, distance } => {
+            Op::Chamfer { edges, distance, .. } => {
                 edges.collect_exprs(&mut out);
                 out.push(distance);
             }
@@ -1311,10 +1312,11 @@ impl Document {
                 let options = BlendOptions { propagate: *propagate };
                 Ok(solid(fillet_with(&current, &list, num(radius, env)?, options, tag)?))
             }
-            Op::Chamfer { edges, distance } => {
+            Op::Chamfer { edges, distance, propagate } => {
                 let current = body.ok_or_else(|| Error::InvalidInput("a chamfer needs a body to work on".into()))?;
                 let list = select_edges(edges, &current, env)?;
-                Ok(solid(chamfer(&current, &list, num(distance, env)?, tag)?))
+                let options = BlendOptions { propagate: *propagate };
+                Ok(solid(chamfer_with(&current, &list, num(distance, env)?, options, tag)?))
             }
         }
     }
@@ -2052,10 +2054,11 @@ pub fn op_value(op: &Op) -> Value {
             ("radius", expr_value(radius)),
             ("propagate", Value::Bool(*propagate)),
         ]),
-        Op::Chamfer { edges, distance } => Value::obj(vec![
+        Op::Chamfer { edges, distance, propagate } => Value::obj(vec![
             ("type", Value::str("chamfer")),
             ("edges", edge_select_value(edges)),
             ("distance", expr_value(distance)),
+            ("propagate", Value::Bool(*propagate)),
         ]),
     }
 }
@@ -2256,8 +2259,15 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             })
         }
         "chamfer" => {
-            with(&["type", "edges", "distance"])?;
-            Ok(Op::Chamfer { edges: read_edge_select(field(v, "edges", "a chamfer")?)?, distance: expr_field(v, "distance", "a chamfer")? })
+            with(&["type", "edges", "distance", "propagate"])?;
+            Ok(Op::Chamfer {
+                edges: read_edge_select(field(v, "edges", "a chamfer")?)?,
+                distance: expr_field(v, "distance", "a chamfer")?,
+                propagate: match v.get("propagate") {
+                    None => true,
+                    Some(p) => p.as_bool().ok_or_else(|| Error::InvalidInput("\"propagate\" must be true or false".into()))?,
+                },
+            })
         }
         other => Err(Error::InvalidInput(format!(
             "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, sweep, solid, pattern, mirror, fillet, chamfer, offset, shell or draft"

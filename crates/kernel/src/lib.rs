@@ -26,7 +26,7 @@ pub mod topo;
 pub mod tweak;
 pub mod validate;
 
-pub use blend::{chamfer, fillet, fillet_with, BlendOptions};
+pub use blend::{chamfer, chamfer_with, fillet, fillet_with, BlendOptions};
 pub use boolean::{intersect, subtract, union, BoolOp};
 pub use build::{box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus};
 pub use curve::Curve;
