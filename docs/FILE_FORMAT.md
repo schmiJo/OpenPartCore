@@ -105,3 +105,55 @@ Repeats make copies, each of which counts as its own region:
 - A feature may only refer to features before it, and `sketch` must name a sketch.
 - Parameters may refer to each other but not in a cycle.
 - A version other than this reader's is refused with a message saying so.
+
+## Constrained sketches
+
+A `constrained_sketch` feature holds a sketch drawn with constraints, which is solved at each rebuild:
+
+```json
+{"id": 1, "name": "Outline", "type": "constrained_sketch", "plane": {"origin": [0, 0, 0]},
+ "sketch": {
+   "format": "coreshape-sketch", "version": 1,
+   "entities": [
+     {"id": 1, "type": "line", "start": [0, 0], "end": [30, 1]},
+     {"id": 2, "type": "line", "start": [30, 0], "end": [30, 20]},
+     {"id": 3, "type": "arc", "center": [0, 0], "radius": 5, "start": [5, 0], "end": [0, 5]},
+     {"id": 4, "type": "circle", "center": [10, 10], "radius": 3},
+     {"id": 5, "type": "point", "at": [0, 0], "construction": true}
+   ],
+   "constraints": [
+     {"id": 1, "type": "coincident", "a": "1.end", "b": "2.start"},
+     {"id": 2, "type": "horizontal", "a": "1"},
+     {"id": 3, "type": "distance", "a": "1", "value": "width / 2"}
+   ]
+ }}
+```
+
+A face swept from entity 7 of feature 3 is named `f3:side.7`, whatever order things were drawn in. Lines,
+arcs and circles that aren't `construction` must form separate closed loops. A loop inside another is a
+hole, and a loop inside a hole starts a new region. The geometry is only a starting position: it needn't
+meet the constraints, and the nearer it is, the likelier it lands on the solution you meant.
+
+An arc runs counter-clockwise from `start` to `end`.
+
+**References.** `"7"` is a whole entity. `"7.start"`, `"7.end"` and `"7.center"` are its parts. `"origin"`,
+`"x_axis"` and `"y_axis"` are fixed reference geometry.
+
+| Constraint `type` | Fields | Meaning |
+|---|---|---|
+| `coincident` | `a`, `b` | Two points together, or a point on a line, circle or arc (`b` is the whole edge). A line counts as infinite and an arc as its full circle. |
+| `horizontal`, `vertical` | `a`, optional `b` | A line, or two points level or upright with each other |
+| `parallel`, `perpendicular` | `a`, `b` | Two lines |
+| `tangent` | `a`, `b` | A line and a curve, or two curves. If they share an end through a coincident constraint, they are tangent there. |
+| `equal` | `a`, `b` | Two lines of one length, or two curves of one radius |
+| `midpoint` | `point`, `line` | A point at the middle of a line |
+| `concentric` | `a`, `b` | Two curves with one center |
+| `symmetric` | `a`, `b`, `about` | Two points mirrored about a whole line, or through a point |
+| `normal` | `a`, `b` | A line through a curve's center, or two curves crossing at right angles |
+| `fix` | `what`, `at` | Holds something at the values in `at`: x, y for a point; both ends for a line; x, y, radius for a circle; those then both ends for an arc |
+| `distance` | `a`, optional `b`, `value` | Two points, a point and a whole line, or a line's length (`a` alone). Positive. |
+| `horizontal_distance`, `vertical_distance` | `a`, `b`, `value` | `b.x - a.x` or `b.y - a.y`, which may be negative |
+| `radius`, `diameter` | `of`, `value` | A circle or arc. Positive. |
+| `angle` | `a`, optional `b`, `value` | Degrees, counter-clockwise from line `a`'s direction to line `b`'s. With `a` alone: from +x to a line, or an arc's span. |
+
+A `value` is a number or an expression over the document's parameters.

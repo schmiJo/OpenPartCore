@@ -15,6 +15,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "coreshape-mcp"
+version = "0.1.0"
+dependencies = [
+ "coreshape",
+ "coreshape-document",
+ "coreshape-render",
+ "coreshape-sketch",
+]
+
+[[package]]
 name = "coreshape-render"
 version = "0.1.0"
 dependencies = [

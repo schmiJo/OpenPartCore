@@ -1,5 +1,7 @@
 # Known limits and open defects
 
+The sketch solver's limits and results are in [SKETCH_SOLVER.md](SKETCH_SOLVER.md), and the MCP server's in [MCP.md](MCP.md).
+
 Numbers come from the runs described here. To replay any fuzz case:
 
 ```sh
@@ -114,8 +116,7 @@ crossed cylinders whose radius difference equals the axis offset.
   `near` or `in_box` to pick one.
 - Coordinates beyond 10 km are refused, because tolerances stop meaning anything there.
 - A sketch can make at most 4000 regions, and a region can have at most 999 holes before names stop
-  being unique. Sketch geometry is limited to what the shape types can write; the constraint solver
-  will add solved sketches.
+  being unique. Constrained sketches name faces by entity, so they have no such limit.
 
 ## Numerics
 

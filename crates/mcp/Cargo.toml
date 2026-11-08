@@ -1,0 +1,17 @@
+[package]
+name = "coreshape-mcp"
+description = "An MCP server, so an AI agent can model with the CoreShape kernel and see the result"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "coreshape-mcp"
+path = "src/main.rs"
+
+# All from this repository. The protocol is JSON over stdin and stdout, which needs nothing more.
+[dependencies]
+coreshape = { path = "../kernel" }
+coreshape-sketch = { path = "../sketch" }
+coreshape-document = { path = "../document" }
+coreshape-render = { path = "../render" }

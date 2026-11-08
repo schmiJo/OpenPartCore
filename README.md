@@ -1,6 +1,7 @@
 # CoreShape
 
-A small CAD kernel in Rust with its own exact B-rep geometry, and no dependencies.
+A small CAD kernel in Rust with its own exact B-rep geometry, and no dependencies, with a sketch
+constraint solver and an MCP server, so an AI agent can model with it and see the result.
 It runs natively and in the browser through WebAssembly.
 
 **What it does**
@@ -13,7 +14,12 @@ It runs natively and in the browser through WebAssembly.
 - **Documents:** parameters and features as plain data, saved as readable JSON. Features can
   be edited, suppressed, deleted and reordered. References go by name, and a rebuild reuses
   every step whose inputs didn't change.
-- **Output:** exact volume and area, a watertight mesh, STL and STEP.
+- **Sketches:** a 2D constraint solver in its own crate. It reports remaining freedom, names
+  redundant and conflicting constraints, supports dragging, and is fast enough for every mouse
+  move. Checked against FreeCAD's PlaneGCS: see [docs/SKETCH_SOLVER.md](docs/SKETCH_SOLVER.md).
+- **Output:** exact volume and area, a watertight mesh, STL and STEP, and offscreen PNG images.
+- **For agents:** an MCP server for building, editing and inspecting parts by stable names. See
+  [docs/MCP.md](docs/MCP.md).
 
 Limits and open defects are in [docs/KNOWN_LIMITS.md](docs/KNOWN_LIMITS.md). The original
 plan is in [docs/PLAN.md](docs/PLAN.md).
@@ -33,6 +39,10 @@ cargo run --release -p coreshape-wasm --example scan -- 150      # random slider
 python3 scripts/build_web.py                 # build the viewer into dist/
 python3 scripts/selftest_web.py              # drive it in headless Chrome
 scripts/check_step.sh /tmp/step-check        # read every model's STEP file in OpenCASCADE
+
+cargo run --release -p coreshape-sketch --example fuzz -- 5000     # randomized sketches, with a report
+cargo run --release -p coreshape-sketch --example bench            # solver speed
+python3 scripts/mcp_session.py /tmp/mcp-session                    # model a part through the MCP server
 ```
 
 `dist/index.html` is one self-contained file, about 800 KB including the kernel. Open it
@@ -41,8 +51,8 @@ from any static host.
 ## Using the kernel
 
 ```rust
-use coreshape::document::*;
 use coreshape::*;
+use coreshape_document::*;
 
 let mut doc = Document::new();
 doc.set_parameter("w", 40.0)?;
@@ -89,18 +99,20 @@ The file format is described in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
 | `crates/kernel/src/profile.rs`, `build.rs` | Sketch profiles, extrude, revolve, primitives |
 | `crates/kernel/src/boolean/` | Root finding, intersections, face tracing, classification, cleanup |
 | `crates/kernel/src/blend.rs` | Fillets and chamfers |
-| `crates/kernel/src/document.rs` | Parameters, features, rebuilding, the file format |
-| `crates/kernel/src/expr.rs`, `json.rs` | Dimension expressions, and a JSON reader and writer |
 | `crates/kernel/src/mass.rs` | Volume and area from the B-rep through Green's theorem |
 | `crates/kernel/src/tess/` | Exact-predicate triangulator and meshing |
 | `crates/kernel/src/export/` | STL and STEP |
 | `crates/kernel/src/fuzz.rs` | Replayable randomized Boolean testing |
+| `crates/sketch/` | The constraint solver, with expressions and JSON. Knows nothing about the kernel |
+| `crates/document/` | Parameters, features, rebuilding and the file format, joining the kernel and solver |
+| `crates/render/` | Offscreen rendering and a PNG encoder |
+| `crates/mcp/` | The MCP server |
 | `crates/wasm/` | C ABI and the demo models |
 | `web/viewer.html` | The WebGL2 viewer |
 
 ## Dependencies
 
-None at runtime or for testing. The kernel, its triangulator and its random number generator
-are all in this repository, and the browser layer is a hand-written C ABI with no binding
-generator. Development uses only the Rust toolchain. The browser self test needs Chrome, and
+None at runtime or for testing. Each crate depends only on others in this repository: the kernel and the
+sketch solver on nothing at all. The triangulator, random numbers, JSON, PNG encoding and the MCP protocol are all
+written here, and the browser layer is a hand-written C ABI with no binding generator. Development uses only the Rust toolchain. The browser self test needs Chrome, and
 the STEP check uses an existing FreeCAD build.

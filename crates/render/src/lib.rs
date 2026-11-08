@@ -440,8 +440,9 @@ fn draw_axes(rgb: &mut [u8], width: usize, height: usize, cam: &Camera) {
 
 /// Renders a body.
 pub fn render(body: &Body, options: &Options) -> Result<Image> {
-    let bounds = body.aabb();
-    let mesh = tessellate(body, &TessParams::for_size(bounds.diagonal()))?;
+    let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal()))?;
+    // The mesh's bounds, since the B-rep's box is a safe overestimate around curves.
+    let bounds = mesh.bounds();
     Ok(render_mesh(body, &mesh, &bounds, options))
 }
 
@@ -502,8 +503,8 @@ fn render_mesh(body: &Body, mesh: &Mesh, bounds: &Aabb, options: &Options) -> Im
 
 /// Four views in one picture: front, right, top and iso, as on a drawing.
 pub fn render_four(body: &Body, options: &Options) -> Result<Image> {
-    let bounds = body.aabb();
-    let mesh = tessellate(body, &TessParams::for_size(bounds.diagonal()))?;
+    let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal()))?;
+    let bounds = mesh.bounds();
     let (cell_w, cell_h) = ((options.width / 2).max(16), (options.height / 2).max(16));
     let (w, h) = (cell_w as usize * 2, cell_h as usize * 2);
     let mut rgb = vec![255u8; w * h * 3];

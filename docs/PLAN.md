@@ -41,6 +41,8 @@ oracle, through a neighbouring FreeCAD build, read-only.
 | M5 | Chamfers and fillets | Done, with the limits listed in `KNOWN_LIMITS.md` |
 | M6 | Feature history with names that survive rebuilds, as saveable data | Done |
 | M7 | Published demos and a known-failures list | Done, except testing on a real iPhone |
+| M8 | Sketch constraint solver, checked against PlaneGCS | Done, see `SKETCH_SOLVER.md` |
+| M9 | MCP server and offscreen rendering | Done, except connecting a real MCP client, see `MCP.md` |
 
 ## Not planned yet
 
@@ -49,8 +51,5 @@ blends, assemblies, and drawings.
 
 ## Next, in order
 
-1. A 2D sketch constraint solver, as its own crate, checked against FreeCAD's PlaneGCS.
-2. An MCP server (feature create and edit, faces and edges with stable names, rebuild, export) and
-   offscreen rendering to PNG, so an AI agent can model with the kernel and see the result.
-3. Multi-tool Booleans, mirror, patterns, shell and offset, draft, sweep on lines and arcs.
-4. A NURBS design note before any NURBS code: the distance-function certificates don't carry over.
+1. Multi-tool Booleans, mirror, patterns, shell and offset, draft, sweep on lines and arcs.
+2. A NURBS design note before any NURBS code: the distance-function certificates don't carry over.

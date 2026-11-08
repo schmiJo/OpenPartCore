@@ -1353,7 +1353,8 @@ fn combine(body: Option<&Body>, tools: Vec<Body>, mode: Mode) -> Result<Body> {
     Ok(current)
 }
 
-fn select_edges(query: &EdgeSelect, body: &Body, env: &Env) -> Result<Vec<usize>> {
+/// The edges of a body a selection picks out.
+pub fn select_edges(query: &EdgeSelect, body: &Body, env: &Env) -> Result<Vec<usize>> {
     let uses = body.edge_uses();
     let mut list = Vec::new();
     for e in 0..body.edges.len() {
