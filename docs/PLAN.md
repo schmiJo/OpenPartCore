@@ -25,7 +25,7 @@ oracle, through a neighbouring FreeCAD build, read-only.
 
 - Fillets cover straight and circular edges, plus sphere patches at convex three-edge corners.
   A radius that would swallow a neighbouring face is an error.
-- Sketches are explicitly dimensioned profiles. There is no constraint solver.
+- The `sketch` feature takes explicitly dimensioned profiles, and `constrained_sketch` adds the constraint solver, which is a crate of its own.
 - STEP import reads analytic surfaces and swept curves. Free-form surfaces and assemblies are refused.
 - Two bodies touching only along an edge or at a point become a valid manifold result with
   duplicated topology. `Body::contact_vertices` reports it.
@@ -40,10 +40,13 @@ oracle, through a neighbouring FreeCAD build, read-only.
 | M4 | STEP export, checked in OpenCASCADE | Done |
 | M5 | Chamfers and fillets | Done, with the limits listed in `KNOWN_LIMITS.md` |
 | M6 | Feature history with names that survive rebuilds, as saveable data | Done |
-| M7 | Published demos and a known-failures list | Done, except testing on a real iPhone |
+| M7 | Published demos and a known-failures list | Done. Used on a real iPhone, but not measured there |
 | M8 | Sketch constraint solver, checked against PlaneGCS | Done, see `SKETCH_SOLVER.md` |
 | M9 | MCP server and offscreen rendering | Done, except connecting a real MCP client, see `MCP.md` |
 | M10 | Multi-tool Booleans, patterns, mirror, sweep, offset, shell, draft | Done, with the limits in `KNOWN_LIMITS.md` |
+| M11 | Sketch regions, distances to curves, reference dimensions, ellipses | Done, see `SKETCH_SOLVER.md` |
+| M12 | Splines in sketches, extruded and revolved (phases 1 and 2 of `NURBS_DESIGN.md`) | Done, with the limits in `KNOWN_LIMITS.md`. Phase 3 isn't decided |
+| M13 | STEP import of analytic surfaces and swept curves | Done, checked on OpenCASCADE's files only |
 
 ## For code building on this repository
 

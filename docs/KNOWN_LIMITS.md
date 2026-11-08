@@ -1,12 +1,24 @@
 # Known limits and open defects
 
-The sketch solver's limits and results are in [SKETCH_SOLVER.md](SKETCH_SOLVER.md), and the MCP server's in [MCP.md](MCP.md).
+What the kernel refuses, what it only approximates, and what hasn't been tested. The sketch solver's limits and results are in
+[SKETCH_SOLVER.md](SKETCH_SOLVER.md), and the MCP server's in [MCP.md](MCP.md). Every section was last compared with the code on 2026-11-08.
 
 Numbers come from the runs described here. To replay any fuzz case:
 
 ```sh
-cargo run --release -p coreshape --example replay -- <gen|al> <seed>
+cargo run --release -p coreshape --example replay -- <grid|rot|prism|gen|al|ext|rev> <seed>
 ```
+
+## What isn't built
+
+These are missing, not failing. [PLAN.md](PLAN.md) has the order.
+
+- **Free-form surfaces.** No lofts, and no `B_SPLINE_SURFACE` from a file. The only spline surfaces are curves swept along a line or around an axis. This is phase 3 of [NURBS_DESIGN.md](NURBS_DESIGN.md), which isn't decided.
+- **Helix, delete face and thicken.** Not started. A sweep path can only be lines and arcs.
+- **Offset, shell and draft that change a body's topology.** They refuse instead: see [below](#offset-shell-and-draft).
+- **Fillets and chamfers beyond straight and circular edges.** No ellipses, traced curves or spline faces, no variable radius, and no general vertex blends: see [below](#fillets-and-chamfers).
+- **Assemblies and drawings.** A STEP assembly is refused.
+- **A name for each single face.** A face name can cover several faces: see [Documents](#documents).
 
 ## Fuzz results
 
@@ -45,13 +57,13 @@ tangency, because the curve touches a face boundary tangentially at a vertex.
 | Category | Cases | Refused | Wrong |
 |---|---|---|---|
 | Free-form splines and ellipses, extruded | 1,000 | 1 (0.1%) | 0 |
-| Spline profiles, revolved | 600 | 1 (0.17%) | 0 |
+| Spline profiles, revolved | 1,000 | 1 (0.1%) | 0 |
 
-The refusals are "extrusion and torus meet in a loop too small to trace" and "plane and torus are tangent at a point on their
-intersection". An earlier run reported one wrong result, a mesh that wouldn't close on a seed-96 extrusion. The profile really did cross
+The refusals are "extrusion and torus meet in a loop too small to trace" (`ext 775`) and "plane and torus are tangent at a point on their
+intersection" (`rev 115`). An earlier run reported one wrong result, a mesh that wouldn't close on a seed-96 extrusion. The profile really did cross
 itself, within the last sample before a corner, and outlines are now checked more closely toward corners, so that one is now refused.
 
-**In OpenCASCADE,** 13 spline parts read back valid. Volumes agree to 3e-7 or better on 11. On `spline_outline` and `spline_drilled`, OpenCASCADE's
+**In OpenCASCADE,** all 50 parts of the gallery read back valid, 15 of them spline parts. On those 15, volumes agree to 3e-7 or better on 13. On `spline_outline` and `spline_drilled`, OpenCASCADE's
 reported volume is 1.8e-4 and 1.6e-4 above this kernel's. Its own numbers settle this in the kernel's favour: for `spline_outline`, a polygon through 20,001 points
 of OpenCASCADE's own edges gives a cap area of 812.6155, and this kernel's is 812.6155, while its `Area` for that face says 812.9296. A mesh of the solid made by OpenCASCADE
 has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
@@ -79,21 +91,22 @@ Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.
 - **An outline that crosses itself is found by sampling,** 16 pieces per knot interval and closer toward its ends, so a crossing much smaller than that could get through to the mesher, which
   refuses it there.
 - **Volumes are integrated,** so `MassProps::volume_error` reports an estimate from comparing two rules, typically about 1e-12 relative. It isn't a proof, but tests hold it against known answers: an ellipse's prism, a torus, a sphere, a spheroid and a slanted cut.
-- **Speed.** Each distance on one of these surfaces costs a search of about a microsecond, where an analytic one costs nanoseconds. The spline demos take about 130 ms a rebuild, 230 ms for a full mesh of the vase, and 510 ms for the cam's mass properties, since its cross hole makes traced curves on spline faces. A slider's draft mesh skips mass properties.
+- **Speed.** Each distance on one of these surfaces costs a search of about a microsecond, where an analytic one costs nanoseconds. Run natively, the spline demos take about 130 ms a rebuild, 230 ms for a full mesh of the vase, and 510 ms for the cam's mass properties, since its cross hole makes traced curves on spline faces. A slider's draft mesh skips mass properties. In the browser they're the slowest demos: see [Slider speed](#slider-speed).
 
 ## Cases OpenCASCADE handles and this kernel refuses
 
-Found by an independent review harness and still open:
+Found by an independent review harness and still open. `--example review named <file>` reruns them, and all four were refused the same way on 2026-11-08:
 
 | Case | This kernel | OpenCASCADE |
 |---|---|---|
 | Cylinder r = 5.00001 over r = 5, coaxial: subtract the thin shell | Refused: "the result does not close" | Volume 0.003 |
 | Cylinder r = 5 with its axis offset 1e-5: subtract the sliver | Refused: "the result does not close" | Volume 0.001 |
-| Fillet an elliptical rim | Refused: unsupported curve | 7835.628 |
-| Fillet the saddle edge of a tee pipe | Refused: unsupported curve | 20449.687 |
+| Fillet an elliptical rim | Refused: "fillets and chamfers work on straight and circular edges only" | 7835.628 |
+| Fillet the saddle edge of a tee pipe | Refused the same way | 20449.687 |
 
 The first two are slivers near the tolerance, and a refusal there is the safe answer, but the
-message should name the sliver instead of blaming closure.
+message should name the sliver instead of blaming closure. OpenCASCADE also reads free-form surfaces and
+assemblies from STEP files, which this kernel refuses.
 
 ## What Booleans refuse by design
 
@@ -122,6 +135,7 @@ Supported:
 Not supported, returning an error:
 
 - Edges on traced intersection curves or ellipses, such as the rim of a hole through a cylinder.
+- Any edge touching a spline face.
 - Variable radius.
 - A radius that runs off a neighbouring face. Real kernels can absorb the overrun and restructure
   the neighbours. This one refuses.
@@ -141,14 +155,23 @@ Works, but differs from commercial CAD:
 - Mixed convex and concave edges at one vertex have little test coverage. The Boolean checks
   still guard the result, but the shape may not be the one you'd pick.
 
-**Random slider positions on the demos** (200 per model): no invalid bodies. Refused: bracket 12,
-flange 6, plate 11, crossed cylinders 7, and stress 11 (always the deliberate known-limit case).
-Most refusals are dimensions that truly don't fit. The rest are exact tangencies, for example
-crossed cylinders whose radius difference equals the axis offset.
+**Random slider positions on the demos** (200 per model, `--example scan` in `crates/wasm`): no invalid bodies.
+
+| Demo | Refused | Why |
+|---|---|---|
+| Bracket | 12 | The chamfer or fillet runs off its neighbour (8), or a chamfered edge no longer exists at those dimensions (4) |
+| Mounting plate | 11 | A fillet ends up tangent along an intersection (5), the holes cross (3), or the fillet runs off its neighbour (2), and 1 more |
+| Crossed cylinders | 7 | An exact tangency, such as a radius difference equal to the axis offset |
+| Stress cases | 11 | Always the deliberate known-limit case |
+| Flange, rounded block, sliding pockets, vase, cam, knob, ring sector | 0 | |
+
+The vase was refused at 13 of 200 until this scan was rerun on 2026-11-08. That was a bug and not a limit: when a point lay exactly where the closest-point search halves
+a span, the search missed it and reported the point as 32 mm from its own curve. The validity check refused every one, so no wrong shape came out. It's fixed, with a test. The fuzz
+hadn't found it because its curves have several spans, while the vase's single span puts the check's sample exactly on the midpoint.
 
 ## Offset, shell and draft
 
-These keep a body's topology and move its surfaces, so they are exact, but:
+These keep a body's topology and move its surfaces, so they are exact. OpenShape has asked for versions that survive a change of topology, which aren't started. Today:
 
 - **A change big enough to alter the topology is refused,** such as an offset that makes a small face vanish or
   closes a hole. Commercial kernels restructure the neighbours. This one says the change is too big.
@@ -164,19 +187,29 @@ These keep a body's topology and move its surfaces, so they are exact, but:
 Checked in OpenCASCADE: `offset_out` and `offset_in` on a fully rounded box match its own `makeOffsetShape` volumes (12497.7143
 and 5404.3606), and all the results read as valid solids.
 
+## Sweeps
+
+- **The path is lines and arcs,** and each step carries on from the last one's direction, so there are no corners, free curves or helices.
+- **A bend tighter than the profile is wide is refused,** since the profile would cross the bend's center.
+- **Each step is built separately and joined by a Boolean,** so a path that runs into itself gives the union of its pieces and isn't refused, and it can hit the Boolean's limits above.
+- **Spline profiles along a path have no test of their own.**
+
 ## Many tools at once
 
 Tools go in together if their bounding boxes don't touch, and are joined first if they do, one by one. So heavily overlapping tools
-are no faster than before. 400 holes: 0.77 s at once, 7.9 s one by one, and 19.7 s in OpenCASCADE one by one. 1600 holes: 6.9 s.
+are no faster than before. 400 holes: 0.44 s at once, 7.9 s one by one, and 19.7 s in OpenCASCADE one by one. 1600 holes: 5.3 s at once. The one-by-one figures are from before the later speed work.
 
 ## Documents
 
 - Each feature keeps one cached result, so switching back and forth between two states recomputes
   whatever changed each time.
-- A copy from a pattern or mirror keeps the names of what it copied, so a name covers them all.
-- All patches made by one fillet or chamfer feature share a face name. A name can also cover several
-  pieces of a face split by a later feature. Selecting by name takes all of them; combine it with
-  `near` or `in_box` to pick one.
+- **A face name is stable but not unique.** No feature renames a face, but a name means every face that has it:
+  a pattern or mirror copy has the same name as its original, even in a different plane; all the faces of one fillet or chamfer
+  feature share a name; a whole circle's wall is two faces under one name; and a later cut leaves pieces under one name. Offset
+  and draft keep one face per name, and a shell's inner walls are `f3:side.N` after the face they follow. A name disappears when its face does.
+  [FILE_FORMAT.md](FILE_FORMAT.md) has the table and `crates/document/tests/face_names.rs` holds it to that.
+- **So a sketch attached to a face by name can't say which copy it means.** Selecting edges by name takes all of them, and adding
+  `near` or `in_box` picks by position, which can pick something else after a dimension changes. Copy numbers aren't built.
 - Coordinates beyond 10 km are refused, because tolerances stop meaning anything there.
 - A sketch can make at most 4000 regions, and a region can have at most 999 holes before names stop
   being unique. Constrained sketches name faces by entity, so they have no such limit.
@@ -204,13 +237,17 @@ slider, since the first usually affects more features. `python3 scripts/selftest
 
 | Model | Before | While dragging now | When a drag pauses now |
 |---|---|---|---|
-| Bracket | 22, 71 | 12, 30 | 18, 37 |
-| Flange | 81, 119 | 28, 36 | 61, 67 |
-| Rounded block | 178, 165 | 62, 54 | 84, 74 |
-| Mounting plate | 188, 296 | 51, 93 | 121, 172 |
-| Crossed cylinders | 73, 7 | 24, 5 | 82, 7 |
-| Turned knob | 27, 31 | 16, 20 | 34, 33 |
-| Ring sector | 88, 93 | 37, 29 | 121, 92 |
+| Bracket | 22, 71 | 11, 31 | 18, 31 |
+| Flange | 81, 119 | 33, 46 | 58, 83 |
+| Rounded block | 178, 165 | 62, 53 | 90, 71 |
+| Mounting plate | 188, 296 | 47, 93 | 87, 163 |
+| Crossed cylinders | 73, 7 | 16, 5 | 33, 4 |
+| Turned knob | 27, 31 | 7, 8 | 24, 25 |
+| Ring sector | 88, 93 | 11, 10 | 38, 37 |
+| Spline vase | | 179, 159 | 340, 371 |
+| Spline cam | | 162, 148 | 719, 634 |
+
+"Before" is before the speed work, and the rest were measured again on 2026-11-08. The spline demos came later, and they're the slowest: each distance on a spline surface costs a search. Most of the cam's pause is its mass properties.
 
 While dragging, a slider gets a lighter mesh (about a fifth of the triangles on curved parts) and volume and area wait, shown dimmed. All of the
 kernel's checks still run: skipping the slower ones was measured, and saved under 10%, so they stay on. About 140 ms after the slider stops,
@@ -224,16 +261,17 @@ The kernel itself got two to four times faster on these models:
 
 ## Not tested
 
-- **Safari in depth.** The stand-alone page has been opened on a real iPhone over the local network, where it ran and looked right, and
-  its sliders felt a little laggy before the speed work below. Nothing has measured it there, and the self test only runs in headless
-  Chrome. The speed work hasn't yet been judged on the phone.
-- **The hosted page itself.** It has been published but not opened. If the host's content policy
+- **Safari in depth.** The page has been used on a real iPhone, where it ran and looked right. Nothing has measured it there, and the self test only runs in headless Chrome.
+- **Phone performance.** By hand on the iPhone after the speed work, sliders felt fast, with the mounting plate the slowest and acceptable. That was before the spline demos, which are now
+  the slowest by far, and they haven't been tried on a phone. The slider times above are from this desktop.
+- **The hosted page itself, as far as this repository's checks go.** Nothing automated opens it. If the host's content policy
   blocks WebAssembly, the page shows an error saying it could not start.
-- **Phone performance.** See the slider times below, which are from this desktop. A phone's haven't been measured.
 - **Whether the hosted page allows workers.** The kernel runs in a worker so that a rebuild can't hold up the page. If a host forbids
   workers it runs in the page instead, with the same results and checks, and the page can stall during a rebuild. The self test runs both
   ways, but not on the host itself.
 - **Running on macOS and Windows.** The kernel compiles for both, but tests have only run on Linux.
 - **The download path on the hosted page.** Saving uses the host's download capability with the
   file wrapped in a zip, because `.step` and `.stl` aren't on its allowlist.
-- **Other CAD systems.** STEP files have been checked in OpenCASCADE only.
+- **Other CAD systems.** STEP files have been written and read back with OpenCASCADE only. Files from other writers and large real-world parts haven't been tried, and the 22 import shapes are small test parts.
+- **A real MCP client.** Only the test suite has connected to the server: see [MCP.md](MCP.md).
+- **Splines in the sketch solver against PlaneGCS.** Lines, arcs, circles, ellipses and distances were compared, and splines only have the solver's own fuzz: see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).

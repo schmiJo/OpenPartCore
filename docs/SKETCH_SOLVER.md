@@ -133,8 +133,8 @@ where their boxes overlap.
 
 **Variables.** Every variable is a length: coordinates and radii, never angles. So "move as little as
 possible" has one meaning across the sketch. An arc is a center, a radius and two end points, with both
-ends held on the circle. Its 7 variables and 2 equations leave the 5 freedoms an arc has. A later ellipse
-or spline fits the same pattern, as more points and lengths.
+ends held on the circle. Its 7 variables and 2 equations leave the 5 freedoms an arc has. Ellipses and
+splines fit the same pattern, as more points and lengths: see their sections above.
 
 **Equations.** Each constraint becomes one or two equations whose value is a length: millimetres of
 error at the size of the geometry involved. One tolerance, 1e-9 mm, then applies everywhere, well inside
@@ -301,7 +301,8 @@ The one slow frame at 505 entities is 100 ms.
 - **A drag can stop short** where a different arrangement would reach the pointer: 9 of 6,591 here where PlaneGCS
   got there. In the two largest (1.4 and 2.2 mm in the first run), the grabbed line shrank toward zero length under
   an angle constraint, and getting further would have meant first moving other things farther away. The sketch stays
-  valid and the report says how far it is from the pointer.
+  valid and the report says how far it is from the pointer. The later comparisons found more that haven't been explained:
+  16 of 1,000 drags with distances, by up to 0.18 mm, and 19 of 261 with ellipses, by up to 0.32 mm.
 - **A grabbed point lands within about 1e-7 mm of the pointer,** not exactly, because the pointer is soft. Use a `fix`
   or a dimension to place something exactly.
 - **A curve's end has to land within 1e-7 mm of another curve to join it.** A larger gap is a real gap, and the piece
