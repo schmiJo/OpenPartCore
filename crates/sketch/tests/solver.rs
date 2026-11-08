@@ -550,37 +550,6 @@ fn open_outlines_are_refused_by_name() {
 }
 
 #[test]
-fn a_branch_is_refused_unless_it_is_construction() {
-    let (mut s, _) = free_rectangle();
-    let spur = s.line([15.0, 0.0], [15.0, 12.0]);
-    let e = s.regions().unwrap_err();
-    assert!(e.message.contains("cross or touch") || e.message.contains("free end") || e.message.contains("edges meet"), "{}", e.message);
-    s.set_construction(spur, true).unwrap();
-    assert_eq!(s.regions().unwrap().len(), 1);
-}
-
-#[test]
-fn crossing_loops_are_refused_by_name() {
-    let (mut s, _) = free_rectangle();
-    let c = s.circle([30.0, 6.0], 4.0);
-    let e = s.regions().unwrap_err();
-    assert!(e.message.contains("cross or touch"), "{}", e.message);
-    assert!(e.entities.contains(&c), "{:?}", e.entities);
-    // A figure of eight, too.
-    let mut t = Sketch::new();
-    t.line([0.0, 0.0], [10.0, 10.0]);
-    t.line([10.0, 10.0], [10.0, 0.0]);
-    t.line([10.0, 0.0], [0.0, 10.0]);
-    t.line([0.0, 10.0], [0.0, 0.0]);
-    assert!(t.regions().unwrap_err().message.contains("cross or touch"));
-    // Two circles just touching.
-    let mut u = Sketch::new();
-    u.circle([0.0, 0.0], 5.0);
-    u.circle([10.0, 0.0], 5.0);
-    assert!(u.regions().unwrap_err().message.contains("cross or touch"));
-}
-
-#[test]
 fn an_empty_sketch_has_no_regions_and_says_so() {
     let mut s = Sketch::new();
     s.point(0.0, 0.0);

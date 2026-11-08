@@ -180,6 +180,97 @@ fn several_regions_each_become_a_solid_and_a_loop_in_a_hole_is_a_new_one() {
     assert!(body.faces.iter().any(|x| x.tag == e.side(apart.0).tag()));
 }
 
+fn solid_of(s: sk::Sketch) -> (Outcome, FeatureId) {
+    let mut doc = Document::new();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    let e = doc.add(Op::extrude(f, 0.0, 2.0, Mode::Add)).unwrap();
+    (doc.rebuild(None), e)
+}
+
+fn divided_rectangle() -> (sk::Sketch, sk::EntityId) {
+    let mut s = sk::Sketch::new();
+    s.line([0.0, 0.0], [30.0, 0.0]);
+    s.line([30.0, 0.0], [30.0, 12.0]);
+    s.line([30.0, 12.0], [0.0, 12.0]);
+    s.line([0.0, 12.0], [0.0, 0.0]);
+    let divider = s.line([10.0, 0.0], [10.0, 12.0]);
+    (s, divider)
+}
+
+#[test]
+fn regions_that_share_an_edge_merge_into_one_solid_when_both_are_used() {
+    let (s, divider) = divided_rectangle();
+    let (o, e) = solid_of(s);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - 720.0).abs() < 1e-9, "{}", vol(&o));
+    let body = o.body.unwrap();
+    assert_eq!(validate(&body).unwrap().shells, 1);
+    // The dividing line is inside the solid now, so it left no face.
+    assert!(!body.faces.iter().any(|x| x.tag == e.side(divider.0).tag()));
+}
+
+#[test]
+fn a_picked_region_is_the_only_one_built_and_survives_saving() {
+    let (mut s, divider) = divided_rectangle();
+    let left = s.arrangement().region_at([5.0, 5.0]).unwrap().id;
+    s.pick_regions(&[left]);
+    let mut doc = Document::new();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    let e = doc.add(Op::extrude(f, 0.0, 2.0, Mode::Add)).unwrap();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - 240.0).abs() < 1e-9, "{}", vol(&o));
+    // Here the divider is an outside wall, under its entity's name.
+    assert!(o.body.as_ref().unwrap().faces.iter().any(|x| x.tag == e.side(divider.0).tag()));
+
+    let mut back = Document::load_text(&doc.save_text()).unwrap();
+    let o = back.rebuild(None);
+    assert!((vol(&o) - 240.0).abs() < 1e-9, "{}", vol(&o));
+}
+
+#[test]
+fn overlapping_circles_make_their_union_by_default() {
+    let mut s = sk::Sketch::new();
+    s.circle([0.0, 0.0], 5.0);
+    s.circle([6.0, 0.0], 5.0);
+    let (o, _) = solid_of(s);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    let lens = 2.0 * 25.0 * (3.0f64 / 5.0).acos() - 3.0 * 8.0;
+    let want = (2.0 * 25.0 * PI - lens) * 2.0;
+    assert!((vol(&o) - want).abs() < 1e-6, "{} vs {want}", vol(&o));
+    assert_eq!(validate(o.body.as_ref().unwrap()).unwrap().shells, 1);
+}
+
+#[test]
+fn a_stray_open_curve_no_longer_stops_the_solid() {
+    let (mut s, _) = divided_rectangle();
+    s.line([50.0, 0.0], [60.0, 0.0]);
+    let (o, _) = solid_of(s);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - 720.0).abs() < 1e-9, "{}", vol(&o));
+}
+
+#[test]
+fn a_crescent_from_a_circle_touching_the_wall_builds_or_says_why() {
+    let mut s = sk::Sketch::new();
+    let wall = s.circle([0.0, 0.0], 5.0);
+    let disc = s.circle([3.0, 0.0], 2.0);
+    let a = s.arrangement();
+    assert_eq!(a.regions.len(), 2);
+    let crescent = a.region_at([-3.0, 0.0]).unwrap().id;
+    s.pick_regions(&[crescent]);
+    let (o, _) = solid_of(s);
+    match o.failed {
+        None => {
+            assert!((vol(&o) - 21.0 * PI * 2.0).abs() < 1e-6, "{}", vol(&o));
+            validate(o.body.as_ref().unwrap()).unwrap();
+        }
+        Some(i) => assert!(matches!(&o.steps[i].state, StepState::Failed(_)), "{:?}", o.steps[i]),
+    }
+    println!("crescent: {:?}", o.failed.map(|i| &o.steps[i].state));
+    let _ = (wall, disc);
+}
+
 #[test]
 fn a_conflict_fails_the_feature_with_its_reason_and_keeps_the_last_good_body() {
     let (mut doc, e, plate) = plate_doc();

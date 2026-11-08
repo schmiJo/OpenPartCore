@@ -35,7 +35,8 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("render", "Draws the solid and returns a PNG. Views: iso, front, back, left, right, top, bottom or four (top, iso, front and right together), or an azimuth and elevation in degrees.", r#"{"view": {"type": "string"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "labels": {"type": "boolean", "description": "Write each visible face's name on it."}, "colors": {"type": "string", "enum": ["plain", "faces"], "description": "faces gives each face its own tint."}, "highlight_faces": {"type": "array", "items": {"type": "string"}, "description": "Face names to pick out."}, "highlight_edges": {"description": "An edge selection to pick out, as in a fillet."}, "path": {"type": "string", "description": "Also save the PNG here, under the server's root folder."}}"#, "[]"),
     ("sketch_solve", "Solves a sketch without changing the document. Gives the solved sketch, remaining freedom, what's still free and what's redundant, or the constraints that can't all hold.", r#"{"sketch": {"type": "object", "description": "A sketch in the format in format_guide."}, "parameters": {"type": "object", "description": "Values for names used in its dimensions."}}"#, r#"["sketch"]"#),
     ("sketch_drag", "Moves a point or edge of a sketch toward a target, disturbing the rest as little as possible, and gives the new sketch.", r#"{"sketch": {"type": "object"}, "grab": {"description": "A point, such as \"7.end\", or an edge and where it was grabbed: {\"edge\": 7, \"at\": [x, y]}."}, "to": {"type": "array", "items": {"type": "number"}}, "parameters": {"type": "object"}}"#, r#"["sketch", "grab", "to"]"#),
-    ("sketch_regions", "The closed regions a sketch's geometry makes: outer loops and holes. Says which entity leaves a gap if there aren't any.", r#"{"sketch": {"type": "object"}}"#, r#"["sketch"]"#),
+    ("sketch_regions", "The closed regions a sketch would use: those picked, or by default every other level of nesting, so a loop in a loop is a hole. Says which entity leaves a gap if there aren't any.", r#"{"sketch": {"type": "object"}}"#, r#"["sketch"]"#),
+    ("sketch_arrangement", "Every closed region a sketch's curves make, split at crossings and T-junctions, each with a stable id, plus the curves that make none and why.", r#"{"sketch": {"type": "object"}}"#, r#"["sketch"]"#),
 ];
 
 pub fn exists(name: &str) -> bool {
@@ -258,6 +259,7 @@ impl Session {
                 Ok(regions) => Ok(vec![text(Value::Arr(regions.iter().map(sk::Region::to_json).collect()).to_text())]),
                 Err(why) => Err(why.to_json().to_text()),
             },
+            "sketch_arrangement" => Ok(vec![text(read_sketch(args)?.arrangement().to_json().to_text())]),
             other => Err(format!("there is no tool named \"{other}\"")),
         }
     }
@@ -319,6 +321,18 @@ impl Session {
                     let names_none = matches!(s.kind, "sketch" | "constrained_sketch" | "pattern" | "mirror" | "offset" | "draft");
                     if built && !names_none && !body.faces.iter().any(|f| f.tag.feature == s.id.0) {
                         notes.push(Value::str(format!("f{} ({}) left no faces on the solid, so it may not have touched it", s.id.0, s.name)));
+                    }
+                }
+                // A curve that closes nothing no longer stops a sketch, so say which ones those were.
+                for s in o.steps.iter().filter(|s| s.kind == "constrained_sketch") {
+                    if let Ok(found) = self.doc.sketch_arrangement(s.id) {
+                        let mut who: Vec<u32> = found.ignored.iter().map(|i| i.entity.0).collect();
+                        who.sort_unstable();
+                        who.dedup();
+                        if !who.is_empty() {
+                            let list = who.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+                            notes.push(Value::str(format!("f{} ({}): all or part of entities {list} enclose nothing and were left out", s.id.0, s.name)));
+                        }
                     }
                 }
                 if !notes.is_empty() {

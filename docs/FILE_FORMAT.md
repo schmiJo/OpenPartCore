@@ -48,6 +48,22 @@ Segments number from 0 in drawing order. A rectangle runs bottom, right, top, le
 circle are segment 0. Primitives are built by the same sweeps, so `f2:end` is the top of a box.
 A name stays with a face through Booleans, and can cover several pieces if the face gets split.
 
+**A name is stable but not unique.** No feature renames a face, but a name means every face that has it, and it disappears if
+they all do. `crates/document/tests/face_names.rs` pins this down:
+
+| Through | What happens |
+|---|---|
+| Offset, draft | Every name kept, with one face each |
+| Shell | Every name kept. An inner wall is named for the shell, after the face it follows: `f9:side.3` is behind `f2:side.3` |
+| Fillet, chamfer | Every name kept. All the new faces of one feature share one name, `f9:side.1`, so one can't be picked out by name |
+| Mirror, pattern | A copy has its original's name, so `f2:end` can mean several faces in different places, and different planes |
+| A cut | Each piece of a split face keeps the name. They're all in the same surface |
+| A whole circle | Two half faces under one name |
+| A face swallowed by a later feature | The name is gone. Anything using it should fail and say so |
+
+So to attach to a planar face by name, pieces of a split face are safe because they share a plane, while mirror and pattern
+copies are ambiguous unless something else says which one is meant.
+
 ## Features
 
 Common fields: `id`, `name`, and `suppressed` (default false).
@@ -145,9 +161,14 @@ A `constrained_sketch` feature holds a sketch drawn with constraints, which is s
 ```
 
 A face swept from entity 7 of feature 3 is named `f3:side.7`, whatever order things were drawn in. Lines,
-arcs and circles that aren't `construction` must form separate closed loops. A loop inside another is a
-hole, and a loop inside a hole starts a new region. The geometry is only a starting position: it needn't
-meet the constraints, and the nearer it is, the likelier it lands on the solution you meant.
+arcs and circles that aren't `construction` are cut at every crossing and T-junction, and each area they
+enclose is a region with a permanent id. By default a sketch builds from every other level of nesting, so a
+loop inside another is a hole, and a loop inside a hole starts a new region. Curves that enclose nothing
+are left out without failing. To build from particular regions, list them in an optional top-level
+`"picked_regions": ["r0123456789ab"]`. If one of them stops existing, the feature fails and says so. The
+field is only written when something is picked, so sketches with no picks are saved as before. The geometry
+is only a starting position: it needn't meet the constraints, and the nearer it is, the likelier it lands on
+the solution you meant.
 
 An arc runs counter-clockwise from `start` to `end`.
 

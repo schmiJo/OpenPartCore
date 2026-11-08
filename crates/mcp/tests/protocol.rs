@@ -336,6 +336,10 @@ fn sketches_solve_drag_and_become_solids_through_the_tools() {
     assert_eq!(v.get("constraints").and_then(Value::as_array).map(<[Value]>::len), Some(2));
     // Regions say what's wrong.
     assert!(c.refused("sketch_regions", &format!(r#"{{"sketch":{sketch}}}"#)).contains("isn't closed"));
+    // The arrangement never refuses: it says what it left out.
+    let arrangement = json::parse(&c.ok("sketch_arrangement", &format!(r#"{{"sketch":{sketch}}}"#))).unwrap();
+    assert_eq!(arrangement.get("regions").and_then(Value::as_array).map(<[Value]>::len), Some(0));
+    assert_eq!(arrangement.get("ignored").and_then(Value::as_array).map(<[Value]>::len), Some(1));
     // Parameters drive dimensions.
     let param = r#"{"entities":[{"id":1,"type":"circle","center":[0,0],"radius":2}],"constraints":[{"id":1,"type":"radius","of":"1","value":"r * 2"}]}"#;
     let s = c.ok("sketch_solve", &format!(r#"{{"sketch":{param},"parameters":{{"r":5}}}}"#));

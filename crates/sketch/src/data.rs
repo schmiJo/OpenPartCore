@@ -6,7 +6,7 @@
 use crate::expr::Expr;
 use crate::json::{self, Value};
 use crate::model::*;
-use crate::regions::{Loop, Region, Seg, SegKind};
+use crate::regions::{Arrangement, Ignored, Loop, Region, RegionId, Seg, SegKind, WhyIgnored};
 use crate::solve::*;
 
 pub const SKETCH_FORMAT: &str = "coreshape-sketch";
@@ -352,14 +352,18 @@ impl Sketch {
                 Value::obj(items)
             })
             .collect();
-        Value::obj(vec![
+        let mut items = vec![
             ("format", Value::str(SKETCH_FORMAT)),
             ("version", Value::Num(SKETCH_VERSION)),
             ("next_entity", Value::Num(self.next_entity as f64)),
             ("next_constraint", Value::Num(self.next_constraint as f64)),
             ("entities", Value::Arr(entities)),
             ("constraints", Value::Arr(constraints)),
-        ])
+        ];
+        if !self.picked_regions.is_empty() {
+            items.push(("picked_regions", Value::Arr(self.picked_regions.iter().map(|r| Value::str(r.name())).collect())));
+        }
+        Value::obj(items)
     }
 
     pub fn save_text(&self) -> String {
@@ -376,7 +380,7 @@ impl Sketch {
     }
 
     fn read(v: &Value) -> R<Sketch> {
-        known(v, &["format", "version", "next_entity", "next_constraint", "entities", "constraints"])?;
+        known(v, &["format", "version", "next_entity", "next_constraint", "entities", "constraints", "picked_regions"])?;
         if v.get("format").and_then(Value::as_str) != Some(SKETCH_FORMAT) {
             return Err("this is not a CoreShape sketch".to_string());
         }
@@ -426,6 +430,13 @@ impl Sketch {
         };
         s.next_entity = keep("next_entity", s.next_entity);
         s.next_constraint = keep("next_constraint", s.next_constraint);
+        if let Some(list) = v.get("picked_regions") {
+            let list = list.as_array().ok_or("\"picked_regions\" must be a list of region ids")?;
+            for item in list {
+                let name = item.as_str().ok_or("\"picked_regions\" must be a list of region ids")?;
+                s.picked_regions.push(RegionId::parse(name)?);
+            }
+        }
         Ok(s)
     }
 }
@@ -511,6 +522,42 @@ fn loop_value(l: &Loop) -> Value {
 
 impl Region {
     pub fn to_json(&self) -> Value {
-        Value::obj(vec![("outer", loop_value(&self.outer)), ("holes", Value::Arr(self.holes.iter().map(loop_value).collect()))])
+        Value::obj(vec![
+            ("id", Value::str(self.id.name())),
+            ("depth", Value::Num(self.depth as f64)),
+            ("area", Value::Num(self.area())),
+            ("outer", loop_value(&self.outer)),
+            ("holes", Value::Arr(self.holes.iter().map(loop_value).collect())),
+        ])
+    }
+}
+
+impl Ignored {
+    pub fn to_json(&self) -> Value {
+        let mut items = vec![("entity", Value::Num(self.entity.0 as f64)), ("whole", Value::Bool(self.whole))];
+        match self.why {
+            WhyIgnored::FreeEnd { at } => {
+                items.push(("why", Value::str("free_end")));
+                items.push(("at", p2_value(at)));
+            }
+            WhyIgnored::Bridge => items.push(("why", Value::str("bridge"))),
+            WhyIgnored::Overlap { with } => {
+                items.push(("why", Value::str("overlap")));
+                items.push(("with", Value::Num(with.0 as f64)));
+            }
+            WhyIgnored::NoLength => items.push(("why", Value::str("no_length"))),
+            WhyIgnored::NoArea => items.push(("why", Value::str("no_area"))),
+        }
+        items.push(("pieces", Value::Arr(self.pieces.iter().map(seg_value).collect())));
+        Value::obj(items)
+    }
+}
+
+impl Arrangement {
+    pub fn to_json(&self) -> Value {
+        Value::obj(vec![
+            ("regions", Value::Arr(self.regions.iter().map(Region::to_json).collect())),
+            ("ignored", Value::Arr(self.ignored.iter().map(Ignored::to_json).collect())),
+        ])
     }
 }

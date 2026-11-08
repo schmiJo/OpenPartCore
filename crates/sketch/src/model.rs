@@ -286,6 +286,8 @@ pub struct Sketch {
     pub constraints: Vec<Constraint>,
     pub(crate) next_entity: u32,
     pub(crate) next_constraint: u32,
+    /// Regions chosen by id. Empty means the default: see `Sketch::regions`.
+    pub(crate) picked_regions: Vec<crate::regions::RegionId>,
 }
 
 impl Default for Sketch {
@@ -296,7 +298,7 @@ impl Default for Sketch {
 
 impl Sketch {
     pub fn new() -> Sketch {
-        Sketch { entities: Vec::new(), constraints: Vec::new(), next_entity: 1, next_constraint: 1 }
+        Sketch { entities: Vec::new(), constraints: Vec::new(), next_entity: 1, next_constraint: 1, picked_regions: Vec::new() }
     }
 
     pub fn entity(&self, id: EntityId) -> Option<&Entity> {

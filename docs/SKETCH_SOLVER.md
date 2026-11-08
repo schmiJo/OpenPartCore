@@ -13,10 +13,44 @@ A sketch is plain data: entities and constraints with permanent ids, written to 
 | `solve` | A new sketch, with remaining freedom, what can still move, and what's redundant |
 | `analyze` | The same report, at the geometry as it stands |
 | `drag`, `DragSession` | Moves what was grabbed and disturbs the rest as little as possible |
-| `regions` | Closed loops as outer boundaries and holes, which become kernel profiles |
+| `arrangement` | Every closed region the curves make, split at crossings and T-junctions, each with a stable id, plus the curves that make none and why. It never refuses. |
+| `regions` | The regions to build from: those picked with `pick_regions`, or by default every other level of nesting. These become kernel profiles through `profiles_from_regions`. |
 
 Solving returns a new sketch and never changes the one it was given, so a failure can't leave anything
 half done.
+
+## Regions
+
+`arrangement` cuts every curve that isn't construction geometry at each crossing, T-junction and touching point, then
+walks the faces: at each junction it leaves by the next piece clockwise from the one it arrived on. A walk running
+counter-clockwise goes round one region, and one running clockwise goes round the outside of a connected group, which is
+a hole in whatever region surrounds it.
+
+| Result | Meaning |
+|---|---|
+| `regions[].id` | Permanent name, `r` and twelve hex digits |
+| `regions[].depth` | How many connected groups surround this one. Even is material by default and odd is a hole |
+| `regions[].outer`, `.holes` | Loops ready for `profiles_from_regions` |
+| `ignored[].entity`, `.whole`, `.pieces` | A curve, or the pieces of one, that bound no region |
+| `ignored[].why` | `FreeEnd { at }`, `Bridge`, `Overlap { with }`, `NoLength` or `NoArea` |
+
+**Ids** come from the curves around a region's outside and the direction each is walked in. So they survive solving,
+dragging, dimension changes, reordering and edits elsewhere. A new hole doesn't rename the region around it, and neither
+does a spur added from outside. Splitting a region gives its parts new ids. Lobes with the same curves around them are told
+apart by their order along the first curve, which could shift if a change carries a lobe past where a whole circle starts.
+
+**Picking.** `region_at(point)` finds what was clicked. `pick_regions(&[id])` stores the choice in the sketch, and it's saved
+as `picked_regions`. If a picked region stops existing, `regions` refuses and lists what's there, so a part can't silently
+turn into something else. Regions sharing an edge and both in use merge into one solid when extruded.
+
+**Tested** against a raster that shares nothing with the walk: draw the curves on a 0.1 mm grid, flood-fill from outside, and
+every pocket left must lie in a region, with the pockets in a region adding up to its area. On 1,536 random sketches with
+10,284 pockets and 7,391 regions, there were no disagreements. 24 pockets were reported at first only because walls a cell wide
+closed real gaps, and a finer grid confirmed each of those. 964 further random sketches were left out of this comparison because
+an end stops less than 0.4 mm from another curve, which a raster can't tell from touching. Those gaps have their own worked tests.
+
+**Speed.** 202 lines crossing into 10,000 regions takes about 0.7 s in a debug build. It's quadratic in the number of curves
+where their boxes overlap.
 
 ## How it works
 
@@ -193,8 +227,8 @@ The one slow frame at 505 entities is 100 ms.
   valid and the report says how far it is from the pointer.
 - **A grabbed point lands within about 1e-7 mm of the pointer,** not exactly, because the pointer is soft. Use a `fix`
   or a dimension to place something exactly.
-- **Regions refuse branches.** Three edges meeting at a point, or two loops touching, is refused with the entities
-  named. Picking which of several overlapping regions to use isn't supported.
+- **A curve's end has to land within 1e-7 mm of another curve to join it.** A larger gap is a real gap, and the piece
+  beyond it is listed as ignored. Solved sketches sit far inside this, but hand-placed geometry may not.
 - **Not there yet:** ellipses and splines; a distance to a circle; a distance between two parallel lines without
   picking a point; reference dimensions that report without driving.
 - **A conflict set of more than 64 constraints** isn't shrunk to a smallest one. The message says where it stalled.

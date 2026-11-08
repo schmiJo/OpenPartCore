@@ -24,7 +24,7 @@ under the root, which is the current folder unless given. A path that leaves it,
 | `edges_list` | Stable names, curve type, length and ends, and a selection ready to use in a fillet or chamfer |
 | `export` | STEP, STL or the native format |
 | `render` | A PNG: iso, front, back, left, right, top, bottom, four views at once, or any angle. Optional face labels, one tint per face, and highlighted faces and edges |
-| `sketch_solve`, `sketch_drag`, `sketch_regions` | The sketch solver, without changing the document |
+| `sketch_solve`, `sketch_drag`, `sketch_regions`, `sketch_arrangement` | The sketch solver, without changing the document. `sketch_arrangement` lists every closed region with its id, and the curves that make none |
 
 ## How a session goes
 

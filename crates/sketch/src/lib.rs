@@ -33,5 +33,5 @@ mod system;
 pub use data::*;
 pub use drag::{DragReport, DragSession, Grab};
 pub use model::*;
-pub use regions::{Loop, Region, Seg, SegKind};
+pub use regions::{Arrangement, Ignored, Loop, Region, RegionId, Seg, SegKind, WhyIgnored};
 pub use solve::{Analysis, ErrorKind, Redundancy, SketchError, Solved};

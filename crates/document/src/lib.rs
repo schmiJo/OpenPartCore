@@ -879,6 +879,18 @@ impl Document {
         &self.features
     }
 
+    /// Every closed region a constrained sketch feature makes at its solved position, and the curves
+    /// that make none. `Op::ConstrainedSketch` builds from the picked regions, or by default from every
+    /// other level of nesting, and leaves the rest out without failing, so this is where to look.
+    pub fn sketch_arrangement(&self, id: FeatureId) -> Result<coreshape_sketch::Arrangement> {
+        let Some(Op::ConstrainedSketch { sketch, .. }) = self.feature(id).map(|f| &f.op) else {
+            return Err(Error::InvalidInput(format!("f{} isn't a constrained sketch", id.0)));
+        };
+        let env = self.environment()?;
+        let solved = sketch.solve_with(&env).map_err(|e| Error::InvalidProfile(e.message))?;
+        Ok(solved.sketch.arrangement())
+    }
+
     pub fn feature(&self, id: FeatureId) -> Option<&Feature> {
         self.features.iter().find(|f| f.id == id)
     }

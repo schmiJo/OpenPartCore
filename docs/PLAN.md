@@ -45,10 +45,35 @@ oracle, through a neighbouring FreeCAD build, read-only.
 | M9 | MCP server and offscreen rendering | Done, except connecting a real MCP client, see `MCP.md` |
 | M10 | Multi-tool Booleans, patterns, mirror, sweep, offset, shell, draft | Done, with the limits in `KNOWN_LIMITS.md` |
 
+## For code building on this repository
+
+**Getting a known-good state.** The tag `openshape-ok` marks the newest commit whose workspace tests all pass, and it moves
+forward. `main`, and so the main working copy, only advances to such commits. Work in progress happens on the `next` branch in
+`.worktrees/next`, so the main working copy never holds half-finished edits.
+
+**Kept stable:** the sketch JSON format, `profiles_from_regions`, `FaceTag` slot numbering, and the `Body` edge and face accessors.
+
+**Breaking changes,** newest first:
+
+| Commit | Change | What to do |
+|---|---|---|
+| Sketch regions | `coreshape_sketch::Region` gained `id` and `depth` | Reading it is unaffected. Code that builds a `Region` by hand has to set them |
+| Sketch regions | `Sketch::regions` no longer refuses open curves, branches or crossings. It refuses only if no region results, or a picked one has gone | A sketch that used to fail may now build. `Sketch::arrangement` and `Document::sketch_arrangement` report what was left out |
+| 9d13746 | Chamfers follow tangent edges by default, like fillets, including in saved files. `"propagate": false` turns it off | A saved chamfer on a smooth chain may now cover more edges |
+
 ## Not planned yet
 
-STEP import, variable-radius fillets, general vertex blends, assemblies, and drawings.
+Variable-radius fillets, general vertex blends, assemblies, and drawings.
 
 ## Next, in order
 
-1. Decide on NURBS: see [NURBS_DESIGN.md](NURBS_DESIGN.md). No NURBS code exists yet.
+From OpenShape's list, in its order:
+
+1. Sketch regions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
+2. Solver dimensions: distance to a circle or arc, distance between parallel lines without picking a point, and reference
+   dimensions that report without driving.
+3. Ellipses and elliptical arcs in the solver, regions and kernel profiles.
+4. Splines, as decided in [NURBS_DESIGN.md](NURBS_DESIGN.md): in sketches, extruded and revolved. OpenShape also wants lofts and
+   free-form surfaces from imported files. Both are phase 3 of that note, which isn't decided yet.
+5. STEP import: analytic surfaces first, refusing anything else and naming the surface type.
+6. Modelling: offset, shell and draft that survive topology changes, helix, loft, delete face and thicken.
