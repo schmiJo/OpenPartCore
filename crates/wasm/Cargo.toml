@@ -1,0 +1,12 @@
+[package]
+name = "coreshape-wasm"
+description = "C ABI over the coreshape kernel for the browser viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+coreshape = { path = "../kernel" }

@@ -1,0 +1,10 @@
+[package]
+name = "coreshape"
+description = "A small exact B-rep CAD kernel with no dependencies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately empty. The kernel, its triangulator and its test tooling are all
+# written here. Add a dependency only with a written reason in docs/PLAN.md.
+[dependencies]
