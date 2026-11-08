@@ -12,7 +12,7 @@ use crate::math::*;
 use crate::surface::Surface;
 use crate::topo::{Body, Edge};
 use cdt::{Cdt, GRID};
-use std::collections::HashMap;
+use crate::hash::HashMap;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TessParams {
@@ -84,14 +84,14 @@ impl Mesh {
 
     /// The endpoints of every mesh edge that fails to pair up.
     pub fn open_edges(&self) -> Vec<(Vec3, Vec3)> {
-        let mut ids: HashMap<[u64; 3], u32> = HashMap::new();
+        let mut ids: HashMap<[u64; 3], u32> = HashMap::default();
         let key = |p: Vec3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
         let mut canon = Vec::with_capacity(self.positions.len());
         for &p in &self.positions {
             let n = ids.len() as u32;
             canon.push(*ids.entry(key(p)).or_insert(n));
         }
-        let mut count: HashMap<(u32, u32), i64> = HashMap::new();
+        let mut count: HashMap<(u32, u32), i64> = HashMap::default();
         for t in &self.triangles {
             for i in 0..3 {
                 let (a, b) = (canon[t[i] as usize], canon[t[(i + 1) % 3] as usize]);
@@ -307,7 +307,7 @@ pub fn face_meshes_cleanly(body: &Body, f: usize, is_new: &[bool], params: &Tess
             *list.entry([b, a]).or_insert(0) -= 1;
         }
     };
-    let mut expected: HashMap<[[u64; 3]; 2], i32> = HashMap::new();
+    let mut expected: HashMap<[[u64; 3]; 2], i32> = HashMap::default();
     for &l in &chosen {
         for &c in &face.loops[l] {
             for w in polylines[c.edge].windows(2) {
@@ -321,7 +321,7 @@ pub fn face_meshes_cleanly(body: &Body, f: usize, is_new: &[bool], params: &Tess
     if build_face(body, f, &polylines, params, &mut mesh, false, Some(&chosen)).is_err() {
         return false;
     }
-    let mut open: HashMap<[[u64; 3]; 2], i32> = HashMap::new();
+    let mut open: HashMap<[[u64; 3]; 2], i32> = HashMap::default();
     for t in &mesh.triangles {
         for i in 0..3 {
             net(&mut open, key(mesh.positions[t[i] as usize]), key(mesh.positions[t[(i + 1) % 3] as usize]));
@@ -398,7 +398,7 @@ fn build_face(
     let frame = FaceFrame { lo, scale: (GRID - 2) as f64 / extent };
 
     let mut cdt = Cdt::new();
-    let mut point_of: HashMap<u32, Vec3> = HashMap::new();
+    let mut point_of: HashMap<u32, Vec3> = HashMap::default();
     let mut loop_ids = Vec::with_capacity(chains.len());
     for chain in &chains {
         let mut ids = Vec::with_capacity(chain.len());
@@ -429,7 +429,7 @@ fn build_face(
     // Emit the triangles.
     let sign = if face.flipped { -1.0 } else { 1.0 };
     let base = mesh.positions.len() as u32;
-    let mut remap: HashMap<u32, u32> = HashMap::new();
+    let mut remap: HashMap<u32, u32> = HashMap::default();
     let triangles: Vec<[u32; 3]> = cdt.inside_triangles().map(|(v, _)| v).collect();
     for tri in triangles {
         let mut out = [0u32; 3];

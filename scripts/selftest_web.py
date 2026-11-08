@@ -100,7 +100,7 @@ driver = r"""
     await frame(); await frame();
     b = window.__lastBuild;
     const banner = document.getElementById("failure");
-    check("the known limit is refused, not faked", b.info.failed === 0, JSON.stringify(b.info.features[0].error));
+    check("the known limit is refused, not faked", b.info.failed === 1 && b.info.features[1].state === "failed", JSON.stringify(b.info.features[1].error));
     check("the refusal is shown to the user", !banner.hidden && banner.textContent.length > 20, banner.textContent);
     caseSlider.value = "0";
     caseSlider.dispatchEvent(new Event("input", {bubbles: true}));
@@ -113,7 +113,7 @@ driver = r"""
       caseSlider.dispatchEvent(new Event("input", {bubbles: true}));
       await frame(); await frame();
       const r = window.__lastBuild;
-      check(`stress: ${catalog[catalog.findIndex((m) => m.id === "stress")].params[0].choices[c]}`, r.info.failed === null && r.info.openEdges === 0, r.info.features[0].error || `V=${r.info.volume.toFixed(2)} shells=${r.info.shells}`);
+      check(`stress: ${catalog[catalog.findIndex((m) => m.id === "stress")].params[0].choices[c]}`, r.info.failed === null && r.info.openEdges === 0, r.info.features.map((f) => f.error).join("") || `V=${r.info.volume.toFixed(2)} shells=${r.info.shells}`);
     }
 
     // Exports produce bytes in the right formats.
@@ -122,6 +122,8 @@ driver = r"""
     check("STEP export", step.startsWith("ISO-10303-21;") && step.trim().endsWith("END-ISO-10303-21;"), `${step.length} bytes`);
     const stl = k.exportFile("stl");
     check("STL export", stl.length > 84 && (stl.length - 84) % 50 === 0, `${stl.length} bytes`);
+    const saved = JSON.parse(new TextDecoder().decode(k.exportFile("coreshape")));
+    check("model file export", saved.format === "coreshape-document" && saved.features.length > 0, `${saved.features.length} features`);
     const zip = makeZip("a.step", new Uint8Array([1, 2, 3]));
     check("zip wrapper", zip[0] === 0x50 && zip[1] === 0x4b && zip.length === 30 + 6 + 3 + 46 + 6 + 22, `${zip.length} bytes`);
   } catch (e) {

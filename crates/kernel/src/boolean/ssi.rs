@@ -14,7 +14,7 @@ use crate::curve::{Curve, SampledCurve};
 use crate::error::{Error, Result};
 use crate::math::*;
 use crate::surface::{refine_on_two, Chart, Surface};
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -547,7 +547,7 @@ fn contour_at(
         }
     }
 
-    let mut values: HashMap<(i64, i64), f64> = HashMap::new();
+    let mut values: HashMap<(i64, i64), f64> = HashMap::default();
     let mut value = |i: i64, j: i64| -> f64 {
         *values.entry((i, j)).or_insert_with(|| {
             // A zero would sit on a grid corner and confuse the sign tests.
@@ -563,9 +563,9 @@ fn contour_at(
     // Marching squares. Grid edges are named by their lower corner and direction,
     // so neighbouring cells agree on each crossing.
     type GridEdge = (i64, i64, bool);
-    let mut links: HashMap<GridEdge, Vec<GridEdge>> = HashMap::new();
+    let mut links: HashMap<GridEdge, Vec<GridEdge>> = HashMap::default();
     let mut quiet_cells: Vec<((i64, i64), f64)> = Vec::new();
-    let mut crossing: HashMap<GridEdge, Vec2> = HashMap::new();
+    let mut crossing: HashMap<GridEdge, Vec2> = HashMap::default();
     for &(i, j) in &active {
         let (v00, v10, v11, v01) = (value(i, j), value(i + 1, j), value(i + 1, j + 1), value(i, j + 1));
         let mut found: Vec<GridEdge> = Vec::new();
@@ -622,7 +622,7 @@ fn contour_at(
     }
 
     // Walk the links into chains and loops.
-    let mut used: HashMap<GridEdge, bool> = HashMap::new();
+    let mut used: HashMap<GridEdge, bool> = HashMap::default();
     let mut chains: Vec<(Vec<GridEdge>, bool)> = Vec::new();
     let mut starts: Vec<GridEdge> = links.iter().filter(|(_, v)| v.len() == 1).map(|(k, _)| *k).collect();
     starts.sort();

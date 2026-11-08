@@ -9,7 +9,7 @@
 
 use crate::math::*;
 use crate::topo::Body;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 
 /// Largest gap allowed between geometry that should coincide. Intersection points
 /// are merged at `TOL`, so a vertex can be up to a little over `TOL` off a curve.
@@ -97,9 +97,9 @@ fn check_edge_use(body: &Body, errors: &mut Vec<String>) {
 fn check_vertex_fans(body: &Body, errors: &mut Vec<String>) {
     // Arriving at a vertex along one coedge and leaving along the next steps to
     // the neighbouring face. Follow these steps around each vertex.
-    let mut outgoing: HashMap<(usize, usize), Vec<(usize, bool)>> = HashMap::new();
-    let mut per_vertex: HashMap<usize, usize> = HashMap::new();
-    let mut leave_after: HashMap<(usize, bool), (usize, bool)> = HashMap::new();
+    let mut outgoing: HashMap<(usize, usize), Vec<(usize, bool)>> = HashMap::default();
+    let mut per_vertex: HashMap<usize, usize> = HashMap::default();
+    let mut leave_after: HashMap<(usize, bool), (usize, bool)> = HashMap::default();
     for face in &body.faces {
         for lp in &face.loops {
             for i in 0..lp.len() {
@@ -111,8 +111,8 @@ fn check_vertex_fans(body: &Body, errors: &mut Vec<String>) {
             }
         }
     }
-    let mut visited: HashMap<(usize, bool), bool> = HashMap::new();
-    let mut fans: HashMap<usize, usize> = HashMap::new();
+    let mut visited: HashMap<(usize, bool), bool> = HashMap::default();
+    let mut fans: HashMap<usize, usize> = HashMap::default();
     for face in &body.faces {
         for lp in &face.loops {
             for &c in lp {
@@ -149,8 +149,8 @@ fn check_vertex_fans(body: &Body, errors: &mut Vec<String>) {
 fn check_euler(body: &Body, errors: &mut Vec<String>) -> Vec<usize> {
     let mut genus = Vec::new();
     for (s, shell) in body.shells.iter().enumerate() {
-        let mut vertices = std::collections::HashSet::new();
-        let mut edges = std::collections::HashSet::new();
+        let mut vertices = crate::hash::HashSet::default();
+        let mut edges = crate::hash::HashSet::default();
         let mut holes = 0i64;
         for &f in shell {
             let face = &body.faces[f];

@@ -2,14 +2,14 @@
 //! Usage: scan [positions per model]
 use coreshape::*;
 use coreshape_wasm::models;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 fn main() {
     let runs: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(200);
     let mut rng = Rng::new(2026);
     println!("{:<10} {:>9} {:>8} {:>8}", "model", "positions", "refused", "invalid");
     for m in models::catalog() {
-        let mut h = (m.history)();
+        let mut docs: HashMap<usize, Document> = HashMap::new();
         let mut refused = 0;
         let mut invalid = 0;
         let mut reasons: BTreeMap<String, (usize, String, Vec<f64>)> = BTreeMap::new();
@@ -22,7 +22,10 @@ fn main() {
                     p.min + rng.int(0, steps as i64) as f64 * p.step
                 })
                 .collect();
-            let o = h.rebuild(&values, None);
+            let variant = m.variant(&values);
+            let doc = docs.entry(variant).or_insert_with(|| m.document(variant));
+            m.apply(doc, &values);
+            let o = doc.rebuild(None);
             if let Some(b) = &o.body {
                 if validate(b).is_err() {
                     invalid += 1;
@@ -30,7 +33,7 @@ fn main() {
             }
             if let Some(i) = o.failed {
                 refused += 1;
-                if let history::StepState::Failed(why) = &o.steps[i].state {
+                if let document::StepState::Failed(why) = &o.steps[i].state {
                     let key: String = why.chars().take(70).collect();
                     let e = reasons.entry(key).or_insert((0, o.steps[i].name.clone(), values.clone()));
                     e.0 += 1;

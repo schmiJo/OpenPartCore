@@ -10,8 +10,9 @@ It runs natively and in the browser through WebAssembly.
 - **Modelling:** 2D profiles that extrude and revolve, and union, subtract and intersect
   on all five surface types, including coplanar and touching contacts.
 - **Blends:** constant-radius fillets and chamfers on straight and circular edges.
-- **History:** a feature list that rebuilds when a dimension changes, keeps its references
-  by name, and reuses every step whose inputs didn't change.
+- **Documents:** parameters and features as plain data, saved as readable JSON. Features can
+  be edited, suppressed, deleted and reordered. References go by name, and a rebuild reuses
+  every step whose inputs didn't change.
 - **Output:** exact volume and area, a watertight mesh, STL and STEP.
 
 Limits and open defects are in [docs/KNOWN_LIMITS.md](docs/KNOWN_LIMITS.md). The original
@@ -40,23 +41,28 @@ from any static host.
 ## Using the kernel
 
 ```rust
-use coreshape::history::{EdgeQuery, History, Mode};
+use coreshape::document::*;
 use coreshape::*;
 
-let mut h = History::new();
-let sketch = h.sketch(
-    |_| Frame::WORLD,
-    |p| Ok(vec![Profile::new(Wire::rect_centered(p[0], p[1]))]),
-);
-let block = h.extrude(sketch, |_| 0.0, |p| p[2], Mode::Add);
+let mut doc = Document::new();
+doc.set_parameter("w", 40.0)?;
+doc.set_parameter("depth", "w / 2")?; // an expression over other parameters
+let sketch = doc.add(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::centered("w", "depth"))]))?;
+let block = doc.add(Op::extrude(sketch, 0.0, 10.0, Mode::Add))?;
 // Named faces, not indices: this still means the same edge after any rebuild.
-h.fillet(EdgeQuery::Between(block.end_cap(), block.side(0)), |p| p[3]);
+doc.add(Op::fillet(EdgeSelect::Between(block.end_cap(), block.side(0)), 2.0))?;
 
-let outcome = h.rebuild(&[40.0, 20.0, 10.0, 2.0], None);
+let outcome = doc.rebuild(None);
 let body = outcome.body.unwrap();
 println!("{} mm3", mass_properties(&body).volume);
-std::fs::write("block.step", export::step::write_step(&body, "block")).unwrap();
+std::fs::write("block.step", export::step::write_step(&body, "block"))?;
+
+// A document is plain data.
+std::fs::write("block.coreshape", doc.save_text())?;
+let again = Document::load_text(&std::fs::read_to_string("block.coreshape")?)?;
 ```
+
+The file format is described in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
 
 ## How it stays robust
 
@@ -68,6 +74,8 @@ std::fs::write("block.step", export::step::write_step(&body, "block")).unwrap();
   with certainty instead of relying on sampling density.
 - **Shared contacts.** Every contact between two bodies becomes one vertex or edge used by
   both sides, so results close by construction rather than by stitching within a tolerance.
+- **The same input gives the same bits.** Hash tables use a fixed seed, so a failure reproduces
+  exactly, in any process.
 - **Results are checked before they are returned.** Each Boolean's final result passes the
   validator, a watertight mesh, agreement across samples on every face region, and point
   membership against both inputs. A failure is an error, not a broken solid.
@@ -81,7 +89,8 @@ std::fs::write("block.step", export::step::write_step(&body, "block")).unwrap();
 | `crates/kernel/src/profile.rs`, `build.rs` | Sketch profiles, extrude, revolve, primitives |
 | `crates/kernel/src/boolean/` | Root finding, intersections, face tracing, classification, cleanup |
 | `crates/kernel/src/blend.rs` | Fillets and chamfers |
-| `crates/kernel/src/history.rs` | The feature history |
+| `crates/kernel/src/document.rs` | Parameters, features, rebuilding, the file format |
+| `crates/kernel/src/expr.rs`, `json.rs` | Dimension expressions, and a JSON reader and writer |
 | `crates/kernel/src/mass.rs` | Volume and area from the B-rep through Green's theorem |
 | `crates/kernel/src/tess/` | Exact-predicate triangulator and meshing |
 | `crates/kernel/src/export/` | STL and STEP |

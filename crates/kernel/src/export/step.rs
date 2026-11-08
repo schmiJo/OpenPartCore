@@ -167,7 +167,7 @@ impl Writer {
 /// order passed on every start face tried, against about half of random orders. That is
 /// an observed property of that checker, not a rule from the standard.
 fn connected_order(body: &Body, shell: &[usize], uses: &[Vec<(usize, usize, usize, bool)>]) -> Vec<usize> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::hash::HashSet::default();
     let mut order = Vec::with_capacity(shell.len());
     for &start in shell {
         let mut stack = vec![start];

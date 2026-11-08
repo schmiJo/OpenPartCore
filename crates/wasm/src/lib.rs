@@ -6,9 +6,10 @@
 
 pub mod models;
 
-use coreshape::history::{History, Outcome, StepState};
+use coreshape::document::{Outcome, StepState};
 use coreshape::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -22,7 +23,10 @@ struct Output {
     info: String,
     export: Vec<u8>,
     body: Option<Arc<Body>>,
-    histories: Vec<Option<History>>,
+    /// One document per model and variant, each keeping its own cached results.
+    documents: HashMap<(usize, usize), Document>,
+    /// The document shown by the last build.
+    current: Option<(usize, usize)>,
     table: [u32; 12],
 }
 
@@ -132,20 +136,18 @@ fn features_json(outcome: &Outcome) -> String {
         if i > 0 {
             text.push(',');
         }
-        let (state, error) = match &step.state {
-            StepState::Rebuilt => ("rebuilt", String::new()),
-            StepState::Reused => ("reused", String::new()),
-            StepState::RolledBack => ("rolledback", String::new()),
-            StepState::Blocked => ("blocked", String::new()),
-            StepState::Failed(why) => ("failed", why.clone()),
+        let error = match &step.state {
+            StepState::Failed(why) => why.as_str(),
+            _ => "",
         };
         let _ = write!(
             text,
-            "{{\"name\":{},\"kind\":{},\"state\":{},\"error\":{}}}",
+            "{{\"id\":{},\"name\":{},\"kind\":{},\"state\":{},\"error\":{}}}",
+            step.id.0,
             json_str(&step.name),
             json_str(step.kind),
-            json_str(state),
-            json_str(&error)
+            json_str(step.state.word()),
+            json_str(error)
         );
     }
     text.push(']');
@@ -268,12 +270,13 @@ pub unsafe extern "C" fn cs_build(model: usize, params: *const f64, n: usize, ro
         let out = &mut *out;
         let catalog = models::catalog();
         if model < catalog.len() {
-            if out.histories.len() < catalog.len() {
-                out.histories.resize_with(catalog.len(), || None);
-            }
-            let history = out.histories[model].get_or_insert_with(catalog[model].history);
+            let def = &catalog[model];
+            let variant = def.variant(values);
+            let doc = out.documents.entry((model, variant)).or_insert_with(|| def.document(variant));
+            def.apply(doc, values);
             let upto = (rollback >= 0).then_some(rollback as usize);
-            let outcome = history.rebuild(values, upto);
+            let outcome = doc.rebuild(upto);
+            out.current = Some((model, variant));
             fill(out, &outcome);
         }
         out.table = [
@@ -328,6 +331,20 @@ pub extern "C" fn cs_export_step() -> *const u8 {
     })
 }
 
+/// Writes the current document as text, in the native file format. Same conventions.
+#[no_mangle]
+pub extern "C" fn cs_export_document() -> *const u8 {
+    STATE.with(|s| {
+        let mut out = s.borrow_mut();
+        let out = &mut *out;
+        let Some(doc) = out.current.and_then(|k| out.documents.get(&k)) else {
+            return std::ptr::null();
+        };
+        out.export = doc.save_text().into_bytes();
+        out.export.as_ptr()
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn cs_export_len() -> usize {
     STATE.with(|s| s.borrow().export.len())
@@ -341,11 +358,64 @@ mod tests {
     #[test]
     fn every_model_builds_at_defaults() {
         for m in models::catalog() {
-            let values: Vec<f64> = m.params.iter().map(|p| p.default).collect();
-            let mut h = (m.history)();
-            let o = h.rebuild(&values, None);
+            let mut doc = m.document(0);
+            let o = doc.rebuild(None);
             assert!(o.failed.is_none(), "{}: {:?}", m.id, o.steps);
             validate(o.body.as_ref().unwrap()).unwrap();
+        }
+    }
+
+    /// Each demo is plain data: saved and reloaded, it must build the identical solid.
+    #[test]
+    fn every_model_survives_a_save_and_load() {
+        for m in models::catalog() {
+            let max_variant = m.params.iter().find(|p| !p.choices.is_empty()).map_or(0, |p| p.max as usize);
+            for variant in 0..=max_variant {
+                let mut doc = m.document(variant);
+                let text = doc.save_text();
+                let mut back = Document::load_text(&text).unwrap_or_else(|e| panic!("{} {variant}: {e}\n{text}", m.id));
+                assert_eq!(back.save_text(), text, "{} {variant}", m.id);
+                let (a, b) = (doc.rebuild(None), back.rebuild(None));
+                assert_eq!(a.failed, b.failed, "{} {variant}", m.id);
+                if let (Some(a), Some(b)) = (a.body, b.body) {
+                    assert_eq!(mass_properties(&a).volume.to_bits(), mass_properties(&b).volume.to_bits(), "{} {variant}", m.id);
+                }
+            }
+        }
+    }
+
+    /// The same document must give the same bits, every build in every process. A second
+    /// process would catch a seed that varies per process, which is what this once did;
+    /// the two `determinism` example runs in `scripts/check_determinism.sh` compare that.
+    #[test]
+    fn building_twice_gives_identical_bits() {
+        for m in models::catalog() {
+            let variants = m.params.iter().find(|p| !p.choices.is_empty()).map_or(1, |p| p.max as usize + 1);
+            for variant in 0..variants {
+                let build = || {
+                    let mut doc = m.document(variant);
+                    doc.rebuild(None).body
+                };
+                let (Some(a), Some(b)) = (build(), build()) else { continue };
+                let tag = format!("{} {variant}", m.id);
+                assert_eq!(mass_properties(&a).volume.to_bits(), mass_properties(&b).volume.to_bits(), "{tag}");
+                let mesh = |x: &Body| tessellate(x, &TessParams::for_size(x.aabb().diagonal())).unwrap();
+                let (ma, mb) = (mesh(&a), mesh(&b));
+                assert_eq!(ma.triangles, mb.triangles, "{tag}");
+                assert_eq!(coreshape::export::step::write_step(&a, "m"), coreshape::export::step::write_step(&b, "m"), "{tag}");
+            }
+        }
+    }
+
+    /// The stress cases must keep behaving as the slider promises: every case builds,
+    /// except the last, which is the documented refusal.
+    #[test]
+    fn stress_cases_behave_as_documented() {
+        let stress = models::catalog().iter().find(|m| m.id == "stress").unwrap();
+        for case in 0..14 {
+            let mut doc = stress.document(case);
+            let o = doc.rebuild(None);
+            assert_eq!(o.failed.is_some(), case == 13, "case {case}: {:?}", o.steps);
         }
     }
 
@@ -355,7 +425,7 @@ mod tests {
     fn sliders_never_panic() {
         let mut rng = Rng::new(99);
         for m in models::catalog() {
-            let mut h = (m.history)();
+            let mut docs: HashMap<usize, Document> = HashMap::new();
             let mut failures = 0;
             let runs = 60;
             for _ in 0..runs {
@@ -367,7 +437,10 @@ mod tests {
                         p.min + rng.int(0, steps as i64) as f64 * p.step
                     })
                     .collect();
-                let o = h.rebuild(&values, None);
+                let variant = m.variant(&values);
+                let doc = docs.entry(variant).or_insert_with(|| m.document(variant));
+                m.apply(doc, &values);
+                let o = doc.rebuild(None);
                 if o.failed.is_some() {
                     failures += 1;
                 }

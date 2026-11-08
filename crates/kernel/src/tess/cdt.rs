@@ -5,7 +5,7 @@
 //! failures to work around: the triangulation cannot get confused, only reject
 //! truly crossing constraints.
 
-use std::collections::HashMap;
+use crate::hash::HashMap;
 
 pub const GRID: i64 = 1 << 28;
 const NONE: u32 = u32::MAX;
@@ -61,7 +61,7 @@ impl Cdt {
             tris: vec![Tri { v: [0, 1, 2], n: [NONE; 3], c: [false; 3], inside: false }],
             last: 0,
             vertex_tri: vec![0, 0, 0],
-            lookup: HashMap::new(),
+            lookup: HashMap::default(),
             walk_seed: 12345,
         }
     }

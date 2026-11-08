@@ -13,6 +13,10 @@ pub const TOL: f64 = 1e-7;
 /// Smallest feature the kernel will build. Anything shorter than this is
 /// rejected, because features near `TOL` cannot be told apart reliably.
 pub const MIN_FEATURE: f64 = 10.0 * TOL;
+/// The farthest any coordinate may be from the origin: 10 km. Doubles still resolve about
+/// 2e-9 mm out there, safely below `TOL`. Beyond it the tolerances stop meaning anything,
+/// so operations refuse the input.
+pub const MAX_COORD: f64 = 1e7;
 
 pub const PI: f64 = std::f64::consts::PI;
 pub const TAU: f64 = std::f64::consts::TAU;

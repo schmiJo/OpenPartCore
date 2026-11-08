@@ -10,9 +10,9 @@ fn main() {
     );
     for m in models::catalog() {
         let mut values: Vec<f64> = m.params.iter().map(|p| p.default).collect();
-        let mut h = (m.history)();
+        let mut doc = m.document(0);
         let t = Instant::now();
-        let o = h.rebuild(&values, None);
+        let o = doc.rebuild(None);
         let first = t.elapsed();
         assert!(o.failed.is_none(), "{}: {:?}", m.id, o.steps);
         let body = o.body.unwrap();
@@ -20,7 +20,9 @@ fn main() {
         let last = values.len() - 1;
         values[last] += m.params[last].step;
         let t = Instant::now();
-        let _ = h.rebuild(&values, None);
+        // A list-valued parameter picks a document instead of changing a dimension.
+        m.apply(&mut doc, &values);
+        let _ = doc.rebuild(None);
         let again = t.elapsed();
         let t = Instant::now();
         let _ = mass_properties(&body);

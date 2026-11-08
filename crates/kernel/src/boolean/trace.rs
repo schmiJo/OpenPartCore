@@ -9,7 +9,7 @@ use crate::math::*;
 use crate::surface::{Chart, Surface};
 use crate::topo::{Coedge, Edge};
 use crate::validate::polygon_area;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 
 /// What the tracer needs to know about the face being built.
 pub struct FaceChart<'a> {
@@ -96,8 +96,8 @@ fn winding_of(poly: &[Vec2], p: Vec2) -> f64 {
 /// They divide nothing, so they only arise from touching contacts.
 fn prune_dangling(edges: &[Edge], half: &mut Vec<Coedge>) {
     loop {
-        let mut degree: HashMap<usize, usize> = HashMap::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut degree: HashMap<usize, usize> = HashMap::default();
+        let mut seen = crate::hash::HashSet::default();
         for &c in half.iter() {
             if seen.insert(c.edge) {
                 *degree.entry(edges[c.edge].v0).or_insert(0) += 1;
@@ -128,7 +128,7 @@ pub fn trace_faces(
 
     // The sampling distance at each vertex is a fraction of its shortest edge, so
     // that samples land before anything else happens along any edge.
-    let mut reach: HashMap<usize, f64> = HashMap::new();
+    let mut reach: HashMap<usize, f64> = HashMap::default();
     for &c in &half {
         let l = edge_length(&edges[c.edge]);
         for v in [edges[c.edge].v0, edges[c.edge].v1] {
@@ -143,7 +143,7 @@ pub fn trace_faces(
         d.y.atan2(d.x)
     };
 
-    let mut leaving: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+    let mut leaving: HashMap<usize, Vec<(usize, f64)>> = HashMap::default();
     for (i, &c) in half.iter().enumerate() {
         leaving.entry(start_of(edges, c)).or_default().push((i, angle_leaving(c)));
     }

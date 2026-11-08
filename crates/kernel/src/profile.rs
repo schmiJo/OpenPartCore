@@ -347,6 +347,19 @@ impl Profile {
     }
 
     pub fn validate(&self) -> Result<()> {
+        for wire in std::iter::once(&self.outer).chain(&self.holes) {
+            for seg in &wire.segs {
+                let radius = match seg.geom {
+                    SegGeom::Arc { center, radius, .. } => radius.max(center.x.abs()).max(center.y.abs()),
+                    SegGeom::Line { .. } => 0.0,
+                };
+                let (a, b) = (seg.start(), seg.end());
+                // Written so that a NaN fails too.
+                if !(a.x.abs().max(a.y.abs()).max(b.x.abs()).max(b.y.abs()).max(radius) <= MAX_COORD) {
+                    return Err(Error::InvalidProfile(format!("a coordinate is beyond the {MAX_COORD} mm this kernel works within")));
+                }
+            }
+        }
         self.outer.check("outer")?;
         let outer_flat = self.outer.flatten();
         let bounds = |flat: &[(Vec2, Vec2, usize)]| {

@@ -234,7 +234,7 @@ impl Body {
     /// is valid and manifold as a model, but it would be a zero-thickness contact as a
     /// physical part, so callers may want to warn about it.
     pub fn contact_vertices(&self) -> usize {
-        let mut seen: std::collections::HashMap<[u64; 3], usize> = std::collections::HashMap::new();
+        let mut seen: crate::hash::HashMap<[u64; 3], usize> = crate::hash::HashMap::default();
         for p in &self.vertices {
             *seen.entry([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).or_insert(0) += 1;
         }

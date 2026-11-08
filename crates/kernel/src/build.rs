@@ -10,7 +10,7 @@ use crate::profile::{Profile, Seg, SegGeom, Wire};
 use crate::surface::Surface;
 use crate::topo::{Body, Coedge, FaceTag};
 use crate::validate::validate;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 
 pub const SLOT_START_CAP: u32 = 0;
 pub const SLOT_END_CAP: u32 = 1;
@@ -34,10 +34,22 @@ fn lift_seg(seg: &Seg, frame: &Frame, z: f64) -> (Curve, f64, f64) {
 
 /// Extrudes a profile by `height` along `frame.z`. A negative height extrudes the
 /// other way.
+fn check_frame(frame: &Frame) -> Result<()> {
+    let o = frame.origin;
+    if !(o.x.abs().max(o.y.abs()).max(o.z.abs()) <= MAX_COORD) {
+        return Err(Error::InvalidInput(format!("a placement is beyond the {MAX_COORD} mm this kernel works within")));
+    }
+    Ok(())
+}
+
 pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> Result<Body> {
     profile.validate()?;
+    check_frame(frame)?;
     if !height.is_finite() || height.abs() < MIN_FEATURE {
         return Err(Error::InvalidInput(format!("extrude height {height} is too small")));
+    }
+    if height.abs() > MAX_COORD {
+        return Err(Error::InvalidInput(format!("extrude height {height} is beyond the {MAX_COORD} mm this kernel works within")));
     }
     let (frame, height) = if height < 0.0 {
         (Frame { origin: frame.origin + frame.z * height, ..*frame }, -height)
@@ -124,6 +136,7 @@ pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> R
 /// closed revolution with no end caps.
 pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Result<Body> {
     profile.validate()?;
+    check_frame(frame)?;
     if !(angle > 1e-6 && angle <= TAU + 1e-9) {
         return Err(Error::InvalidInput(format!("revolve angle {angle} is out of range")));
     }
@@ -152,7 +165,7 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
     let tag = |slot| FaceTag { feature, slot };
 
     // Vertices: on-axis points exist once, the others once per sweep station.
-    let mut vertex_ids: HashMap<(usize, usize, usize), usize> = HashMap::new();
+    let mut vertex_ids: HashMap<(usize, usize, usize), usize> = HashMap::default();
     for (w, wire) in wires.iter().enumerate() {
         for (i, seg) in wire.segs.iter().enumerate() {
             let p = seg.start();
@@ -181,8 +194,8 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
 
     // Meridian edges (profile segment at a station) and sweep edges (arc around
     // the axis at a profile vertex) are created on first use.
-    let mut meridians: HashMap<(usize, usize, usize), Coedge> = HashMap::new();
-    let mut sweeps: HashMap<(usize, usize, usize), Coedge> = HashMap::new();
+    let mut meridians: HashMap<(usize, usize, usize), Coedge> = HashMap::default();
+    let mut sweeps: HashMap<(usize, usize, usize), Coedge> = HashMap::default();
 
     fn meridian(
         body: &mut Body,

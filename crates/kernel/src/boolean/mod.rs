@@ -32,7 +32,7 @@ use crate::validate::validate;
 use classify::{BodyLoc, FaceLoc, Index};
 use roots::{curve_surface_contact, Contact};
 use ssi::{Ssi, SsiCurve};
-use std::collections::{HashMap, HashSet};
+use crate::hash::{HashMap, HashSet};
 use trace::{interior_points, trace_faces, FaceChart};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +145,12 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body> {
 }
 
 pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Body> {
+    for p in a.vertices.iter().chain(&b.vertices) {
+        // Written so that a NaN fails too.
+        if !(p.x.abs().max(p.y.abs()).max(p.z.abs()) <= MAX_COORD) {
+            return Err(Error::InvalidInput(format!("a body reaches beyond the {MAX_COORD} mm this kernel works within")));
+        }
+    }
     let index = [Index::new(a), Index::new(b)];
     let bodies = [a, b];
 
@@ -280,7 +286,7 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
             let boundary = &boundaries[s][f];
             let on_boundary: HashSet<usize> = boundary.iter().flatten().map(|c| c.edge).collect();
             let inner: Vec<usize> = {
-                let mut seen = HashSet::new();
+                let mut seen = HashSet::default();
                 extras[s][f].iter().copied().filter(|e| !on_boundary.contains(e) && seen.insert(*e)).collect()
             };
             if inner.is_empty() {
@@ -363,7 +369,7 @@ fn verify_meshable(result: &Body, inputs: [&Body; 2]) -> Result<()> {
     if result.faces.is_empty() {
         return Ok(());
     }
-    let mut known = HashSet::new();
+    let mut known = HashSet::default();
     for body in inputs {
         for e in 0..body.edges.len() {
             known.insert(edge_signature(body, e));
@@ -816,7 +822,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
     }
 
     // Each use of an arrangement edge: (face, loop, position, reversed).
-    let mut uses: HashMap<usize, Vec<(usize, usize, usize, bool)>> = HashMap::new();
+    let mut uses: HashMap<usize, Vec<(usize, usize, usize, bool)>> = HashMap::default();
     for (fi, f) in faces.iter().enumerate() {
         for (li, l) in f.loops.iter().enumerate() {
             for (k, c) in l.iter().enumerate() {
@@ -828,7 +834,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
     let mut body = Body::default();
     // Build edges. Normally one per arrangement edge. Where several faces meet at
     // an edge, pair them around it so each wedge of material gets its own copy.
-    let mut assign: HashMap<(usize, usize, usize), usize> = HashMap::new();
+    let mut assign: HashMap<(usize, usize, usize), usize> = HashMap::default();
     let mut edge_ids: Vec<usize> = uses.keys().copied().collect();
     edge_ids.sort_unstable();
     for ae in edge_ids {
@@ -917,7 +923,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
             }
         }
     }
-    let mut vertex_of_fan: HashMap<usize, usize> = HashMap::new();
+    let mut vertex_of_fan: HashMap<usize, usize> = HashMap::default();
     for e in 0..body.edges.len() {
         for (end, node) in [(0, e * 2), (1, e * 2 + 1)] {
             let r = find(&mut parent, node);

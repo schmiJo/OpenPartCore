@@ -547,7 +547,7 @@ class Kernel {
     };
   }
   exportFile(kind) {
-    const p = kind === "step" ? this.x.cs_export_step() : this.x.cs_export_stl();
+    const p = { step: this.x.cs_export_step, stl: this.x.cs_export_stl, coreshape: this.x.cs_export_document }[kind]();
     return p ? new Uint8Array(this.x.memory.buffer, p, this.x.cs_export_len()).slice() : null;
   }
 }
@@ -812,6 +812,7 @@ async function start() {
     };
     offer("step", "Download STEP", "model/step");
     offer("stl", "Download STL", "model/stl");
+    offer("coreshape", "Download model file", "application/json");
   }
   // </standalone>
   // <artifact>
@@ -831,6 +832,7 @@ async function start() {
       };
       offer("step", "Save STEP (zip)");
       offer("stl", "Save STL (zip)");
+      offer("coreshape", "Save model file (zip)");
     });
   }
   // </artifact>

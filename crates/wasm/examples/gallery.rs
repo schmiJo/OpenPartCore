@@ -100,9 +100,8 @@ fn main() {
     let mut manifest = String::from("name,volume,area,faces,edges,vertices,shells\n");
     let mut bodies: Vec<(String, Body)> = Vec::new();
     for m in models::catalog() {
-        let values: Vec<f64> = m.params.iter().map(|p| p.default).collect();
-        let mut h = (m.history)();
-        let outcome = h.rebuild(&values, None);
+        let mut doc = m.document(0);
+        let outcome = doc.rebuild(None);
         assert!(outcome.failed.is_none(), "{}: {:?}", m.id, outcome.steps);
         bodies.push((m.id.to_string(), (*outcome.body.unwrap()).clone()));
     }
@@ -120,6 +119,9 @@ fn main() {
             "{name},{},{},{},{},{},{}",
             props.volume, props.area, report.faces, report.edges, report.vertices, report.shells
         );
+    }
+    for m in models::catalog() {
+        std::fs::write(format!("{dir}/{}.coreshape", m.id), m.document(0).save_text()).unwrap();
     }
     std::fs::write(format!("{dir}/manifest.csv"), manifest).unwrap();
     println!("wrote {} models to {dir}", bodies.len());

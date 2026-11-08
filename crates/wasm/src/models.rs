@@ -1,7 +1,8 @@
-//! The demo models. Each is a feature history written only against the kernel's
-//! public API, so a demo can't hide what the kernel can't do.
+//! The demo models. Each is a document written only against the kernel's public API, so
+//! a demo can't hide what the kernel can't do. A demo is plain data: it can be saved to a
+//! file and opened again, or driven by the MCP server.
 
-use coreshape::history::*;
+use coreshape::document::*;
 use coreshape::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -13,7 +14,8 @@ pub struct ParamDef {
     pub max: f64,
     pub step: f64,
     pub default: f64,
-    /// Names for each whole-number value, when the parameter picks from a list.
+    /// Names for each whole-number value, when the parameter picks from a list. Such a
+    /// parameter chooses which document to use instead of being a dimension in it.
     pub choices: &'static [&'static str],
 }
 
@@ -22,7 +24,42 @@ pub struct ModelDef {
     pub name: &'static str,
     pub blurb: &'static str,
     pub params: &'static [ParamDef],
-    pub history: fn() -> History,
+    /// Adds the features. The sliders' parameters are already in the document.
+    pub build: fn(&mut Document, usize),
+}
+
+impl ModelDef {
+    /// Which document the slider values ask for.
+    pub fn variant(&self, values: &[f64]) -> usize {
+        self.params
+            .iter()
+            .zip(values)
+            .find(|(p, _)| !p.choices.is_empty())
+            .map_or(0, |(_, v)| v.round().max(0.0) as usize)
+    }
+
+    /// A new document for one variant, with its sliders at their defaults.
+    pub fn document(&self, variant: usize) -> Document {
+        let mut doc = Document::new();
+        for p in self.params.iter().filter(|p| p.choices.is_empty()) {
+            doc.set_parameter(p.key, p.default).expect("demo parameter names are valid");
+        }
+        (self.build)(&mut doc, variant);
+        doc
+    }
+
+    /// Writes slider values into a document.
+    pub fn apply(&self, doc: &mut Document, values: &[f64]) {
+        for (p, v) in self.params.iter().zip(values) {
+            if p.choices.is_empty() {
+                doc.set_parameter(p.key, *v).expect("demo parameter names are valid");
+            }
+        }
+    }
+
+    pub fn defaults(&self) -> Vec<f64> {
+        self.params.iter().map(|p| p.default).collect()
+    }
 }
 
 const fn mm(key: &'static str, label: &'static str, min: f64, max: f64, default: f64) -> ParamDef {
@@ -37,203 +74,164 @@ const fn count(key: &'static str, label: &'static str, min: f64, max: f64, defau
     ParamDef { key, label, unit: "", min, max, step: 1.0, default, choices: &[] }
 }
 
-/// Sketch plane XZ, with extrusion running from y = `y` back toward y = 0.
-fn xz_at(y: f64) -> Frame {
-    Frame { origin: v3(0.0, y, 0.0), x: Vec3::X, y: Vec3::Z, z: -Vec3::Y }
+fn xy() -> Placement {
+    Placement::xy(0.0)
 }
 
-fn bracket() -> History {
-    // width, base, upright, thick, outer radius, inner radius, corner radius, hole, rim
-    let mut h = History::new();
-    let s = h.sketch(
-        |p| xz_at(p[0]),
-        |p| {
-            let (base, up, t) = (p[1], p[2], p[3]);
-            Ok(vec![Profile::new(Wire::polygon(&[
-                v2(0.0, 0.0),  // 0: underside
-                v2(base, 0.0), // 1: end of the base
-                v2(base, t),   // 2: top of the base
-                v2(t, t),      // 3: inner face of the upright
-                v2(t, up),     // 4: top of the upright
-                v2(0.0, up),   // 5: back of the upright
-            ]))])
-        },
-    );
-    let e = h.extrude(s, |_| 0.0, |p| p[0], Mode::Add);
-    h.fillet(EdgeQuery::Between(e.side(5), e.side(0)), |p| p[4]);
-    h.fillet(EdgeQuery::Between(e.side(2), e.side(3)), |p| p[5]);
-    h.fillet(
-        EdgeQuery::Any(vec![
-            EdgeQuery::Between(e.side(1), e.start_cap()),
-            EdgeQuery::Between(e.side(1), e.end_cap()),
-            EdgeQuery::Between(e.side(4), e.start_cap()),
-            EdgeQuery::Between(e.side(4), e.end_cap()),
+fn bracket(doc: &mut Document, _: usize) {
+    // Sketched on XZ, with the extrusion running from y = width back toward y = 0.
+    let plane = Placement::new(point3(0.0, "width", 0.0), point3(0.0, -1.0, 0.0), point3(1.0, 0.0, 0.0));
+    let s = doc.with(Op::sketch(
+        plane,
+        vec![Region::new(Shape::polygon(vec![
+            point(0.0, 0.0),         // 0: underside
+            point("base", 0.0),      // 1: end of the base
+            point("base", "thick"),  // 2: top of the base
+            point("thick", "thick"), // 3: inner face of the upright
+            point("thick", "upright"), // 4: top of the upright
+            point(0.0, "upright"),   // 5: back of the upright
+        ]))],
+    ));
+    let e = doc.with(Op::extrude(s, 0.0, "width", Mode::Add));
+    doc.with(Op::fillet(EdgeSelect::Between(e.side(5), e.side(0)), "outer"));
+    doc.with(Op::fillet(EdgeSelect::Between(e.side(2), e.side(3)), "inner"));
+    doc.with(Op::fillet(
+        EdgeSelect::Any(vec![
+            EdgeSelect::Between(e.side(1), e.start_cap()),
+            EdgeSelect::Between(e.side(1), e.end_cap()),
+            EdgeSelect::Between(e.side(4), e.start_cap()),
+            EdgeSelect::Between(e.side(4), e.end_cap()),
         ]),
-        |p| p[6],
-    );
-    let base_holes = h.sketch(
-        |_| Frame::WORLD,
-        |p| {
-            let x = (p[1] + p[3]) / 2.0;
-            Ok([0.27, 0.73].iter().map(|f| Profile::new(Wire::circle(v2(x, p[0] * f), p[7] / 2.0))).collect())
-        },
-    );
-    let drilled = h.extrude(base_holes, |_| -1.0, |p| p[3] + 2.0, Mode::Remove);
-    let upright_hole = h.sketch(
-        |_| Frame::new(v3(-1.0, 0.0, 0.0), Vec3::X, Vec3::Y),
-        |p| Ok(vec![Profile::new(Wire::circle(v2(p[0] / 2.0, (p[2] + p[3]) / 2.0), p[7] / 2.0))]),
-    );
-    h.extrude(upright_hole, |_| 0.0, |p| p[3] + 2.0, Mode::Remove);
-    h.chamfer(
-        EdgeQuery::Any(vec![
-            EdgeQuery::Between(drilled.side_in_region(0, 0), e.side(2)),
-            EdgeQuery::Between(drilled.side_in_region(1, 0), e.side(2)),
+        "corner",
+    ));
+    let hole = |y: &str| Region::new(Shape::circle("(base + thick) / 2", y, "hole / 2"));
+    let base_holes = doc.with(Op::sketch(xy(), vec![hole("width * 0.27"), hole("width * 0.73")]));
+    let drilled = doc.with(Op::extrude(base_holes, -1.0, "thick + 2", Mode::Remove));
+    let upright_hole = doc.with(Op::sketch(
+        Placement::new(point3(-1.0, 0.0, 0.0), point3(1.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)),
+        vec![Region::new(Shape::circle("width / 2", "(upright + thick) / 2", "hole / 2"))],
+    ));
+    doc.with(Op::extrude(upright_hole, 0.0, "thick + 2", Mode::Remove));
+    doc.with(Op::chamfer(
+        EdgeSelect::Any(vec![
+            EdgeSelect::Between(drilled.region_side(0, 0), e.side(2)),
+            EdgeSelect::Between(drilled.region_side(1, 0), e.side(2)),
         ]),
-        |p| p[8],
-    );
-    h
+        "rim",
+    ));
 }
 
-fn flange() -> History {
-    // outer, hub, bore, thickness, height, foot fillet, chamfer, bolts, hole, circle
-    let mut h = History::new();
-    let s = h.sketch(
-        |_| Frame::WORLD,
-        |p| {
-            let (outer, hub, bore, t, height) = (p[0] / 2.0, p[1] / 2.0, p[2] / 2.0, p[3], p[4]);
-            Ok(vec![Profile::new(Wire::polygon(&[
-                v2(bore, 0.0),    // 0: underside
-                v2(outer, 0.0),   // 1: rim
-                v2(outer, t),     // 2: top of the flange
-                v2(hub, t),       // 3: hub wall
-                v2(hub, height),  // 4: hub top
-                v2(bore, height), // 5: bore
-            ]))])
-        },
-    );
-    let r = h.revolve(s, |_| TAU, Mode::Add);
-    h.fillet(EdgeQuery::Between(r.side(2), r.side(3)), |p| p[5]);
-    h.chamfer(
-        EdgeQuery::Any(vec![EdgeQuery::Between(r.side(1), r.side(2)), EdgeQuery::Between(r.side(4), r.side(5))]),
-        |p| p[6],
-    );
-    let bolts = h.sketch(
-        |_| Frame::WORLD,
-        |p| {
-            let n = p[7].round() as usize;
-            Ok((0..n)
-                .map(|i| {
-                    let a = TAU * (i as f64 + 0.5) / n as f64;
-                    Profile::new(Wire::circle(v2(p[9] / 2.0 * a.cos(), p[9] / 2.0 * a.sin()), p[8] / 2.0))
-                })
-                .collect())
-        },
-    );
-    h.extrude(bolts, |_| -1.0, |p| p[3] + 2.0, Mode::Remove);
-    h
+fn flange(doc: &mut Document, _: usize) {
+    let s = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::polygon(vec![
+            point("bore / 2", 0.0),     // 0: underside
+            point("outer / 2", 0.0),    // 1: rim
+            point("outer / 2", "thick"), // 2: top of the flange
+            point("hub / 2", "thick"),  // 3: hub wall
+            point("hub / 2", "height"), // 4: hub top
+            point("bore / 2", "height"), // 5: bore
+        ]))],
+    ));
+    let r = doc.with(Op::revolve(s, 360.0, Mode::Add));
+    doc.with(Op::fillet(EdgeSelect::Between(r.side(2), r.side(3)), "foot"));
+    doc.with(Op::chamfer(
+        EdgeSelect::Any(vec![EdgeSelect::Between(r.side(1), r.side(2)), EdgeSelect::Between(r.side(4), r.side(5))]),
+        "edge",
+    ));
+    let bolts = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::circle(0.0, 0.0, "hole / 2")).repeated(Repeat::Circular {
+            count: "bolts".into(),
+            radius: "circle / 2".into(),
+            start_degrees: "180 / bolts".into(),
+        })],
+    ));
+    doc.with(Op::extrude(bolts, -1.0, "thick + 2", Mode::Remove));
 }
 
-fn rounded_block() -> History {
-    let mut h = History::new();
-    let s = h.sketch(|_| Frame::WORLD, |p| Ok(vec![Profile::new(Wire::rect_centered(p[0], p[1]))]));
-    h.extrude(s, |_| 0.0, |p| p[2], Mode::Add);
-    h.fillet(EdgeQuery::filter(|_, _, _| true), |p| p[3]);
-    h
+fn rounded_block(doc: &mut Document, _: usize) {
+    let s = doc.with(Op::sketch(xy(), vec![Region::new(Shape::centered("w", "d"))]));
+    doc.with(Op::extrude(s, 0.0, "h", Mode::Add));
+    doc.with(Op::fillet(EdgeSelect::All, "r"));
 }
 
-fn plate() -> History {
-    // width, depth, thick, corner, hole, inset, top fillet, bottom chamfer
-    let mut h = History::new();
-    let s = h.sketch(
-        |_| Frame::WORLD,
-        |p| {
-            let (x, y) = (p[0] / 2.0 - p[5], p[1] / 2.0 - p[5]);
-            let mut profile = Profile::new(Wire::rounded_rect(p[0], p[1], p[3]));
-            for c in [v2(-x, -y), v2(x, -y), v2(x, y), v2(-x, y)] {
-                profile = profile.with_hole(Wire::circle(c, p[4] / 2.0));
-            }
-            Ok(vec![profile])
-        },
-    );
-    let e = h.extrude(s, |_| 0.0, |p| p[2], Mode::Add);
-    h.fillet(EdgeQuery::OnFace(e.end_cap()), |p| p[6]);
-    h.chamfer(EdgeQuery::OnFace(e.start_cap()), |p| p[7]);
-    h
+fn plate(doc: &mut Document, _: usize) {
+    let corner = |x: &str, y: &str| Shape::circle(x, y, "hole / 2");
+    let (px, py) = ("w / 2 - inset", "d / 2 - inset");
+    let (nx, ny) = ("-(w / 2 - inset)", "-(d / 2 - inset)");
+    let s = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::rounded(0.0, 0.0, "w", "d", "corner"))
+            .hole(corner(nx, ny))
+            .hole(corner(px, ny))
+            .hole(corner(px, py))
+            .hole(corner(nx, py))],
+    ));
+    let e = doc.with(Op::extrude(s, 0.0, "t", Mode::Add));
+    doc.with(Op::fillet(EdgeSelect::OnFace(e.end_cap()), "top"));
+    doc.with(Op::chamfer(EdgeSelect::OnFace(e.start_cap()), "bottom"));
 }
 
-fn crossed() -> History {
-    let reach = 60.0;
-    let mut h = History::new();
-    let a = h.sketch(
-        move |_| Frame::translation(v3(0.0, 0.0, -reach)),
-        |p| Ok(vec![Profile::new(Wire::circle(v2(0.0, 0.0), p[0]))]),
-    );
-    h.extrude(a, |_| 0.0, move |_| 2.0 * reach, Mode::Add);
-    let b = h.sketch(
-        move |p| {
-            let angle = p[3].to_radians();
-            let dir = v3(angle.cos(), 0.0, angle.sin());
-            Frame::new(v3(0.0, p[2], 0.0) - dir * reach, dir, Vec3::Y)
-        },
-        |p| Ok(vec![Profile::new(Wire::circle(v2(0.0, 0.0), p[1]))]),
-    );
-    h.extrude(b, |_| 0.0, move |_| 2.0 * reach, Mode::Intersect);
-    h
+fn crossed(doc: &mut Document, _: usize) {
+    doc.set_parameter("reach", 60.0).expect("a valid name");
+    let a = doc.with(Op::sketch(Placement::xy("-reach"), vec![Region::new(Shape::circle(0.0, 0.0, "r1"))]));
+    doc.with(Op::extrude(a, 0.0, "2 * reach", Mode::Add));
+    let along = point3("cos(angle)", 0.0, "sin(angle)");
+    let from = point3("-reach * cos(angle)", "offset", "-reach * sin(angle)");
+    let b = doc.with(Op::sketch(
+        Placement::new(from, along, point3(0.0, 1.0, 0.0)),
+        vec![Region::new(Shape::circle(0.0, 0.0, "r2"))],
+    ));
+    doc.with(Op::extrude(b, 0.0, "2 * reach", Mode::Intersect));
 }
 
-fn pockets() -> History {
-    let mut h = History::new();
-    let s = h.sketch(|_| Frame::WORLD, |_| Ok(vec![Profile::new(Wire::rect(-30.0, -20.0, 60.0, 40.0))]));
-    h.extrude(s, |_| 0.0, |_| 10.0, Mode::Add);
-    let square = h.sketch(|_| Frame::WORLD, |p| Ok(vec![Profile::new(Wire::rect(p[0] - 8.0, -16.0, 16.0, 12.0))]));
-    h.extrude(square, |p| 10.0 - p[2], |p| p[2] + 5.0, Mode::Remove);
-    let round = h.sketch(|_| Frame::WORLD, |p| Ok(vec![Profile::new(Wire::circle(v2(p[0], 10.0), p[1]))]));
-    h.extrude(round, |p| 10.0 - p[2], |p| p[2] + 5.0, Mode::Remove);
-    h
+fn pockets(doc: &mut Document, _: usize) {
+    let s = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rect(-30.0, -20.0, 60.0, 40.0))]));
+    doc.with(Op::extrude(s, 0.0, 10.0, Mode::Add));
+    let square = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rect("offset - 8", -16.0, 16.0, 12.0))]));
+    doc.with(Op::extrude(square, "10 - depth", "depth + 5", Mode::Remove));
+    let round = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle("offset", 10.0, "radius"))]));
+    doc.with(Op::extrude(round, "10 - depth", "depth + 5", Mode::Remove));
 }
 
-fn knob() -> History {
-    let mut h = History::new();
-    let s = h.sketch(
-        |_| Frame::WORLD,
-        |p| {
-            let (body, neck, bead, dome) = (p[0], p[1], p[2], p[3]);
-            let base = 8.0;
-            let chamfer = 2.5;
-            let shoulder = base + chamfer;
-            let bead_bottom = shoulder + 6.0;
-            let bead_top = bead_bottom + 2.0 * bead;
-            let dome_z = bead_top + (neck - dome).abs().max(1.0);
-            Ok(vec![Profile::new(
-                PathBuilder::new(v2(0.0, 0.0))
-                    .line_to(v2(body, 0.0)) // plane
-                    .line_to(v2(body, base)) // cylinder
-                    .line_to(v2(body - chamfer, shoulder)) // cone
-                    .line_to(v2(neck, shoulder)) // plane
-                    .line_to(v2(neck, bead_bottom)) // cylinder
-                    .arc_to(v2(neck, bead_top), v2(neck, bead_bottom + bead), true) // torus
-                    .line_to(v2(dome, dome_z)) // cone
-                    .arc_to(v2(0.0, dome_z + dome), v2(0.0, dome_z), true) // sphere
-                    .close(),
-            )])
-        },
-    );
-    h.revolve(s, |_| TAU, Mode::Add);
-    h
+fn knob(doc: &mut Document, _: usize) {
+    for (name, value) in [
+        ("base", "8"),
+        ("chamfer", "2.5"),
+        ("shoulder", "base + chamfer"),
+        ("bead_bottom", "shoulder + 6"),
+        ("bead_top", "bead_bottom + 2 * bead"),
+        ("dome_z", "bead_top + max(abs(neck - dome), 1)"),
+    ] {
+        doc.set_parameter(name, value).expect("valid derived parameters");
+    }
+    let line = |x: &str, y: &str| Move::Line { to: point(x, y) };
+    let s = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::Path {
+            start: point(0.0, 0.0),
+            moves: vec![
+                line("body", "0"),                      // plane
+                line("body", "base"),                   // cylinder
+                line("body - chamfer", "shoulder"),     // cone
+                line("neck", "shoulder"),               // plane
+                line("neck", "bead_bottom"),            // cylinder
+                Move::Arc { to: point("neck", "bead_top"), center: point("neck", "bead_bottom + bead"), ccw: true }, // torus
+                line("dome", "dome_z"),                 // cone
+                Move::Arc { to: point(0.0, "dome_z + dome"), center: point(0.0, "dome_z"), ccw: true }, // sphere
+            ],
+        })],
+    ));
+    doc.with(Op::revolve(s, 360.0, Mode::Add));
 }
 
-fn sector() -> History {
-    let mut h = History::new();
-    let s = h.sketch(
-        |_| Frame::WORLD,
-        |p| {
-            let (inner, section) = (p[0], p[1]);
-            let wire = Wire::rounded_rect(section, section, section / 5.0).translated(v2(inner + section / 2.0, 0.0));
-            Ok(vec![Profile::new(wire)])
-        },
-    );
-    h.revolve(s, |p| p[2].to_radians(), Mode::Add);
-    h
+fn sector(doc: &mut Document, _: usize) {
+    let s = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::rounded("inner + section / 2", 0.0, "section", "section", "section / 5"))],
+    ));
+    doc.with(Op::revolve(s, "angle", Mode::Add));
 }
 
 /// Names of the Boolean stress cases, in slider order.
@@ -254,64 +252,46 @@ const STRESS_NAMES: [&str; 14] = [
     "Known limit: tangent bore",
 ];
 
-fn stress_case(p: &[f64]) -> Result<Body> {
-    let at = |x: f64, y: f64, z: f64| Frame::translation(v3(x, y, z));
-    let z_cylinder = |x: f64, y: f64, z: f64, r: f64, h: f64| cylinder(&at(x, y, z), r, h, 2);
-    match p[0].round() as i64 {
-        0 => {
-            let a = box_solid(&at(-30.0, -30.0, 0.0), 60.0, 60.0, 20.0, 1)?;
-            subtract(&a, &box_solid(&at(-15.0, -15.0, 8.0), 30.0, 30.0, 12.0, 2)?)
-        }
-        1 => {
-            let a = box_solid(&at(-30.0, -15.0, 0.0), 30.0, 30.0, 30.0, 1)?;
-            union(&a, &box_solid(&at(0.0, -15.0, 0.0), 30.0, 30.0, 30.0, 2)?)
-        }
-        2 => {
-            let a = box_solid(&at(-30.0, -30.0, 0.0), 30.0, 30.0, 30.0, 1)?;
-            union(&a, &box_solid(&at(0.0, 0.0, 0.0), 30.0, 30.0, 30.0, 2)?)
-        }
-        3 => {
-            let a = box_solid(&at(-30.0, -30.0, -30.0), 30.0, 30.0, 30.0, 1)?;
-            union(&a, &box_solid(&at(0.0, 0.0, 0.0), 30.0, 30.0, 30.0, 2)?)
-        }
+fn stress(doc: &mut Document, case: usize) {
+    let at = |x: f64, y: f64, z: f64| Placement::at(point3(x, y, z));
+    let block = |p: Placement, dx: f64, dy: f64, dz: f64, mode: Mode| {
+        Op::solid(Primitive::Box { dx: dx.into(), dy: dy.into(), dz: dz.into() }, p, mode)
+    };
+    let rod = |p: Placement, r: f64, h: f64, mode: Mode| Op::solid(Primitive::Cylinder { radius: r.into(), height: h.into() }, p, mode);
+    let ball = |p: Placement, r: f64, mode: Mode| Op::solid(Primitive::Sphere { radius: r.into() }, p, mode);
+    let ops: Vec<Op> = match case {
+        0 => vec![block(at(-30.0, -30.0, 0.0), 60.0, 60.0, 20.0, Mode::Add), block(at(-15.0, -15.0, 8.0), 30.0, 30.0, 12.0, Mode::Remove)],
+        1 => vec![block(at(-30.0, -15.0, 0.0), 30.0, 30.0, 30.0, Mode::Add), block(at(0.0, -15.0, 0.0), 30.0, 30.0, 30.0, Mode::Add)],
+        2 => vec![block(at(-30.0, -30.0, 0.0), 30.0, 30.0, 30.0, Mode::Add), block(at(0.0, 0.0, 0.0), 30.0, 30.0, 30.0, Mode::Add)],
+        3 => vec![block(at(-30.0, -30.0, -30.0), 30.0, 30.0, 30.0, Mode::Add), block(at(0.0, 0.0, 0.0), 30.0, 30.0, 30.0, Mode::Add)],
         4 => {
-            let plate = box_solid(&at(-40.0, -40.0, -10.0), 80.0, 80.0, 10.0, 1)?;
             let tilt = Frame::rotation(Vec3::ZERO, v3(1.0, -1.0, 0.0), (1.0f64 / 3.0f64.sqrt()).acos());
-            union(&plate, &box_solid(&tilt, 30.0, 30.0, 30.0, 2)?)
+            vec![block(at(-40.0, -40.0, -10.0), 80.0, 80.0, 10.0, Mode::Add), block(Placement::from_frame(&tilt), 30.0, 30.0, 30.0, Mode::Add)]
         }
-        5 => {
-            let a = box_solid(&at(-40.0, -30.0, 0.0), 80.0, 30.0, 20.0, 1)?;
-            union(&a, &z_cylinder(0.0, 12.0, 0.0, 12.0, 20.0)?)
-        }
-        6 => {
-            let a = box_solid(&at(-40.0, -30.0, 0.0), 80.0, 30.0, 20.0, 1)?;
-            subtract(&a, &z_cylinder(0.0, -12.0, 5.0, 12.0, 15.0)?)
-        }
-        7 => subtract(&z_cylinder(0.0, 0.0, 0.0, 25.0, 40.0)?, &z_cylinder(0.0, 0.0, 0.0, 15.0, 40.0)?),
+        5 => vec![block(at(-40.0, -30.0, 0.0), 80.0, 30.0, 20.0, Mode::Add), rod(at(0.0, 12.0, 0.0), 12.0, 20.0, Mode::Add)],
+        6 => vec![block(at(-40.0, -30.0, 0.0), 80.0, 30.0, 20.0, Mode::Add), rod(at(0.0, -12.0, 5.0), 12.0, 15.0, Mode::Remove)],
+        7 => vec![rod(at(0.0, 0.0, 0.0), 25.0, 40.0, Mode::Add), rod(at(0.0, 0.0, 0.0), 15.0, 40.0, Mode::Remove)],
         8 => {
-            let side = Frame::new(v3(-40.0, 0.0, 0.0), Vec3::X, Vec3::Y);
-            intersect(&z_cylinder(0.0, 0.0, -40.0, 20.0, 80.0)?, &cylinder(&side, 20.0, 80.0, 3)?)
+            let side = Placement::new(point3(-40.0, 0.0, 0.0), point3(1.0, 0.0, 0.0), point3(0.0, 1.0, 0.0));
+            vec![rod(at(0.0, 0.0, -40.0), 20.0, 80.0, Mode::Add), rod(side, 20.0, 80.0, Mode::Intersect)]
         }
-        9 => {
-            let half = box_solid(&at(0.0, -40.0, -5.0), 40.0, 80.0, 60.0, 2)?;
-            subtract(&cone_frustum(&Frame::WORLD, 25.0, 0.0, 45.0, 1)?, &half)
-        }
-        10 => subtract(&sphere(&Frame::WORLD, 30.0, 1)?, &z_cylinder(0.0, 0.0, -40.0, 15.0, 80.0)?),
-        11 => union(&sphere(&at(-15.0, 0.0, 0.0), 15.0, 1)?, &sphere(&at(20.0, 0.0, 0.0), 20.0, 2)?),
-        12 => {
-            let half = box_solid(&at(0.0, -60.0, -20.0), 60.0, 120.0, 40.0, 2)?;
-            intersect(&torus(&Frame::WORLD, 35.0, 10.0, 1)?, &half)
-        }
+        9 => vec![
+            Op::solid(Primitive::Cone { r0: 25.0.into(), r1: 0.0.into(), height: 45.0.into() }, xy(), Mode::Add),
+            block(at(0.0, -40.0, -5.0), 40.0, 80.0, 60.0, Mode::Remove),
+        ],
+        10 => vec![ball(xy(), 30.0, Mode::Add), rod(at(0.0, 0.0, -40.0), 15.0, 80.0, Mode::Remove)],
+        11 => vec![ball(at(-15.0, 0.0, 0.0), 15.0, Mode::Add), ball(at(20.0, 0.0, 0.0), 20.0, Mode::Add)],
+        12 => vec![
+            Op::solid(Primitive::Torus { major: 35.0.into(), minor: 10.0.into() }, xy(), Mode::Add),
+            block(at(0.0, -60.0, -20.0), 60.0, 120.0, 40.0, Mode::Intersect),
+        ],
         // A cylinder internally tangent to a sphere meets it in a figure eight with a
         // double point. The kernel refuses this one rather than guess.
-        _ => subtract(&sphere(&Frame::WORLD, 30.0, 1)?, &z_cylinder(12.0, 0.0, -40.0, 18.0, 80.0)?),
+        _ => vec![ball(xy(), 30.0, Mode::Add), rod(at(12.0, 0.0, -40.0), 18.0, 80.0, Mode::Remove)],
+    };
+    for op in ops {
+        doc.with(op);
     }
-}
-
-fn stress() -> History {
-    let mut h = History::new();
-    h.custom(stress_case);
-    h
 }
 
 pub fn catalog() -> &'static [ModelDef] {
@@ -392,63 +372,63 @@ pub fn catalog() -> &'static [ModelDef] {
             name: "Bracket",
             blurb: "Sketch, extrude, fillet the bends and corners, drill, chamfer the holes. Each dimension rebuilds only what depends on it.",
             params: &BRACKET,
-            history: bracket,
+            build: bracket,
         },
         ModelDef {
             id: "flange",
             name: "Flange",
             blurb: "A revolved flange with a filleted hub, chamfered edges and a bolt circle. The hub fillet is a true torus.",
             params: &FLANGE,
-            history: flange,
+            build: flange,
         },
         ModelDef {
             id: "block",
             name: "Rounded block",
             blurb: "Every edge filleted. Twelve cylinders, six planes and eight sphere patches that meet exactly.",
             params: &BLOCK,
-            history: rounded_block,
+            build: rounded_block,
         },
         ModelDef {
             id: "plate",
             name: "Mounting plate",
             blurb: "All top edges filleted and all bottom edges chamfered, with each feature selecting edges by the face they bound.",
             params: &PLATE,
-            history: plate,
+            build: plate,
         },
         ModelDef {
             id: "crossed",
             name: "Crossed cylinders",
             blurb: "Two cylinders intersected. Equal radii crossing square make a Steinmetz solid of volume 16r\u{b3}/3. Offsets or unequal radii need the general curve tracer.",
             params: &CROSSED,
-            history: crossed,
+            build: crossed,
         },
         ModelDef {
             id: "pockets",
             name: "Sliding pockets",
             blurb: "Slide the tools off the plate's edge. Many positions line faces up exactly. If the kernel refuses a position, the reason appears here.",
             params: &POCKETS,
-            history: pockets,
+            build: pockets,
         },
         ModelDef {
             id: "stress",
             name: "Stress cases",
             blurb: "The contacts Booleans find hardest: coplanar faces, edges and corners that only touch, and tangent surfaces. The last case is a known limit, where the kernel refuses rather than guess.",
             params: &STRESS,
-            history: stress,
+            build: stress,
         },
         ModelDef {
             id: "knob",
             name: "Turned knob",
             blurb: "One revolve that generates all five surface types: plane, cylinder, cone, torus and sphere.",
             params: &KNOB,
-            history: knob,
+            build: knob,
         },
         ModelDef {
             id: "sector",
             name: "Ring sector",
             blurb: "A partial revolve with end caps. Past 180 degrees the kernel splits each swept face in two.",
             params: &SECTOR,
-            history: sector,
+            build: sector,
         },
     ];
     &MODELS

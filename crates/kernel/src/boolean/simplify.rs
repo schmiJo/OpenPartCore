@@ -12,7 +12,7 @@ use crate::error::Result;
 use crate::math::*;
 use crate::surface::Surface;
 use crate::topo::{Body, Coedge, Edge, Face};
-use std::collections::{HashMap, HashSet};
+use crate::hash::{HashMap, HashSet};
 
 pub fn simplify(body: Body) -> Result<Body> {
     let body = merge_faces(body)?;
@@ -122,7 +122,7 @@ fn merge_faces(body: Body) -> Result<Body> {
         points[rb] = joined;
     }
 
-    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::default();
     for f in 0..n {
         let r = find(&mut parent, f);
         groups.entry(r).or_default().push(f);
@@ -195,7 +195,7 @@ fn merge_edges(mut body: Body) -> Body {
         // Only edges still used by a loop count: merged ones stay in the array until
         // `compact` removes them, and must not be picked up again.
         let live: HashSet<usize> = body.faces.iter().flat_map(|f| f.loops.iter().flatten().map(|c| c.edge)).collect();
-        let mut at_vertex: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut at_vertex: HashMap<usize, Vec<usize>> = HashMap::default();
         for &i in &live {
             let e = &body.edges[i];
             at_vertex.entry(e.v0).or_default().push(i);
@@ -204,7 +204,7 @@ fn merge_edges(mut body: Body) -> Body {
         // A vertex that was separated at a pinch has a twin at the same position.
         // Merging across it would leave that twin sitting on the middle of an edge,
         // and the two sides of the pinch must keep a common point in every mesh.
-        let mut at_position: HashMap<[u64; 3], usize> = HashMap::new();
+        let mut at_position: HashMap<[u64; 3], usize> = HashMap::default();
         for &v in at_vertex.keys() {
             let p = body.vertices[v];
             *at_position.entry([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).or_insert(0) += 1;
@@ -302,8 +302,8 @@ fn start_vertex(edges: &[Edge], c: Coedge) -> usize {
 
 /// Drops unused vertices and edges, and renumbers.
 fn compact(mut body: Body) -> Body {
-    let mut edge_map: HashMap<usize, usize> = HashMap::new();
-    let mut vertex_map: HashMap<usize, usize> = HashMap::new();
+    let mut edge_map: HashMap<usize, usize> = HashMap::default();
+    let mut vertex_map: HashMap<usize, usize> = HashMap::default();
     let mut edges = Vec::new();
     let mut vertices = Vec::new();
     for face in &mut body.faces {
