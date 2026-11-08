@@ -102,22 +102,13 @@ impl Arrangement {
             for &id in list {
                 let e = &self.edges[id];
                 if probe.iter().all(|&p| e.curve.closest(p, e.t0, e.t1).1 <= 8.0 * TOL) {
-                    return Coedge {
-                        edge: id,
-                        reversed: e.v0 != a,
-                    };
+                    return Coedge { edge: id, reversed: e.v0 != a };
                 }
             }
         }
         let reversed = ta > tb;
         let (t0, t1, v0, v1) = if reversed { (tb, ta, b, a) } else { (ta, tb, a, b) };
-        self.edges.push(Edge {
-            curve: curve.clone(),
-            t0,
-            t1,
-            v0,
-            v1,
-        });
+        self.edges.push(Edge { curve: curve.clone(), t0, t1, v0, v1 });
         let id = self.edges.len() - 1;
         self.by_ends.entry(key).or_default().push(id);
         Coedge { edge: id, reversed }
@@ -168,11 +159,8 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
     // Step 2: where each edge meets the other body.
     let mut splits: [Vec<Vec<(f64, usize)>>; 2] = [Vec::new(), Vec::new()];
     for s in 0..2 {
-        splits[s] = bodies[s]
-            .edges
-            .iter()
-            .map(|e| vec![(e.t0, vertex_map[s][e.v0]), (e.t1, vertex_map[s][e.v1])])
-            .collect();
+        splits[s] =
+            bodies[s].edges.iter().map(|e| vec![(e.t0, vertex_map[s][e.v0]), (e.t1, vertex_map[s][e.v1])]).collect();
     }
     for s in 0..2 {
         let other = 1 - s;
@@ -293,18 +281,10 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
             let on_boundary: HashSet<usize> = boundary.iter().flatten().map(|c| c.edge).collect();
             let inner: Vec<usize> = {
                 let mut seen = HashSet::new();
-                extras[s][f]
-                    .iter()
-                    .copied()
-                    .filter(|e| !on_boundary.contains(e) && seen.insert(*e))
-                    .collect()
+                extras[s][f].iter().copied().filter(|e| !on_boundary.contains(e) && seen.insert(*e)).collect()
             };
             if inner.is_empty() {
-                pieces.push(Piece {
-                    source: s,
-                    face: f,
-                    loops: boundary.clone(),
-                });
+                pieces.push(Piece { source: s, face: f, loops: boundary.clone() });
                 continue;
             }
             let mut half: Vec<Coedge> = boundary.iter().flatten().copied().collect();
@@ -312,17 +292,9 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
                 half.push(Coedge { edge: e, reversed: false });
                 half.push(Coedge { edge: e, reversed: true });
             }
-            let fc = FaceChart {
-                surface: &face.surface,
-                chart: &face.chart,
-                flipped: face.flipped,
-            };
+            let fc = FaceChart { surface: &face.surface, chart: &face.chart, flipped: face.flipped };
             for loops in trace_faces(&fc, &arr.edges, &arr.vertices, &half)? {
-                pieces.push(Piece {
-                    source: s,
-                    face: f,
-                    loops,
-                });
+                pieces.push(Piece { source: s, face: f, loops });
             }
         }
     }
@@ -368,9 +340,8 @@ fn verify_meshable(body: &Body) -> Result<()> {
         return Ok(());
     }
     let size = body.aabb().diagonal();
-    let mesh = crate::tess::tessellate(body, &crate::tess::TessParams::for_size(size)).map_err(|e| {
-        Error::NearDegenerate(format!("the result has edges too close to tell apart: {e}"))
-    })?;
+    let mesh = crate::tess::tessellate(body, &crate::tess::TessParams::for_size(size))
+        .map_err(|e| Error::NearDegenerate(format!("the result has edges too close to tell apart: {e}")))?;
     let open = mesh.open_edge_count();
     if open != 0 {
         let (p, _) = mesh.open_edges()[0];
@@ -447,10 +418,7 @@ fn intersect_faces(
                 let near = reach / 2.0;
                 let qa = face_a.surface.project(p);
                 let qb = face_b.surface.project(p);
-                let (la, lb) = (
-                    index[0].locate_on_face(fa, qa, near),
-                    index[1].locate_on_face(fb, qb, near),
-                );
+                let (la, lb) = (index[0].locate_on_face(fa, qa, near), index[1].locate_on_face(fb, qb, near));
                 if la == FaceLoc::Outside || lb == FaceLoc::Outside {
                     return false;
                 }
@@ -488,7 +456,10 @@ fn intersect_faces(
         for c in boundaries[s][f].iter().flatten() {
             for v in [arr.edges[c.edge].v0, arr.edges[c.edge].v1] {
                 let p = arr.vertices[v];
-                if face_a.surface.sdf(p).abs() <= 2.0 * MERGE && face_b.surface.sdf(p).abs() <= 2.0 * MERGE && !candidates.contains(&v) {
+                if face_a.surface.sdf(p).abs() <= 2.0 * MERGE
+                    && face_b.surface.sdf(p).abs() <= 2.0 * MERGE
+                    && !candidates.contains(&v)
+                {
                     candidates.push(v);
                 }
             }
@@ -524,10 +495,7 @@ fn intersect_faces(
             // Keep the piece only where it lies in both faces.
             let inside = |f: f64| {
                 let p = curve.eval(ta + (tb - ta) * f);
-                (
-                    index[0].locate_on_face(fa, p, 2.0 * TOL),
-                    index[1].locate_on_face(fb, p, 2.0 * TOL),
-                )
+                (index[0].locate_on_face(fa, p, 2.0 * TOL), index[1].locate_on_face(fb, p, 2.0 * TOL))
             };
             let (la, lb) = inside(0.5);
             if la == FaceLoc::Outside || lb == FaceLoc::Outside {
@@ -544,7 +512,13 @@ fn intersect_faces(
 type RawPiece = (Curve, f64, f64, usize, usize);
 
 /// Splits an intersection curve at the vertices on it.
-fn curve_pieces(sc: &SsiCurve, on_curve: &[(f64, usize)], arr: &mut Arrangement, fa: &Face, fb: &Face) -> Result<Vec<RawPiece>> {
+fn curve_pieces(
+    sc: &SsiCurve,
+    on_curve: &[(f64, usize)],
+    arr: &mut Arrangement,
+    fa: &Face,
+    fb: &Face,
+) -> Result<Vec<RawPiece>> {
     if let Curve::Sampled(s) = &sc.curve {
         return sampled_pieces(s, sc.closed, on_curve, arr, fa, fb);
     }
@@ -571,11 +545,7 @@ fn curve_pieces(sc: &SsiCurve, on_curve: &[(f64, usize)], arr: &mut Arrangement,
         }
         for i in 0..stops.len() {
             let (ta, va) = stops[i];
-            let (tb, vb) = if i + 1 < stops.len() {
-                stops[i + 1]
-            } else {
-                (stops[0].0 + TAU, stops[0].1)
-            };
+            let (tb, vb) = if i + 1 < stops.len() { stops[i + 1] } else { (stops[0].0 + TAU, stops[0].1) };
             out.push((sc.curve.clone(), ta, tb, va, vb));
         }
     } else {
@@ -667,10 +637,7 @@ fn classify_piece(piece: &Piece, bodies: [&Body; 2], index: &[Index; 2], arr: &A
     let other = 1 - piece.source;
     // A face entirely outside the other body's bounding box needs no testing. In a
     // chain of local operations this is most faces.
-    if !index[piece.source].face_boxes[piece.face]
-        .inflated(4.0 * TOL)
-        .overlaps(&index[other].bounds)
-    {
+    if !index[piece.source].face_boxes[piece.face].inflated(4.0 * TOL).overlaps(&index[other].bounds) {
         return Ok(Class::Out);
     }
     let size = index[0].bounds.diagonal().max(index[1].bounds.diagonal());
@@ -754,21 +721,15 @@ fn verify_membership(index: &[Index; 2], result: &Body, op: BoolOp, points: usiz
     let mut rng = Rng::new(0xC0FFEE);
     for i in 0..points {
         let bx = if usable && i % 2 == 0 { &overlap } else { &all };
-        let p = v3(
-            rng.range(bx.min.x, bx.max.x),
-            rng.range(bx.min.y, bx.max.y),
-            rng.range(bx.min.z, bx.max.z),
-        );
+        let p = v3(rng.range(bx.min.x, bx.max.x), rng.range(bx.min.y, bx.max.y), rng.range(bx.min.z, bx.max.z));
         let inside = |loc: BodyLoc| match loc {
             BodyLoc::Inside => Some(true),
             BodyLoc::Outside => Some(false),
             BodyLoc::OnFace(_) => None,
         };
-        let (Some(ina), Some(inb), Some(got)) = (
-            inside(index[0].locate_in_body(p)),
-            inside(index[1].locate_in_body(p)),
-            inside(out.locate_in_body(p)),
-        ) else {
+        let (Some(ina), Some(inb), Some(got)) =
+            (inside(index[0].locate_in_body(p)), inside(index[1].locate_in_body(p)), inside(out.locate_in_body(p)))
+        else {
             continue;
         };
         let want = match op {
@@ -801,21 +762,11 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
         let piece = &pieces[i];
         let f = &bodies[piece.source].faces[piece.face];
         let loops = if flip {
-            piece
-                .loops
-                .iter()
-                .map(|l| l.iter().rev().map(|c| c.flipped()).collect())
-                .collect()
+            piece.loops.iter().map(|l| l.iter().rev().map(|c| c.flipped()).collect()).collect()
         } else {
             piece.loops.clone()
         };
-        faces.push(Out {
-            surface: f.surface,
-            flipped: f.flipped != flip,
-            chart: f.chart,
-            tag: f.tag,
-            loops,
-        });
+        faces.push(Out { surface: f.surface, flipped: f.flipped != flip, chart: f.chart, tag: f.tag, loops });
     }
 
     // Each use of an arrangement edge: (face, loop, position, reversed).
@@ -839,7 +790,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
         let e = &arr.edges[ae];
         let pairs: Vec<Vec<(usize, usize, usize, bool)>> = if list.len() == 2 {
             vec![list.clone()]
-        } else if list.len() % 2 == 0 && list.len() >= 4 {
+        } else if list.len().is_multiple_of(2) && list.len() >= 4 {
             let mid = e.curve.eval((e.t0 + e.t1) / 2.0);
             let tangent = e.curve.derivative((e.t0 + e.t1) / 2.0).normalized();
             let u = tangent.any_perpendicular();
@@ -862,9 +813,10 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
             }
             around.sort_by(|x, y| x.0.total_cmp(&y.0));
             let n = around.len();
-            let start = around.iter().position(|x| x.1).ok_or_else(|| {
-                Error::Internal("non-manifold edge with no material between its faces".into())
-            })?;
+            let start = around
+                .iter()
+                .position(|x| x.1)
+                .ok_or_else(|| Error::Internal("non-manifold edge with no material between its faces".into()))?;
             let mut groups = Vec::new();
             for k in 0..n / 2 {
                 let x = around[(start + 2 * k) % n];
@@ -876,10 +828,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
             }
             groups
         } else {
-            return Err(Error::Internal(format!(
-                "the result does not close: an edge is used by {} faces",
-                list.len()
-            )));
+            return Err(Error::Internal(format!("the result does not close: an edge is used by {} faces", list.len())));
         };
         for group in pairs {
             // Vertices are placeholders here; they are resolved below.
@@ -945,22 +894,10 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
             .iter()
             .enumerate()
             .map(|(li, l)| {
-                l.iter()
-                    .enumerate()
-                    .map(|(k, c)| Coedge {
-                        edge: assign[&(fi, li, k)],
-                        reversed: c.reversed,
-                    })
-                    .collect()
+                l.iter().enumerate().map(|(k, c)| Coedge { edge: assign[&(fi, li, k)], reversed: c.reversed }).collect()
             })
             .collect();
-        body.faces.push(Face {
-            surface: f.surface,
-            flipped: f.flipped,
-            chart: f.chart,
-            loops,
-            tag: f.tag,
-        });
+        body.faces.push(Face { surface: f.surface, flipped: f.flipped, chart: f.chart, loops, tag: f.tag });
     }
     body.compute_shells();
     Ok(body)

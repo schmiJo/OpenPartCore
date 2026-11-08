@@ -58,12 +58,7 @@ impl Cdt {
         let pts = vec![[-s, -s], [4 * s, -s], [-s, 4 * s]];
         Cdt {
             pts,
-            tris: vec![Tri {
-                v: [0, 1, 2],
-                n: [NONE; 3],
-                c: [false; 3],
-                inside: false,
-            }],
+            tris: vec![Tri { v: [0, 1, 2], n: [NONE; 3], c: [false; 3], inside: false }],
             last: 0,
             vertex_tri: vec![0, 0, 0],
             lookup: HashMap::new(),
@@ -98,9 +93,7 @@ impl Cdt {
         // A stochastic walk always terminates in a triangulation, but stay
         // defensive: a linear scan is slow and cannot fail.
         for (i, tri) in self.tris.iter().enumerate() {
-            let inside = (0..3).all(|k| {
-                orient(self.p(tri.v[(k + 1) % 3]), self.p(tri.v[(k + 2) % 3]), q) >= 0
-            });
+            let inside = (0..3).all(|k| orient(self.p(tri.v[(k + 1) % 3]), self.p(tri.v[(k + 2) % 3]), q) >= 0);
             if inside {
                 return i as u32;
             }
@@ -162,24 +155,9 @@ impl Cdt {
                 let [ca, cb, cc] = tri.c;
                 let (t0, t1, t2) = (t, self.tris.len() as u32, self.tris.len() as u32 + 1);
                 let inside = tri.inside;
-                self.tris[t0 as usize] = Tri {
-                    v: [p, b, c],
-                    n: [na, t1, t2],
-                    c: [ca, false, false],
-                    inside,
-                };
-                self.tris.push(Tri {
-                    v: [p, c, a],
-                    n: [nb, t2, t0],
-                    c: [cb, false, false],
-                    inside,
-                });
-                self.tris.push(Tri {
-                    v: [p, a, b],
-                    n: [nc, t0, t1],
-                    c: [cc, false, false],
-                    inside,
-                });
+                self.tris[t0 as usize] = Tri { v: [p, b, c], n: [na, t1, t2], c: [ca, false, false], inside };
+                self.tris.push(Tri { v: [p, c, a], n: [nb, t2, t0], c: [cb, false, false], inside });
+                self.tris.push(Tri { v: [p, a, b], n: [nc, t0, t1], c: [cc, false, false], inside });
                 self.set_back_pointer(nb, t, t1);
                 self.set_back_pointer(nc, t, t2);
                 for x in [t0, t1, t2] {
@@ -207,30 +185,10 @@ impl Cdt {
                 let c_dc = ut.c[(j + 2) % 3];
                 let (t1, t2, u1, u2) = (t, self.tris.len() as u32, u, self.tris.len() as u32 + 1);
                 let (ti, ui) = (tri.inside, ut.inside);
-                self.tris[t1 as usize] = Tri {
-                    v: [p, a, b],
-                    n: [nc, u2, t2],
-                    c: [cc, c0, false],
-                    inside: ti,
-                };
-                self.tris.push(Tri {
-                    v: [p, c, a],
-                    n: [nb, t1, u1],
-                    c: [cb, false, c0],
-                    inside: ti,
-                });
-                self.tris[u1 as usize] = Tri {
-                    v: [p, d, c],
-                    n: [n_dc, t2, u2],
-                    c: [c_dc, c0, false],
-                    inside: ui,
-                };
-                self.tris.push(Tri {
-                    v: [p, b, d],
-                    n: [n_bd, u1, t1],
-                    c: [c_bd, false, c0],
-                    inside: ui,
-                });
+                self.tris[t1 as usize] = Tri { v: [p, a, b], n: [nc, u2, t2], c: [cc, c0, false], inside: ti };
+                self.tris.push(Tri { v: [p, c, a], n: [nb, t1, u1], c: [cb, false, c0], inside: ti });
+                self.tris[u1 as usize] = Tri { v: [p, d, c], n: [n_dc, t2, u2], c: [c_dc, c0, false], inside: ui };
+                self.tris.push(Tri { v: [p, b, d], n: [n_bd, u1, t1], c: [c_bd, false, c0], inside: ui });
                 self.set_back_pointer(nb, t, t2);
                 self.set_back_pointer(n_bd, u, u2);
                 for x in [t1, t2, u1, u2] {
@@ -259,18 +217,10 @@ impl Cdt {
             let n_dc = ty.n[(j + 2) % 3];
             let c_bd = ty.c[(j + 1) % 3];
             let c_dc = ty.c[(j + 2) % 3];
-            self.tris[x as usize] = Tri {
-                v: [p, b, d],
-                n: [n_bd, y, tx.n[2]],
-                c: [c_bd, false, tx.c[2]],
-                inside: tx.inside,
-            };
-            self.tris[y as usize] = Tri {
-                v: [p, d, c],
-                n: [n_dc, tx.n[1], x],
-                c: [c_dc, tx.c[1], false],
-                inside: tx.inside,
-            };
+            self.tris[x as usize] =
+                Tri { v: [p, b, d], n: [n_bd, y, tx.n[2]], c: [c_bd, false, tx.c[2]], inside: tx.inside };
+            self.tris[y as usize] =
+                Tri { v: [p, d, c], n: [n_dc, tx.n[1], x], c: [c_dc, tx.c[1], false], inside: tx.inside };
             self.set_back_pointer(n_bd, y, x);
             self.set_back_pointer(tx.n[1], x, y);
             self.touch(x);
@@ -356,7 +306,8 @@ impl Cdt {
                 let (x, y) = (tri.v[(i + 1) % 3], tri.v[(i + 2) % 3]);
                 let (sx, sy) = (orient(pa, pb, self.p(x)), orient(pa, pb, self.p(y)));
                 let forward = |q: [i64; 2]| {
-                    (q[0] - pa[0]) as i128 * (pb[0] - pa[0]) as i128 + (q[1] - pa[1]) as i128 * (pb[1] - pa[1]) as i128 > 0
+                    (q[0] - pa[0]) as i128 * (pb[0] - pa[0]) as i128 + (q[1] - pa[1]) as i128 * (pb[1] - pa[1]) as i128
+                        > 0
                 };
                 if sx == 0 && forward(self.p(x)) {
                     through = Some(x);
@@ -525,18 +476,8 @@ impl Cdt {
         let n_xv = b.n[(jv + 1) % 3];
         let c_xv = b.c[(jv + 1) % 3];
         // New triangles: t1 = w, u, x and t2 = x, v, w.
-        self.tris[t1 as usize] = Tri {
-            v: [w, u, x],
-            n: [n_ux, t2, n_wu],
-            c: [c_ux, false, c_wu],
-            inside: a.inside,
-        };
-        self.tris[t2 as usize] = Tri {
-            v: [x, v, w],
-            n: [n_vw, t1, n_xv],
-            c: [c_vw, false, c_xv],
-            inside: b.inside,
-        };
+        self.tris[t1 as usize] = Tri { v: [w, u, x], n: [n_ux, t2, n_wu], c: [c_ux, false, c_wu], inside: a.inside };
+        self.tris[t2 as usize] = Tri { v: [x, v, w], n: [n_vw, t1, n_xv], c: [c_vw, false, c_xv], inside: b.inside };
         self.set_back_pointer(n_ux, t2, t1);
         self.set_back_pointer(n_vw, t1, t2);
         self.touch(t1);
@@ -587,10 +528,7 @@ impl Cdt {
                     .unwrap();
                 let v = self.tris[largest as usize].v;
                 let (a, b, c) = (self.p(v[0]), self.p(v[1]), self.p(v[2]));
-                is_inside([
-                    (a[0] + b[0] + c[0]) as f64 / 3.0,
-                    (a[1] + b[1] + c[1]) as f64 / 3.0,
-                ])
+                is_inside([(a[0] + b[0] + c[0]) as f64 / 3.0, (a[1] + b[1] + c[1]) as f64 / 3.0])
             };
             for t in members {
                 self.tris[t as usize].inside = inside;
@@ -601,10 +539,8 @@ impl Cdt {
     /// Marks triangles inside a set of closed polygons given as vertex ids: a point
     /// is inside when it has a non-zero total winding.
     pub fn mark_inside(&mut self, loops: &[Vec<u32>]) {
-        let polys: Vec<Vec<[f64; 2]>> = loops
-            .iter()
-            .map(|l| l.iter().map(|&v| [self.p(v)[0] as f64, self.p(v)[1] as f64]).collect())
-            .collect();
+        let polys: Vec<Vec<[f64; 2]>> =
+            loops.iter().map(|l| l.iter().map(|&v| [self.p(v)[0] as f64, self.p(v)[1] as f64]).collect()).collect();
         self.mark_inside_with(|q| {
             let mut w = 0.0;
             for poly in &polys {
@@ -663,10 +599,7 @@ mod tests {
             for i in 0..n {
                 let a = i as f64 / n as f64 * std::f64::consts::TAU;
                 let r = rng.range(0.1, 0.48) * GRID as f64;
-                poly.push([
-                    (GRID as f64 / 2.0 + r * a.cos()) as i64,
-                    (GRID as f64 / 2.0 + r * a.sin()) as i64,
-                ]);
+                poly.push([(GRID as f64 / 2.0 + r * a.cos()) as i64, (GRID as f64 / 2.0 + r * a.sin()) as i64]);
             }
             let mut exact = 0i128;
             for i in 0..n {

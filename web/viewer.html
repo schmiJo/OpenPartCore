@@ -137,6 +137,33 @@ dd { margin: 0; text-align: right; font: 400 13.5px/1.6 var(--num); font-variant
 #actions button:focus-visible, #tools button:focus-visible, #models button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 #fatal { padding: 16px; color: var(--bad); }
 
+/* Feature list with a rollback bar, read top to bottom like a build sheet. */
+#features { position: relative; display: grid; }
+.feat {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 8px; align-items: center;
+  background: none; border: 0; text-align: left; padding: 5px 2px; min-height: 34px; cursor: pointer; width: 100%;
+}
+.feat:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.feat .glyph {
+  width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--rule); border-radius: 2px;
+  font: 500 11px var(--num); color: var(--ink-soft);
+}
+.feat .name { font-weight: 500; min-width: 0; }
+.feat .state { font: 400 11.5px var(--num); color: var(--ink-soft); }
+.feat.rebuilt .state { color: var(--accent); }
+.feat.off { opacity: .42; }
+.feat.failed .name, .feat.failed .state { color: var(--bad); }
+.feat.failed .glyph { border-color: var(--bad); color: var(--bad); }
+.feat .why { grid-column: 2 / -1; font-size: 13px; color: var(--bad); padding-top: 2px; }
+#rollback {
+  position: absolute; left: 0; right: 0; height: 26px; margin-top: -13px; cursor: row-resize; touch-action: none; z-index: 1;
+}
+#rollback::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 11px; height: 4px; border-radius: 2px; background: var(--accent);
+}
+#rollback:focus-visible::before { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dim output.named { font: 500 15px var(--ui); text-align: right; }
+
 @media (min-width: 860px), (orientation: landscape) and (max-height: 520px) {
   main { grid-template-rows: none; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); }
   #panel { order: -1; border-top: 0; border-right: 1px solid var(--rule); }
@@ -170,6 +197,13 @@ dd { margin: 0; text-align: right; font: 400 13.5px/1.6 var(--num); font-variant
           <div id="dims"></div>
         </section>
         <section>
+          <h2>Feature history</h2>
+          <div id="features">
+            <div id="featureRows"></div>
+            <div id="rollback" role="slider" tabindex="0" aria-label="Rollback position"></div>
+          </div>
+        </section>
+        <section>
           <h2>Kernel readout</h2>
           <dl>
             <dt>Solid</dt><dd id="rValid"></dd>
@@ -177,13 +211,18 @@ dd { margin: 0; text-align: right; font: 400 13.5px/1.6 var(--num); font-variant
             <dt>Surface area</dt><dd id="rArea"></dd>
             <dt>Faces, edges, vertices</dt><dd id="rTopo"></dd>
             <dt>Shells, genus</dt><dd id="rShells"></dd>
+            <dt>Touches itself at</dt><dd id="rContacts"></dd>
             <dt>Triangles</dt><dd id="rTris"></dd>
             <dt>Open mesh edges</dt><dd id="rOpen"></dd>
+            <dt>Features rebuilt</dt><dd id="rRebuilt"></dd>
             <dt>Rebuild time</dt><dd id="rTime"></dd>
           </dl>
           <div id="legend"></div>
         </section>
-        <section id="actions"></section>
+        <section>
+          <div id="actions"></div>
+          <p id="exportNote" hidden></p>
+        </section>
       </div>
     </aside>
   </main>
@@ -490,11 +529,11 @@ class Kernel {
     const p = this.x.cs_catalog();
     return JSON.parse(this.str(p, this.x.cs_catalog_len()));
   }
-  build(model, values) {
+  build(model, values, rollback) {
     const n = values.length;
     const ptr = this.x.cs_alloc_f64(n);
     new Float64Array(this.x.memory.buffer, ptr, n).set(values);
-    const t = this.x.cs_build(model, ptr, n);
+    const t = this.x.cs_build(model, ptr, n, rollback);
     this.x.cs_free_f64(ptr, n);
     const table = new Uint32Array(this.x.memory.buffer, t, 12);
     const m = this.x.memory.buffer;
@@ -507,8 +546,8 @@ class Kernel {
       info: JSON.parse(this.str(table[10], table[11])),
     };
   }
-  exportStl() {
-    const p = this.x.cs_export_stl();
+  exportFile(kind) {
+    const p = kind === "step" ? this.x.cs_export_step() : this.x.cs_export_stl();
     return p ? new Uint8Array(this.x.memory.buffer, p, this.x.cs_export_len()).slice() : null;
   }
 }
@@ -518,30 +557,150 @@ const fmt3 = new Intl.NumberFormat("en-US", { maximumFractionDigits: 3 });
 const fmt0 = new Intl.NumberFormat("en-US");
 function fmtSig(x) { return new Intl.NumberFormat("en-US", { maximumSignificantDigits: 9 }).format(x); }
 
+/** A zip holding one uncompressed file. */
+function makeZip(name, data) {
+  const table = new Uint32Array(256).map((_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  let crc = 0xffffffff;
+  for (const byte of data) crc = table[(crc ^ byte) & 255] ^ (crc >>> 8);
+  crc = (crc ^ 0xffffffff) >>> 0;
+  const nameBytes = new TextEncoder().encode(name);
+  const local = 30 + nameBytes.length;
+  const central = 46 + nameBytes.length;
+  const out = new Uint8Array(local + data.length + central + 22);
+  const v = new DataView(out.buffer);
+  const common = (at) => {
+    v.setUint16(at, 20, true); v.setUint16(at + 2, 0x0800, true); v.setUint16(at + 4, 0, true);
+    v.setUint16(at + 6, 0, true); v.setUint16(at + 8, 0x21, true);
+    v.setUint32(at + 10, crc, true); v.setUint32(at + 14, data.length, true); v.setUint32(at + 18, data.length, true);
+    v.setUint16(at + 22, nameBytes.length, true);
+  };
+  v.setUint32(0, 0x04034b50, true);
+  common(4);
+  out.set(nameBytes, 30);
+  out.set(data, local);
+  const c = local + data.length;
+  v.setUint32(c, 0x02014b50, true);
+  v.setUint16(c + 4, 20, true);
+  common(c + 6);
+  out.set(nameBytes, c + 46);
+  const e = c + central;
+  v.setUint32(e, 0x06054b50, true);
+  v.setUint16(e + 8, 1, true); v.setUint16(e + 10, 1, true);
+  v.setUint32(e + 12, central, true); v.setUint32(e + 16, c, true);
+  return out;
+}
+
 async function start() {
   const bytes = Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0));
   const { instance } = await WebAssembly.instantiate(bytes, {});
   const kernel = new Kernel(instance.exports);
   const catalog = kernel.catalog();
   const view = new Viewer($("view"));
-  let current = 0, lastBounds = null, queued = false;
+  let current = 0, lastBounds = null, queued = false, rollback = -1, lastInfo = null;
+
+  const GLYPHS = { sketch: "S", extrude: "E", revolve: "R", fillet: "F", chamfer: "C", solid: "B" };
+  const STATE_TEXT = { rebuilt: "rebuilt", reused: "reused", rolledback: "", blocked: "blocked", failed: "failed" };
+
+  const renderFeatures = (info) => {
+    const box = $("featureRows");
+    box.textContent = "";
+    const count = info.features.length;
+    const last = rollback < 0 ? count - 1 : rollback;
+    info.features.forEach((f, i) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "feat " + f.state + (i > last || f.state === "blocked" ? " off" : "");
+      const g = document.createElement("span");
+      g.className = "glyph";
+      g.textContent = GLYPHS[f.kind] || "?";
+      const n = document.createElement("span");
+      n.className = "name";
+      n.textContent = f.name;
+      const st = document.createElement("span");
+      st.className = "state";
+      st.textContent = STATE_TEXT[f.state] ?? "";
+      row.append(g, n, st);
+      if (f.error) {
+        const why = document.createElement("span");
+        why.className = "why";
+        why.textContent = f.error;
+        row.append(why);
+      }
+      row.addEventListener("click", () => setRollback(i === count - 1 ? -1 : i));
+      box.append(row);
+    });
+    // The bar is one element that moves. iOS stops delivering a touch drag if the
+    // element it started on is removed, so it must never be re-created during a drag.
+    const bar = $("rollback");
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", String(count - 1));
+    bar.setAttribute("aria-valuenow", String(last));
+    const row = box.children[last];
+    bar.style.top = row ? row.offsetTop + row.offsetHeight + "px" : "0";
+  };
+
+  // Dragging the bar: the feature nearest above the pointer is the last one applied.
+  const bar = $("rollback");
+  bar.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    bar.setPointerCapture(e.pointerId);
+  });
+  bar.addEventListener("pointermove", (e) => {
+    if (!bar.hasPointerCapture(e.pointerId)) return;
+    const rows = [...$("featureRows").children];
+    let pick = 0;
+    rows.forEach((r, i) => { if (r.getBoundingClientRect().top + r.offsetHeight / 2 < e.clientY) pick = i; });
+    const value = pick === rows.length - 1 ? -1 : pick;
+    if (value !== rollback) { rollback = value; rebuild(false); }
+  });
+  bar.addEventListener("keydown", (e) => {
+    const count = $("featureRows").children.length;
+    const last = rollback < 0 ? count - 1 : rollback;
+    let next = last;
+    if (e.key === "ArrowUp") next = Math.max(0, last - 1);
+    else if (e.key === "ArrowDown") next = Math.min(count - 1, last + 1);
+    else return;
+    e.preventDefault();
+    setRollback(next === count - 1 ? -1 : next);
+  });
+  const setRollback = (value) => { rollback = value; rebuild(false); };
 
   const updateReadout = (info, ms) => {
-    $("failure").hidden = info.ok;
-    if (!info.ok) {
-      $("failure").textContent = "No valid solid at these dimensions. Showing the last valid model. " + info.error;
-      $("rValid").innerHTML = '<span class="chip bad">Rejected</span>';
-      $("rTime").textContent = ms.toFixed(1) + " ms";
+    lastInfo = info;
+    renderFeatures(info);
+    const failed = info.failed !== null && info.failed !== undefined ? info.features[info.failed] : null;
+    $("failure").hidden = !failed && info.ok;
+    if (failed) {
+      $("failure").textContent = `${failed.name} failed at these dimensions, so the model stops before it. ${failed.error}`;
+    } else if (!info.ok) {
+      $("failure").textContent = "This state cannot be shown. " + info.error;
+    }
+    $("rRebuilt").textContent = `${info.rebuilt} of ${info.features.length}`;
+    $("rTime").textContent = ms.toFixed(1) + " ms";
+    if (info.empty) {
+      $("rValid").innerHTML = '<span class="chip">No solid yet</span>';
+      for (const id of ["rVolume", "rArea", "rTopo", "rShells", "rContacts", "rTris", "rOpen"]) $(id).textContent = "\u2013";
+      $("legend").textContent = "";
       return;
     }
-    $("rValid").innerHTML = '<span class="chip good">Valid</span>';
-    $("rVolume").textContent = fmtSig(info.volume) + " mm³";
-    $("rArea").textContent = fmtSig(info.area) + " mm²";
+    if (!info.ok) {
+      $("rValid").innerHTML = '<span class="chip bad">Rejected</span>';
+      return;
+    }
+    $("rValid").innerHTML = failed
+      ? '<span class="chip bad">Stopped early</span>'
+      : '<span class="chip good">Valid</span>';
+    $("rVolume").textContent = fmtSig(info.volume) + " mm\u00b3";
+    $("rArea").textContent = fmtSig(info.area) + " mm\u00b2";
     $("rTopo").textContent = `${info.faces}, ${info.edges}, ${info.vertices}`;
     $("rShells").textContent = `${info.shells}, ${info.genus.join(" ")}`;
+    $("rContacts").textContent = info.contacts ? `${info.contacts} ${info.contacts === 1 ? "point" : "points"}` : "nowhere";
     $("rTris").textContent = fmt0.format(info.triangles);
     $("rOpen").textContent = String(info.openEdges);
-    $("rTime").textContent = ms.toFixed(1) + " ms";
     const legend = $("legend");
     legend.textContent = "";
     KINDS.forEach((k, i) => {
@@ -555,10 +714,10 @@ async function start() {
   const rebuild = (fit) => {
     const m = catalog[current];
     const t0 = performance.now();
-    const r = kernel.build(current, m.params.map((p) => p.value));
+    const r = kernel.build(current, m.params.map((p) => p.value), rollback);
     if (r.info.ok) {
       view.setMesh(r.positions, r.normals, r.kinds, r.indices, r.segments);
-      lastBounds = r.info.bounds;
+      if (r.info.bounds) lastBounds = r.info.bounds;
     }
     const ms = performance.now() - t0;
     updateReadout(r.info, ms);
@@ -568,11 +727,16 @@ async function start() {
   const schedule = () => {
     if (queued) return;
     queued = true;
-    requestAnimationFrame(() => { queued = false; rebuild(false); });
+    // Normally the next frame. Browsers can stop delivering frames (a hidden tab, a
+    // paused view), and a dimension change must not get stuck waiting for one.
+    const run = () => { if (queued) { queued = false; rebuild(false); } };
+    requestAnimationFrame(run);
+    setTimeout(run, 120);
   };
 
   const selectModel = (i) => {
     current = i;
+    rollback = -1;
     const m = catalog[i];
     document.querySelectorAll("#models button").forEach((b, k) => b.setAttribute("aria-current", String(k === i)));
     $("mName").textContent = m.name;
@@ -585,7 +749,14 @@ async function start() {
       const id = `p-${m.id}-${p.key}`;
       row.innerHTML = `<label for="${id}">${p.label}</label><output for="${id}"></output><div class="track"><input type="range" id="${id}" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.value}"></div>`;
       const input = row.querySelector("input"), out = row.querySelector("output");
-      const show = () => { out.textContent = `${Number(p.value).toFixed(p.step < 1 ? 1 : 0)} ${p.unit}`; };
+      const show = () => {
+        if (p.choices.length) {
+          out.textContent = p.choices[Math.round(p.value)];
+          out.className = "named";
+        } else {
+          out.textContent = `${Number(p.value).toFixed(p.step < 1 ? 1 : 0)} ${p.unit}`.trim();
+        }
+      };
       show();
       input.addEventListener("input", () => { p.value = Number(input.value); show(); schedule(); });
       dims.append(row);
@@ -617,21 +788,52 @@ async function start() {
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => view.theme());
   new MutationObserver(() => view.theme()).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
-  if (HOST === "standalone") {
+  // Exports. A stand-alone page saves the file directly. The artifact host only lets
+  // a page hand over certain file types, so there the file travels inside a zip.
+  const offer = (kind, label, mime) => {
     const b = document.createElement("button");
     b.type = "button";
-    b.textContent = "Download STL";
-    b.addEventListener("click", () => {
-      const data = kernel.exportStl();
+    b.textContent = label;
+    b.addEventListener("click", () => saveFile(kind, mime));
+    $("actions").append(b);
+  };
+  const note = (text) => { $("exportNote").hidden = !text; $("exportNote").textContent = text || ""; };
+  let saveFile = null;
+  // <standalone>
+  if (HOST === "standalone") {
+    saveFile = (kind, mime) => {
+      const data = kernel.exportFile(kind);
       if (!data) return;
       const a = document.createElement("a");
-      a.href = URL.createObjectURL(new Blob([data], { type: "model/stl" }));
-      a.download = catalog[current].id + ".stl";
+      a.href = URL.createObjectURL(new Blob([data], { type: mime }));
+      a.download = `${catalog[current].id}.${kind}`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    });
-    $("actions").append(b);
+    };
+    offer("step", "Download STEP", "model/step");
+    offer("stl", "Download STL", "model/stl");
   }
+  // </standalone>
+  // <artifact>
+  if (HOST === "artifact" && window.claude && window.claude.use) {
+    window.claude.use("downloads").then((downloads) => {
+      if (!downloads) return;
+      saveFile = async (kind) => {
+        const data = kernel.exportFile(kind);
+        if (!data) return;
+        note("");
+        const name = `${catalog[current].id}.${kind}`;
+        try {
+          await downloads.save({ filename: name + ".zip", data: makeZip(name, data) });
+        } catch (e) {
+          if (e && e.code !== "declined") note(`Couldn't save the file: ${e.message || e.code}`);
+        }
+      };
+      offer("step", "Save STEP (zip)");
+      offer("stl", "Save STL (zip)");
+    });
+  }
+  // </artifact>
 
   // Query options exist for reproducible screenshots of a stand-alone build:
   // ?kinds=1&az=-0.9&el=0.4&p=26,10,3.5,9 sets the view and the dimensions.
@@ -643,6 +845,7 @@ async function start() {
   if (query.get("el")) view.el = Number(query.get("el"));
   if (query.get("kinds")) { view.byKind = true; $("tKinds").setAttribute("aria-pressed", "true"); }
   selectModel(first);
+  if (query.get("roll")) { setRollback(Number(query.get("roll"))); }
   window.addEventListener("hashchange", () => {
     const i = catalog.findIndex((m) => "#" + m.id === location.hash);
     if (i >= 0 && i !== current) selectModel(i);

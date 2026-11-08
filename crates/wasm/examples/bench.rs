@@ -4,7 +4,10 @@ use coreshape_wasm::models;
 use std::time::Instant;
 
 fn main() {
-    println!("{:<12} {:>9} {:>9} {:>8} {:>9} {:>6} {:>10}", "model", "first", "last dim", "mass", "tess", "faces", "triangles");
+    println!(
+        "{:<12} {:>9} {:>9} {:>8} {:>9} {:>6} {:>10}",
+        "model", "first", "last dim", "mass", "tess", "faces", "triangles"
+    );
     for m in models::catalog() {
         let mut values: Vec<f64> = m.params.iter().map(|p| p.default).collect();
         let mut h = (m.history)();
@@ -28,7 +31,13 @@ fn main() {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         println!(
             "{:<12} {:>7.1}ms {:>7.1}ms {:>6.1}ms {:>7.1}ms {:>6} {:>10}",
-            m.id, ms(first), ms(again), ms(mass), ms(tess), body.faces.len(), mesh.triangles.len()
+            m.id,
+            ms(first),
+            ms(again),
+            ms(mass),
+            ms(tess),
+            body.faces.len(),
+            mesh.triangles.len()
         );
     }
 }

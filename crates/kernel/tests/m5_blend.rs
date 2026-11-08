@@ -7,7 +7,11 @@ fn vol(b: &Body) -> f64 {
 }
 
 fn close(a: f64, b: f64, rel: f64, what: &str) {
-    assert!((a - b).abs() <= rel * b.abs().max(1.0), "{what}: got {a}, expected {b} (rel {:e})", (a - b).abs() / b.abs());
+    assert!(
+        (a - b).abs() <= rel * b.abs().max(1.0),
+        "{what}: got {a}, expected {b} (rel {:e})",
+        (a - b).abs() / b.abs()
+    );
 }
 
 fn mesh_ok(b: &Body, what: &str) {
@@ -100,12 +104,7 @@ fn fillet_two_edges_meeting_at_a_corner() {
 fn fillet_concave_edge_adds_material() {
     // An L: the inner corner runs along Y at x=4, z=4.
     let w = Wire::polygon(&[v2(0.0, 0.0), v2(20.0, 0.0), v2(20.0, 4.0), v2(4.0, 4.0), v2(4.0, 20.0), v2(0.0, 20.0)]);
-    let sketch = Frame {
-        origin: v3(0.0, 30.0, 0.0),
-        x: Vec3::X,
-        y: Vec3::Z,
-        z: -Vec3::Y,
-    };
+    let sketch = Frame { origin: v3(0.0, 30.0, 0.0), x: Vec3::X, y: Vec3::Z, z: -Vec3::Y };
     let l = extrude(&Profile::new(w), &sketch, 30.0, 1).unwrap();
     let base = vol(&l);
     let e = edge_at(&l, v3(4.0, 15.0, 4.0));
@@ -176,11 +175,8 @@ fn fillet_rim_of_a_hole_flares_it() {
 fn fillet_all_three_edges_at_a_corner_uses_a_sphere() {
     let r = 2.0;
     let b = box_solid(&Frame::WORLD, 10.0, 10.0, 10.0, 1).unwrap();
-    let edges = vec![
-        edge_at(&b, v3(5.0, 10.0, 10.0)),
-        edge_at(&b, v3(10.0, 5.0, 10.0)),
-        edge_at(&b, v3(10.0, 10.0, 5.0)),
-    ];
+    let edges =
+        vec![edge_at(&b, v3(5.0, 10.0, 10.0)), edge_at(&b, v3(10.0, 5.0, 10.0)), edge_at(&b, v3(10.0, 10.0, 5.0))];
     let f = fillet(&b, &edges, r, 9).unwrap();
     assert!(f.faces.iter().any(|x| matches!(x.surface, Surface::Sphere { .. })), "expected a spherical corner");
     mesh_ok(&f, "sphere corner");
@@ -318,12 +314,7 @@ fn smooth_edges_are_refused() {
 fn bracket_with_holes_and_fillets() {
     let (width, base, upright, t) = (40.0, 50.0, 50.0, 6.0);
     let w = Wire::polygon(&[v2(0.0, 0.0), v2(base, 0.0), v2(base, t), v2(t, t), v2(t, upright), v2(0.0, upright)]);
-    let sketch = Frame {
-        origin: v3(0.0, width, 0.0),
-        x: Vec3::X,
-        y: Vec3::Z,
-        z: -Vec3::Y,
-    };
+    let sketch = Frame { origin: v3(0.0, width, 0.0), x: Vec3::X, y: Vec3::Z, z: -Vec3::Y };
     let body = extrude(&Profile::new(w), &sketch, width, 1).unwrap();
     // Inner corner (concave) and outer corner (convex).
     let inner = edge_at(&body, v3(t, width / 2.0, t));

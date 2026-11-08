@@ -36,10 +36,7 @@ fn boundary_points(body: &Body, face: &Face) -> Vec<Vec3> {
 fn within_half_turn(surface: &Surface, points: &[Vec3]) -> bool {
     let span = |angles: &[f64]| {
         let centre = angular_center(angles);
-        angles
-            .iter()
-            .map(|a| wrap_pi(a - centre).abs())
-            .fold(0.0, f64::max)
+        angles.iter().map(|a| wrap_pi(a - centre).abs()).fold(0.0, f64::max)
     };
     let limit = PI / 2.0 + 1e-6;
     let frame = surface.frame();
@@ -162,11 +159,7 @@ fn merge_faces(body: Body) -> Result<Body> {
         // A chart centred on the whole group, not on any one of its faces.
         let all_loops: Vec<Vec<Coedge>> = group.iter().flat_map(|&f| body.faces[f].loops.iter().cloned()).collect();
         let chart = body.fit_face_chart(&lead.surface, lead.flipped, &all_loops);
-        let fc = FaceChart {
-            surface: &lead.surface,
-            chart: &chart,
-            flipped: lead.flipped,
-        };
+        let fc = FaceChart { surface: &lead.surface, chart: &chart, flipped: lead.flipped };
         for loops in trace_faces(&fc, &body.edges, &body.vertices, &half)? {
             out.add_face(lead.surface, lead.flipped, loops, tag);
         }
@@ -185,10 +178,7 @@ fn same_curve(a: &Edge, b: &Edge) -> bool {
         (Curve::Circle { frame: f, radius: r }, Curve::Circle { frame: g, radius: s }) => {
             (r - s).abs() <= TOL && f.origin.dist(g.origin) <= TOL && f.z.cross(g.z).norm() < 1e-9
         }
-        (
-            Curve::Ellipse { frame: f, major: m, minor: n },
-            Curve::Ellipse { frame: g, major: p, minor: q },
-        ) => {
+        (Curve::Ellipse { frame: f, major: m, minor: n }, Curve::Ellipse { frame: g, major: p, minor: q }) => {
             (m - p).abs() <= TOL
                 && (n - q).abs() <= TOL
                 && f.origin.dist(g.origin) <= TOL
@@ -248,18 +238,9 @@ fn merge_edges(mut body: Body) -> Body {
             let span = b.t1 - b.t0;
             let t_end = if t_w > t_far { t_w + span } else { t_w - span };
             let new = {
-                let (t0, t1, v0, v1) = if t_far < t_end {
-                    (t_far, t_end, far_a, far_b)
-                } else {
-                    (t_end, t_far, far_b, far_a)
-                };
-                Edge {
-                    curve: a.curve.clone(),
-                    t0,
-                    t1,
-                    v0,
-                    v1,
-                }
+                let (t0, t1, v0, v1) =
+                    if t_far < t_end { (t_far, t_end, far_a, far_b) } else { (t_end, t_far, far_b, far_a) };
+                Edge { curve: a.curve.clone(), t0, t1, v0, v1 }
             };
             // Both edges must be consecutive in every loop that uses them.
             let id = body.edges.len();
@@ -277,9 +258,7 @@ fn merge_edges(mut body: Body) -> Body {
                     // The first of the pair is the one that arrives at `w`.
                     let Some(&first) = used.iter().find(|&&k| {
                         let n = lp[(k + 1) % m];
-                        n.edge != lp[k].edge
-                            && (n.edge == ea || n.edge == eb)
-                            && start_vertex(&body.edges, n) == w
+                        n.edge != lp[k].edge && (n.edge == ea || n.edge == eb) && start_vertex(&body.edges, n) == w
                     }) else {
                         continue 'next;
                     };
@@ -288,10 +267,7 @@ fn merge_edges(mut body: Body) -> Body {
                         continue 'next;
                     }
                     let start = start_vertex(&body.edges, lp[first]);
-                    let merged = Coedge {
-                        edge: id,
-                        reversed: new.v0 != start,
-                    };
+                    let merged = Coedge { edge: id, reversed: new.v0 != start };
                     let mut out = Vec::with_capacity(m - 1);
                     for k in 0..m {
                         if k == first {

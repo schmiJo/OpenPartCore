@@ -36,7 +36,14 @@ fn main() {
         results.sort_by_key(|r| r.0);
         let refused = results.iter().filter(|r| !r.1.refusals.is_empty()).count();
         let wrong = results.iter().filter(|r| !r.1.wrong.is_empty()).count();
-        println!("{:<20} {:>6} {:>8} {:>8} {:>9.1}s", format!("{category:?}"), cases, refused, wrong, t.elapsed().as_secs_f64());
+        println!(
+            "{:<20} {:>6} {:>8} {:>8} {:>9.1}s",
+            format!("{category:?}"),
+            cases,
+            refused,
+            wrong,
+            t.elapsed().as_secs_f64()
+        );
 
         let mut reasons: BTreeMap<String, (usize, u64)> = BTreeMap::new();
         for (seed, out) in &results {

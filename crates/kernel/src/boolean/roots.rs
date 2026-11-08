@@ -191,10 +191,7 @@ mod tests {
 
     #[test]
     fn line_and_cylinder_crossing_tangent_and_miss() {
-        let cyl = Surface::Cylinder {
-            frame: Frame::WORLD,
-            radius: 2.0,
-        };
+        let cyl = Surface::Cylinder { frame: Frame::WORLD, radius: 2.0 };
         let through = Curve::line_through(v3(-5.0, 0.0, 0.0), v3(5.0, 0.0, 0.0));
         let r = roots(curve_surface_contact(&through, 0.0, 10.0, &cyl, TOL));
         assert_eq!(r.len(), 2);
@@ -211,42 +208,25 @@ mod tests {
 
     #[test]
     fn curves_lying_on_surfaces_are_detected() {
-        let cyl = Surface::Cylinder {
-            frame: Frame::WORLD,
-            radius: 2.0,
-        };
+        let cyl = Surface::Cylinder { frame: Frame::WORLD, radius: 2.0 };
         let ruling = Curve::line_through(v3(2.0, 0.0, -1.0), v3(2.0, 0.0, 1.0));
         assert_eq!(curve_surface_contact(&ruling, 0.0, 2.0, &cyl, TOL), Contact::OnSurface);
-        let rim = Curve::Circle {
-            frame: Frame::translation(v3(0.0, 0.0, 4.0)),
-            radius: 2.0,
-        };
+        let rim = Curve::Circle { frame: Frame::translation(v3(0.0, 0.0, 4.0)), radius: 2.0 };
         assert_eq!(curve_surface_contact(&rim, 0.0, TAU, &cyl, TOL), Contact::OnSurface);
     }
 
     #[test]
     fn circle_and_every_surface() {
-        let circle = Curve::Circle {
-            frame: Frame::new(v3(0.0, 0.0, 0.0), Vec3::X, Vec3::Y),
-            radius: 5.0,
-        };
+        let circle = Curve::Circle { frame: Frame::new(v3(0.0, 0.0, 0.0), Vec3::X, Vec3::Y), radius: 5.0 };
         // The circle lies in the YZ plane. A plane through its centre cuts it twice.
         let plane = Surface::Plane(Frame::WORLD);
         assert_eq!(roots(curve_surface_contact(&circle, 0.0, TAU, &plane, TOL)).len(), 2);
         // A torus about X with the circle as its core misses it entirely.
-        let core = Surface::Torus {
-            frame: Frame::new(v3(0.0, 0.0, 0.0), Vec3::X, Vec3::Y),
-            major: 5.0,
-            minor: 1.0,
-        };
+        let core = Surface::Torus { frame: Frame::new(v3(0.0, 0.0, 0.0), Vec3::X, Vec3::Y), major: 5.0, minor: 1.0 };
         assert!(roots(curve_surface_contact(&circle, 0.0, TAU, &core, TOL)).is_empty());
         // A torus about Z of major 5, minor 1 meets the circle where it passes
         // through the tube: four crossings.
-        let crossing = Surface::Torus {
-            frame: Frame::WORLD,
-            major: 5.0,
-            minor: 1.0,
-        };
+        let crossing = Surface::Torus { frame: Frame::WORLD, major: 5.0, minor: 1.0 };
         assert_eq!(roots(curve_surface_contact(&circle, 0.0, TAU, &crossing, TOL)).len(), 4);
     }
 }

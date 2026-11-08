@@ -24,7 +24,8 @@ fn check_identities(a: &Body, b: &Body, name: &str) {
     assert!((vd + vi - va).abs() < 1e-7, "{name}: subtract {vd} + intersect {vi} != {va}");
     for (label, body) in [("union", &u), ("intersect", &i), ("subtract", &d)] {
         if !body.faces.is_empty() {
-            let m = tessellate(body, &TessParams::for_size(body.aabb().diagonal())).unwrap_or_else(|e| panic!("{name} {label}: {e}"));
+            let m = tessellate(body, &TessParams::for_size(body.aabb().diagonal()))
+                .unwrap_or_else(|e| panic!("{name} {label}: {e}"));
             assert_eq!(m.open_edge_count(), 0, "{name} {label}: open mesh");
         }
     }
@@ -155,9 +156,11 @@ fn boxes_touching_along_an_edge() {
     let b = boxed(1.0, 1.0, 0.0, 1.0, 1.0, 1.0);
     let u = union(&a, &b).unwrap();
     near(vol(&u), 2.0, "edge touch");
-    // Non-manifold contact becomes a manifold body with a duplicated edge.
+    // Non-manifold contact becomes a manifold body with a duplicated edge, flagged.
     let r = validate(&u).unwrap();
     assert_eq!(r.shells, 2);
+    assert_eq!(u.contact_vertices(), 2);
+    assert_eq!(a.contact_vertices(), 0);
     assert!(intersect(&a, &b).unwrap().faces.is_empty());
     near(vol(&subtract(&a, &b).unwrap()), 1.0, "subtract");
 }
@@ -177,12 +180,7 @@ fn boxes_touching_at_a_vertex() {
 fn edge_touching_a_face_interior() {
     // A diamond prism lying along Y with its lower edge resting on the box's top.
     let a = boxed(0.0, 0.0, 0.0, 4.0, 4.0, 1.0);
-    let sketch = Frame {
-        origin: v3(0.0, 1.0, 0.0),
-        x: Vec3::X,
-        y: Vec3::Z,
-        z: -Vec3::Y,
-    };
+    let sketch = Frame { origin: v3(0.0, 1.0, 0.0), x: Vec3::X, y: Vec3::Z, z: -Vec3::Y };
     let w = Wire::polygon(&[v2(2.0, 1.0), v2(3.0, 2.0), v2(2.0, 3.0), v2(1.0, 2.0)]);
     let b = extrude(&Profile::new(w), &sketch, -2.0, 2).unwrap();
     near(vol(&b), 4.0, "prism");

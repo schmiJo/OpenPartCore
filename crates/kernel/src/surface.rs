@@ -22,19 +22,11 @@ pub enum Surface {
     /// `radius` is measured at `frame.origin`. Widens along `+frame.z`, with
     /// `0 < half_angle < PI/2`. Only the nappe above the apex exists. Normal
     /// points away from the axis.
-    Cone {
-        frame: Frame,
-        radius: f64,
-        half_angle: f64,
-    },
+    Cone { frame: Frame, radius: f64, half_angle: f64 },
     /// Normal points outward.
     Sphere { frame: Frame, radius: f64 },
     /// `frame.z` is the axis. Normal points away from the tube centre.
-    Torus {
-        frame: Frame,
-        major: f64,
-        minor: f64,
-    },
+    Torus { frame: Frame, major: f64, minor: f64 },
 }
 
 /// Per-face chart parameters. Only some fields apply to each surface: `u0` and
@@ -49,11 +41,7 @@ pub struct Chart {
 
 impl Default for Chart {
     fn default() -> Chart {
-        Chart {
-            u0: 0.0,
-            v0: 0.0,
-            frame: Frame::WORLD,
-        }
+        Chart { u0: 0.0, v0: 0.0, frame: Frame::WORLD }
     }
 }
 
@@ -84,9 +72,7 @@ impl Surface {
         match *self {
             Surface::Plane(_) => l.z,
             Surface::Cylinder { radius, .. } => l.x.hypot(l.y) - radius,
-            Surface::Cone {
-                radius, half_angle, ..
-            } => {
+            Surface::Cone { radius, half_angle, .. } => {
                 let (s, c) = half_angle.sin_cos();
                 let rho = l.x.hypot(l.y);
                 // Height above the apex is z + radius / tan(a). Multiplying
@@ -95,9 +81,7 @@ impl Surface {
                 (rho - radius) * c - l.z * s
             }
             Surface::Sphere { radius, .. } => l.norm() - radius,
-            Surface::Torus { major, minor, .. } => {
-                (l.x.hypot(l.y) - major).hypot(l.z) - minor
-            }
+            Surface::Torus { major, minor, .. } => (l.x.hypot(l.y) - major).hypot(l.z) - minor,
         }
     }
 
@@ -152,9 +136,9 @@ impl Surface {
     /// symmetric about every line through its centre and returns `None`.
     pub fn axis(&self) -> Option<(Vec3, Vec3)> {
         match self {
-            Surface::Cylinder { frame, .. }
-            | Surface::Cone { frame, .. }
-            | Surface::Torus { frame, .. } => Some((frame.origin, frame.z)),
+            Surface::Cylinder { frame, .. } | Surface::Cone { frame, .. } | Surface::Torus { frame, .. } => {
+                Some((frame.origin, frame.z))
+            }
             _ => None,
         }
     }
@@ -162,11 +146,7 @@ impl Surface {
     /// Location of the apex of a cone.
     pub fn apex(&self) -> Option<Vec3> {
         match *self {
-            Surface::Cone {
-                frame,
-                radius,
-                half_angle,
-            } => Some(frame.origin - frame.z * (radius / half_angle.tan())),
+            Surface::Cone { frame, radius, half_angle } => Some(frame.origin - frame.z * (radius / half_angle.tan())),
             _ => None,
         }
     }
@@ -236,28 +216,18 @@ impl Surface {
                 let l = f.to_local(p);
                 v2(radius * wrap_pi(l.y.atan2(l.x) - ch.u0), l.z)
             }
-            Surface::Cone {
-                radius, half_angle, ..
-            } => {
+            Surface::Cone { radius, half_angle, .. } => {
                 let l = f.to_local(p);
                 let (s, c) = half_angle.sin_cos();
                 let rho = l.x.hypot(l.y);
                 // Slant distance from the apex, then the unrolled angle.
                 let slant = (rho * s + (l.z + radius * c / s) * c).max(0.0);
-                let phi = if rho > 1e-300 {
-                    wrap_pi(l.y.atan2(l.x) - ch.u0) * s
-                } else {
-                    0.0
-                };
+                let phi = if rho > 1e-300 { wrap_pi(l.y.atan2(l.x) - ch.u0) * s } else { 0.0 };
                 v2(slant * phi.cos(), -slant * phi.sin())
             }
             Surface::Sphere { radius, .. } => {
                 let d = p - ch.frame.origin;
-                let (x, y, z) = (
-                    d.dot(ch.frame.x) / radius,
-                    d.dot(ch.frame.y) / radius,
-                    d.dot(ch.frame.z) / radius,
-                );
+                let (x, y, z) = (d.dot(ch.frame.x) / radius, d.dot(ch.frame.y) / radius, d.dot(ch.frame.z) / radius);
                 let w = 2.0 * radius / (1.0 + z).max(1e-12);
                 v2(x * w, y * w)
             }
@@ -286,15 +256,9 @@ impl Surface {
                 let u = ch.u0 + uv.x / radius;
                 let (s, c) = u.sin_cos();
                 let radial = f.x * c + f.y * s;
-                (
-                    f.origin + radial * radius + f.z * uv.y,
-                    f.y * c - f.x * s,
-                    f.z,
-                )
+                (f.origin + radial * radius + f.z * uv.y, f.y * c - f.x * s, f.z)
             }
-            Surface::Cone {
-                radius, half_angle, ..
-            } => {
+            Surface::Cone { radius, half_angle, .. } => {
                 let (sa, ca) = half_angle.sin_cos();
                 let slant = uv.x.hypot(uv.y);
                 let phi = if slant > 1e-300 { (-uv.y).atan2(uv.x) } else { 0.0 };
@@ -305,11 +269,7 @@ impl Surface {
                 let apex = f.origin - f.z * (radius / half_angle.tan());
                 let along = radial * sa + f.z * ca;
                 let p = apex + along * slant;
-                let (ux, uy) = if slant > 1e-300 {
-                    (uv.x / slant, uv.y / slant)
-                } else {
-                    (1.0, 0.0)
-                };
+                let (ux, uy) = if slant > 1e-300 { (uv.x / slant, uv.y / slant) } else { (1.0, 0.0) };
                 (p, along * ux + theta * uy, along * uy - theta * ux)
             }
             Surface::Sphere { radius, .. } => {
@@ -321,12 +281,8 @@ impl Surface {
                 let q = c.x * (2.0 * a * k) + c.y * (2.0 * b * k) + c.z * ((1.0 - s) * k);
                 let k2 = k * k;
                 // d(q)/da and d(q)/db, halved because chart x is 2R * a.
-                let da = c.x * ((1.0 + s - 2.0 * a * a) * k2)
-                    + c.y * (-2.0 * a * b * k2)
-                    + c.z * (-2.0 * a * k2);
-                let db = c.x * (-2.0 * a * b * k2)
-                    + c.y * ((1.0 + s - 2.0 * b * b) * k2)
-                    + c.z * (-2.0 * b * k2);
+                let da = c.x * ((1.0 + s - 2.0 * a * a) * k2) + c.y * (-2.0 * a * b * k2) + c.z * (-2.0 * a * k2);
+                let db = c.x * (-2.0 * a * b * k2) + c.y * ((1.0 + s - 2.0 * b * b) * k2) + c.z * (-2.0 * b * k2);
                 (c.origin + q * radius, da, db)
             }
             Surface::Torus { major, minor, .. } => {
@@ -337,11 +293,7 @@ impl Surface {
                 let radial = f.x * cu + f.y * su;
                 let theta = f.y * cu - f.x * su;
                 let rho = major + minor * cv;
-                (
-                    f.origin + radial * rho + f.z * (minor * sv),
-                    theta * (rho / (major + minor)),
-                    radial * -sv + f.z * cv,
-                )
+                (f.origin + radial * rho + f.z * (minor * sv), theta * (rho / (major + minor)), radial * -sv + f.z * cv)
             }
         }
     }
@@ -350,32 +302,12 @@ impl Surface {
     pub fn transformed(&self, t: &Frame) -> Surface {
         match *self {
             Surface::Plane(f) => Surface::Plane(t.compose(&f)),
-            Surface::Cylinder { frame, radius } => Surface::Cylinder {
-                frame: t.compose(&frame),
-                radius,
-            },
-            Surface::Cone {
-                frame,
-                radius,
-                half_angle,
-            } => Surface::Cone {
-                frame: t.compose(&frame),
-                radius,
-                half_angle,
-            },
-            Surface::Sphere { frame, radius } => Surface::Sphere {
-                frame: t.compose(&frame),
-                radius,
-            },
-            Surface::Torus {
-                frame,
-                major,
-                minor,
-            } => Surface::Torus {
-                frame: t.compose(&frame),
-                major,
-                minor,
-            },
+            Surface::Cylinder { frame, radius } => Surface::Cylinder { frame: t.compose(&frame), radius },
+            Surface::Cone { frame, radius, half_angle } => {
+                Surface::Cone { frame: t.compose(&frame), radius, half_angle }
+            }
+            Surface::Sphere { frame, radius } => Surface::Sphere { frame: t.compose(&frame), radius },
+            Surface::Torus { frame, major, minor } => Surface::Torus { frame: t.compose(&frame), major, minor },
         }
     }
 }
@@ -412,24 +344,10 @@ mod tests {
         let f = Frame::new(v3(1.0, -2.0, 3.0), v3(0.3, 0.5, 1.0), v3(1.0, 0.0, 0.0));
         vec![
             Surface::Plane(f),
-            Surface::Cylinder {
-                frame: f,
-                radius: 4.0,
-            },
-            Surface::Cone {
-                frame: f,
-                radius: 4.0,
-                half_angle: 0.5,
-            },
-            Surface::Sphere {
-                frame: f,
-                radius: 4.0,
-            },
-            Surface::Torus {
-                frame: f,
-                major: 6.0,
-                minor: 2.0,
-            },
+            Surface::Cylinder { frame: f, radius: 4.0 },
+            Surface::Cone { frame: f, radius: 4.0, half_angle: 0.5 },
+            Surface::Sphere { frame: f, radius: 4.0 },
+            Surface::Torus { frame: f, major: 6.0, minor: 2.0 },
         ]
     }
 
@@ -470,12 +388,8 @@ mod tests {
             for uv in sample_chart_points(&s, &ch) {
                 let (p, dx, dy) = s.chart_derivs(&ch, uv);
                 let h = 1e-5;
-                let fdx = (s.from_chart(&ch, v2(uv.x + h, uv.y))
-                    - s.from_chart(&ch, v2(uv.x - h, uv.y)))
-                    / (2.0 * h);
-                let fdy = (s.from_chart(&ch, v2(uv.x, uv.y + h))
-                    - s.from_chart(&ch, v2(uv.x, uv.y - h)))
-                    / (2.0 * h);
+                let fdx = (s.from_chart(&ch, v2(uv.x + h, uv.y)) - s.from_chart(&ch, v2(uv.x - h, uv.y))) / (2.0 * h);
+                let fdy = (s.from_chart(&ch, v2(uv.x, uv.y + h)) - s.from_chart(&ch, v2(uv.x, uv.y - h))) / (2.0 * h);
                 assert!((dx - fdx).norm() < 1e-8, "{} dx {:?}", s.name(), uv);
                 assert!((dy - fdy).norm() < 1e-8, "{} dy {:?}", s.name(), uv);
                 let n = dx.cross(dy).normalized();
@@ -500,11 +414,7 @@ mod tests {
             for _ in 0..500 {
                 let p = v3(rng.range(-20.0, 20.0), rng.range(-20.0, 20.0), rng.range(-20.0, 20.0));
                 let q = p + rng.unit_vector() * rng.range(0.0, 5.0);
-                assert!(
-                    (s.sdf(p) - s.sdf(q)).abs() <= p.dist(q) + 1e-9,
-                    "{} not Lipschitz",
-                    s.name()
-                );
+                assert!((s.sdf(p) - s.sdf(q)).abs() <= p.dist(q) + 1e-9, "{} not Lipschitz", s.name());
                 let h = 1e-6;
                 let dir = rng.unit_vector();
                 let fd = (s.sdf(p + dir * h) - s.sdf(p - dir * h)) / (2.0 * h);

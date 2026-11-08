@@ -23,7 +23,17 @@ head = (
     '<!doctype html>\n<html lang="en">\n<meta charset="utf-8">\n'
     '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
 )
-fill = lambda host: page.replace("__WASM_BASE64__", b64).replace("__HOST__", host)
+
+def without(text, tag):
+    # Drops the host-specific code the other build must not contain.
+    while (start := text.find(f"// <{tag}>")) >= 0:
+        end_mark = f"// </{tag}>"
+        end = text.index(end_mark, start) + len(end_mark)
+        text = text[:start] + text[end:]
+    return text
+
+other = {"standalone": "artifact", "artifact": "standalone"}
+fill = lambda host: without(page, other[host]).replace("__WASM_BASE64__", b64).replace("__HOST__", host)
 (dist / "index.html").write_text(head + fill("standalone"))
 (dist / "artifact.html").write_text(fill("artifact"))
 print(f"wasm {len(wasm)/1024:.0f} KiB, page {(dist / 'index.html').stat().st_size/1024:.0f} KiB")

@@ -13,6 +13,8 @@ pub struct ParamDef {
     pub max: f64,
     pub step: f64,
     pub default: f64,
+    /// Names for each whole-number value, when the parameter picks from a list.
+    pub choices: &'static [&'static str],
 }
 
 pub struct ModelDef {
@@ -24,49 +26,20 @@ pub struct ModelDef {
 }
 
 const fn mm(key: &'static str, label: &'static str, min: f64, max: f64, default: f64) -> ParamDef {
-    ParamDef {
-        key,
-        label,
-        unit: "mm",
-        min,
-        max,
-        step: 0.5,
-        default,
-    }
+    ParamDef { key, label, unit: "mm", min, max, step: 0.5, default, choices: &[] }
 }
 
 const fn deg(key: &'static str, label: &'static str, min: f64, max: f64, default: f64) -> ParamDef {
-    ParamDef {
-        key,
-        label,
-        unit: "\u{b0}",
-        min,
-        max,
-        step: 1.0,
-        default,
-    }
+    ParamDef { key, label, unit: "\u{b0}", min, max, step: 1.0, default, choices: &[] }
 }
 
 const fn count(key: &'static str, label: &'static str, min: f64, max: f64, default: f64) -> ParamDef {
-    ParamDef {
-        key,
-        label,
-        unit: "",
-        min,
-        max,
-        step: 1.0,
-        default,
-    }
+    ParamDef { key, label, unit: "", min, max, step: 1.0, default, choices: &[] }
 }
 
 /// Sketch plane XZ, with extrusion running from y = `y` back toward y = 0.
 fn xz_at(y: f64) -> Frame {
-    Frame {
-        origin: v3(0.0, y, 0.0),
-        x: Vec3::X,
-        y: Vec3::Z,
-        z: -Vec3::Y,
-    }
+    Frame { origin: v3(0.0, y, 0.0), x: Vec3::X, y: Vec3::Z, z: -Vec3::Y }
 }
 
 fn bracket() -> History {
@@ -102,10 +75,7 @@ fn bracket() -> History {
         |_| Frame::WORLD,
         |p| {
             let x = (p[1] + p[3]) / 2.0;
-            Ok([0.27, 0.73]
-                .iter()
-                .map(|f| Profile::new(Wire::circle(v2(x, p[0] * f), p[7] / 2.0)))
-                .collect())
+            Ok([0.27, 0.73].iter().map(|f| Profile::new(Wire::circle(v2(x, p[0] * f), p[7] / 2.0))).collect())
         },
     );
     let drilled = h.extrude(base_holes, |_| -1.0, |p| p[3] + 2.0, Mode::Remove);
@@ -132,11 +102,11 @@ fn flange() -> History {
         |p| {
             let (outer, hub, bore, t, height) = (p[0] / 2.0, p[1] / 2.0, p[2] / 2.0, p[3], p[4]);
             Ok(vec![Profile::new(Wire::polygon(&[
-                v2(bore, 0.0),   // 0: underside
-                v2(outer, 0.0),  // 1: rim
-                v2(outer, t),    // 2: top of the flange
-                v2(hub, t),      // 3: hub wall
-                v2(hub, height), // 4: hub top
+                v2(bore, 0.0),    // 0: underside
+                v2(outer, 0.0),   // 1: rim
+                v2(outer, t),     // 2: top of the flange
+                v2(hub, t),       // 3: hub wall
+                v2(hub, height),  // 4: hub top
                 v2(bore, height), // 5: bore
             ]))])
         },
@@ -144,10 +114,7 @@ fn flange() -> History {
     let r = h.revolve(s, |_| TAU, Mode::Add);
     h.fillet(EdgeQuery::Between(r.side(2), r.side(3)), |p| p[5]);
     h.chamfer(
-        EdgeQuery::Any(vec![
-            EdgeQuery::Between(r.side(1), r.side(2)),
-            EdgeQuery::Between(r.side(4), r.side(5)),
-        ]),
+        EdgeQuery::Any(vec![EdgeQuery::Between(r.side(1), r.side(2)), EdgeQuery::Between(r.side(4), r.side(5))]),
         |p| p[6],
     );
     let bolts = h.sketch(
@@ -218,15 +185,9 @@ fn pockets() -> History {
     let mut h = History::new();
     let s = h.sketch(|_| Frame::WORLD, |_| Ok(vec![Profile::new(Wire::rect(-30.0, -20.0, 60.0, 40.0))]));
     h.extrude(s, |_| 0.0, |_| 10.0, Mode::Add);
-    let square = h.sketch(
-        |_| Frame::WORLD,
-        |p| Ok(vec![Profile::new(Wire::rect(p[0] - 8.0, -16.0, 16.0, 12.0))]),
-    );
+    let square = h.sketch(|_| Frame::WORLD, |p| Ok(vec![Profile::new(Wire::rect(p[0] - 8.0, -16.0, 16.0, 12.0))]));
     h.extrude(square, |p| 10.0 - p[2], |p| p[2] + 5.0, Mode::Remove);
-    let round = h.sketch(
-        |_| Frame::WORLD,
-        |p| Ok(vec![Profile::new(Wire::circle(v2(p[0], 10.0), p[1]))]),
-    );
+    let round = h.sketch(|_| Frame::WORLD, |p| Ok(vec![Profile::new(Wire::circle(v2(p[0], 10.0), p[1]))]));
     h.extrude(round, |p| 10.0 - p[2], |p| p[2] + 5.0, Mode::Remove);
     h
 }
@@ -272,6 +233,84 @@ fn sector() -> History {
         },
     );
     h.revolve(s, |p| p[2].to_radians(), Mode::Add);
+    h
+}
+
+/// Names of the Boolean stress cases, in slider order.
+const STRESS_NAMES: [&str; 14] = [
+    "Pocket flush with the top",
+    "Boxes sharing a whole face",
+    "Boxes touching along an edge",
+    "Boxes touching at one corner",
+    "Box standing on its corner",
+    "Cylinder tangent to a wall",
+    "Bore tangent to a wall inside",
+    "Coaxial cylinders, flush ends",
+    "Equal cylinders crossing",
+    "Cone cut through its apex",
+    "Ball bored along its axis",
+    "Two balls touching at a point",
+    "Torus halved through its axis",
+    "Known limit: tangent bore",
+];
+
+fn stress_case(p: &[f64]) -> Result<Body> {
+    let at = |x: f64, y: f64, z: f64| Frame::translation(v3(x, y, z));
+    let z_cylinder = |x: f64, y: f64, z: f64, r: f64, h: f64| cylinder(&at(x, y, z), r, h, 2);
+    match p[0].round() as i64 {
+        0 => {
+            let a = box_solid(&at(-30.0, -30.0, 0.0), 60.0, 60.0, 20.0, 1)?;
+            subtract(&a, &box_solid(&at(-15.0, -15.0, 8.0), 30.0, 30.0, 12.0, 2)?)
+        }
+        1 => {
+            let a = box_solid(&at(-30.0, -15.0, 0.0), 30.0, 30.0, 30.0, 1)?;
+            union(&a, &box_solid(&at(0.0, -15.0, 0.0), 30.0, 30.0, 30.0, 2)?)
+        }
+        2 => {
+            let a = box_solid(&at(-30.0, -30.0, 0.0), 30.0, 30.0, 30.0, 1)?;
+            union(&a, &box_solid(&at(0.0, 0.0, 0.0), 30.0, 30.0, 30.0, 2)?)
+        }
+        3 => {
+            let a = box_solid(&at(-30.0, -30.0, -30.0), 30.0, 30.0, 30.0, 1)?;
+            union(&a, &box_solid(&at(0.0, 0.0, 0.0), 30.0, 30.0, 30.0, 2)?)
+        }
+        4 => {
+            let plate = box_solid(&at(-40.0, -40.0, -10.0), 80.0, 80.0, 10.0, 1)?;
+            let tilt = Frame::rotation(Vec3::ZERO, v3(1.0, -1.0, 0.0), (1.0f64 / 3.0f64.sqrt()).acos());
+            union(&plate, &box_solid(&tilt, 30.0, 30.0, 30.0, 2)?)
+        }
+        5 => {
+            let a = box_solid(&at(-40.0, -30.0, 0.0), 80.0, 30.0, 20.0, 1)?;
+            union(&a, &z_cylinder(0.0, 12.0, 0.0, 12.0, 20.0)?)
+        }
+        6 => {
+            let a = box_solid(&at(-40.0, -30.0, 0.0), 80.0, 30.0, 20.0, 1)?;
+            subtract(&a, &z_cylinder(0.0, -12.0, 5.0, 12.0, 15.0)?)
+        }
+        7 => subtract(&z_cylinder(0.0, 0.0, 0.0, 25.0, 40.0)?, &z_cylinder(0.0, 0.0, 0.0, 15.0, 40.0)?),
+        8 => {
+            let side = Frame::new(v3(-40.0, 0.0, 0.0), Vec3::X, Vec3::Y);
+            intersect(&z_cylinder(0.0, 0.0, -40.0, 20.0, 80.0)?, &cylinder(&side, 20.0, 80.0, 3)?)
+        }
+        9 => {
+            let half = box_solid(&at(0.0, -40.0, -5.0), 40.0, 80.0, 60.0, 2)?;
+            subtract(&cone_frustum(&Frame::WORLD, 25.0, 0.0, 45.0, 1)?, &half)
+        }
+        10 => subtract(&sphere(&Frame::WORLD, 30.0, 1)?, &z_cylinder(0.0, 0.0, -40.0, 15.0, 80.0)?),
+        11 => union(&sphere(&at(-15.0, 0.0, 0.0), 15.0, 1)?, &sphere(&at(20.0, 0.0, 0.0), 20.0, 2)?),
+        12 => {
+            let half = box_solid(&at(0.0, -60.0, -20.0), 60.0, 120.0, 40.0, 2)?;
+            intersect(&torus(&Frame::WORLD, 35.0, 10.0, 1)?, &half)
+        }
+        // A cylinder internally tangent to a sphere meets it in a figure eight with a
+        // double point. The kernel refuses this one rather than guess.
+        _ => subtract(&sphere(&Frame::WORLD, 30.0, 1)?, &z_cylinder(12.0, 0.0, -40.0, 18.0, 80.0)?),
+    }
+}
+
+fn stress() -> History {
+    let mut h = History::new();
+    h.custom(stress_case);
     h
 }
 
@@ -337,7 +376,17 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("section", "Section size", 6.0, 30.0, 16.0),
         deg("angle", "Sweep angle", 20.0, 355.0, 250.0),
     ];
-    static MODELS: [ModelDef; 8] = [
+    static STRESS: [ParamDef; 1] = [ParamDef {
+        key: "case",
+        label: "Case",
+        unit: "",
+        min: 0.0,
+        max: 13.0,
+        step: 1.0,
+        default: 0.0,
+        choices: &STRESS_NAMES,
+    }];
+    static MODELS: [ModelDef; 9] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -379,6 +428,13 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "Slide the tools off the plate's edge. Many positions line faces up exactly. If the kernel refuses a position, the reason appears here.",
             params: &POCKETS,
             history: pockets,
+        },
+        ModelDef {
+            id: "stress",
+            name: "Stress cases",
+            blurb: "The contacts Booleans find hardest: coplanar faces, edges and corners that only touch, and tangent surfaces. The last case is a known limit, where the kernel refuses rather than guess.",
+            params: &STRESS,
+            history: stress,
         },
         ModelDef {
             id: "knob",

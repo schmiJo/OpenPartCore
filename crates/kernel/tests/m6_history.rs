@@ -12,20 +12,13 @@ fn vol(o: &Outcome) -> f64 {
 }
 
 fn rebuilt(o: &Outcome) -> Vec<&str> {
-    o.steps
-        .iter()
-        .filter(|s| s.state == StepState::Rebuilt)
-        .map(|s| s.name.as_str())
-        .collect()
+    o.steps.iter().filter(|s| s.state == StepState::Rebuilt).map(|s| s.name.as_str()).collect()
 }
 
 /// A plate: w, d, t, fillet radius on its long top edge, hole radius.
 fn plate_history() -> (History, FeatureId) {
     let mut h = History::new();
-    let s = h.sketch(
-        |_| Frame::WORLD,
-        |p| Ok(vec![Profile::new(Wire::rect(0.0, 0.0, p[0], p[1]))]),
-    );
+    let s = h.sketch(|_| Frame::WORLD, |p| Ok(vec![Profile::new(Wire::rect(0.0, 0.0, p[0], p[1]))]));
     let e = h.extrude(s, |_| 0.0, |p| p[2], Mode::Add);
     h.fillet(EdgeQuery::Between(e.end_cap(), e.side(0)), |p| p[3]);
     let s2 = h.sketch(
@@ -160,10 +153,7 @@ fn a_reference_that_stops_existing_is_reported() {
     let mut h = History::new();
     let s = h.sketch(|_| Frame::WORLD, |_| Ok(vec![Profile::new(Wire::rect(0.0, 0.0, 10.0, 10.0))]));
     let e = h.extrude(s, |_| 0.0, |_| 5.0, Mode::Add);
-    let cut = h.sketch(
-        |_| Frame::WORLD,
-        |p| Ok(vec![Profile::new(Wire::rect(-1.0, -1.0, 12.0, p[0]))]),
-    );
+    let cut = h.sketch(|_| Frame::WORLD, |p| Ok(vec![Profile::new(Wire::rect(-1.0, -1.0, 12.0, p[0]))]));
     h.extrude(cut, |_| -1.0, |_| 7.0, Mode::Remove);
     h.fillet(EdgeQuery::Between(e.end_cap(), e.side(0)), |_| 1.0);
     let o = h.rebuild(&[3.0], None);

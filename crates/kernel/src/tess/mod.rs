@@ -25,10 +25,7 @@ pub struct TessParams {
 impl TessParams {
     /// Sensible display settings for a model of the given size.
     pub fn for_size(size: f64) -> TessParams {
-        TessParams {
-            chord: (size * 4e-4).max(1e-4),
-            angle: 18f64.to_radians(),
-        }
+        TessParams { chord: (size * 4e-4).max(1e-4), angle: 18f64.to_radians() }
     }
 }
 
@@ -64,11 +61,8 @@ impl Mesh {
     pub fn area(&self) -> f64 {
         let mut s = 0.0;
         for t in &self.triangles {
-            let (a, b, d) = (
-                self.positions[t[0] as usize],
-                self.positions[t[1] as usize],
-                self.positions[t[2] as usize],
-            );
+            let (a, b, d) =
+                (self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize]);
             s += (b - a).cross(d - a).norm() / 2.0;
         }
         s
@@ -162,12 +156,8 @@ pub fn tessellate(body: &Body, params: &TessParams) -> Result<Mesh> {
     let mut density = vec![1usize; body.edges.len()];
     let mut last_error = None;
     for _attempt in 0..5 {
-        let mut polylines: Vec<Vec<Vec3>> = body
-            .edges
-            .iter()
-            .zip(&density)
-            .map(|(e, &d)| edge_polyline(e, &body.vertices, params, d))
-            .collect();
+        let mut polylines: Vec<Vec<Vec3>> =
+            body.edges.iter().zip(&density).map(|(e, &d)| edge_polyline(e, &body.vertices, params, d)).collect();
         let mut mesh = Mesh::default();
         let mut crossing = None;
         for f in 0..body.faces.len() {
@@ -201,10 +191,7 @@ struct FaceFrame {
 
 impl FaceFrame {
     fn to_grid(&self, uv: Vec2) -> [i64; 2] {
-        [
-            ((uv.x - self.lo.x) * self.scale).round() as i64,
-            ((uv.y - self.lo.y) * self.scale).round() as i64,
-        ]
+        [((uv.x - self.lo.x) * self.scale).round() as i64, ((uv.y - self.lo.y) * self.scale).round() as i64]
     }
 
     fn from_grid(&self, q: [i64; 2]) -> Vec2 {
@@ -240,20 +227,14 @@ fn tessellate_face(
         })
         .collect();
 
-    let (mut lo, mut hi) = (
-        v2(f64::INFINITY, f64::INFINITY),
-        v2(f64::NEG_INFINITY, f64::NEG_INFINITY),
-    );
+    let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
     for &p in chains.iter().flatten() {
         let uv = surface.to_chart(chart, p);
         lo = v2(lo.x.min(uv.x), lo.y.min(uv.y));
         hi = v2(hi.x.max(uv.x), hi.y.max(uv.y));
     }
     let extent = (hi.x - lo.x).max(hi.y - lo.y).max(1e-9);
-    let frame = FaceFrame {
-        lo,
-        scale: (GRID - 2) as f64 / extent,
-    };
+    let frame = FaceFrame { lo, scale: (GRID - 2) as f64 / extent };
 
     let mut cdt = Cdt::new();
     let mut point_of: HashMap<u32, Vec3> = HashMap::new();
@@ -350,10 +331,7 @@ fn refine(
                 }
             }
             // The triangle's middle catches bulges with no interior edge to split.
-            let c = [
-                (grid[0][0] + grid[1][0] + grid[2][0]) / 3,
-                (grid[0][1] + grid[1][1] + grid[2][1]) / 3,
-            ];
+            let c = [(grid[0][0] + grid[1][0] + grid[2][0]) / 3, (grid[0][1] + grid[1][1] + grid[2][1]) / 3];
             if c != grid[0] && c != grid[1] && c != grid[2] {
                 let flat = (world[0] + world[1] + world[2]) / 3.0;
                 let score = surface.sdf(flat).abs() / params.chord;

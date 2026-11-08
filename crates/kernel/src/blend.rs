@@ -139,9 +139,7 @@ fn build_runs(body: &Body, selected: &[usize]) -> Result<Vec<Run>> {
         }
         let e = &body.edges[start];
         if !matches!(e.curve, Curve::Line { .. } | Curve::Circle { .. }) {
-            return Err(Error::Unsupported(
-                "fillets and chamfers work on straight and circular edges only".into(),
-            ));
+            return Err(Error::Unsupported("fillets and chamfers work on straight and circular edges only".into()));
         }
         done[start] = true;
         let mut members = vec![start];
@@ -155,10 +153,7 @@ fn build_runs(body: &Body, selected: &[usize]) -> Result<Vec<Run>> {
                     break;
                 }
                 let v = if forward { v1 } else { v0 };
-                let next = at_vertex[v]
-                    .iter()
-                    .copied()
-                    .find(|&f| !done[f] && continues(start, f));
+                let next = at_vertex[v].iter().copied().find(|&f| !done[f] && continues(start, f));
                 let Some(f) = next else {
                     break;
                 };
@@ -177,16 +172,7 @@ fn build_runs(body: &Body, selected: &[usize]) -> Result<Vec<Run>> {
             }
         }
         let closed = v0 == v1;
-        runs.push(Run {
-            curve: e.curve.clone(),
-            t0,
-            t1,
-            v0,
-            v1,
-            closed,
-            faces: faces_of(start)?,
-            members,
-        });
+        runs.push(Run { curve: e.curve.clone(), t0, t1, v0, v1, closed, faces: faces_of(start)?, members });
     }
     Ok(runs)
 }
@@ -237,19 +223,11 @@ fn section_of(run: &Run, size: f64) -> Result<Section> {
     match &run.curve {
         Curve::Line { origin, dir } => {
             let frame = Frame::new(*origin + *dir * run.t0, *dir, dir.any_perpendicular());
-            Ok(Section {
-                frame,
-                circular: false,
-                station: (run.t1 - run.t0) / 2.0,
-            })
+            Ok(Section { frame, circular: false, station: (run.t1 - run.t0) / 2.0 })
         }
         Curve::Circle { frame, .. } => {
             let _ = size;
-            Ok(Section {
-                frame: *frame,
-                circular: true,
-                station: (run.t0 + run.t1) / 2.0,
-            })
+            Ok(Section { frame: *frame, circular: true, station: (run.t0 + run.t1) / 2.0 })
         }
         _ => Err(Error::Unsupported("only straight and circular edges".into())),
     }
@@ -258,12 +236,8 @@ fn section_of(run: &Run, size: f64) -> Result<Section> {
 /// How a face appears in the cross-section, or an error if it can't be swept.
 fn trace_of(surface: &Surface, section: &Section, size: f64) -> Result<Trace> {
     let f = &section.frame;
-    let unsupported = || {
-        Error::Unsupported(format!(
-            "this edge lies on a {} that doesn't sweep along the edge",
-            surface.name()
-        ))
-    };
+    let unsupported =
+        || Error::Unsupported(format!("this edge lies on a {} that doesn't sweep along the edge", surface.name()));
     let parallel = |a: Vec3, b: Vec3| a.cross(b).norm() * size.max(1.0) <= 1e-5;
     let on_axis = |q: Vec3| {
         let d = q - f.origin;
@@ -287,20 +261,14 @@ fn trace_of(surface: &Surface, section: &Section, size: f64) -> Result<Trace> {
             }
             Surface::Sphere { frame, radius } => {
                 if on_axis(frame.origin) {
-                    Ok(Trace::Arc {
-                        centre: section.project(frame.origin),
-                        radius,
-                    })
+                    Ok(Trace::Arc { centre: section.project(frame.origin), radius })
                 } else {
                     Err(unsupported())
                 }
             }
             Surface::Torus { frame, major, minor } => {
                 if parallel(frame.z, f.z) && on_axis(frame.origin) {
-                    Ok(Trace::Arc {
-                        centre: v2(major, (frame.origin - f.origin).dot(f.z)),
-                        radius: minor,
-                    })
+                    Ok(Trace::Arc { centre: v2(major, (frame.origin - f.origin).dot(f.z)), radius: minor })
                 } else {
                     Err(unsupported())
                 }
@@ -311,10 +279,7 @@ fn trace_of(surface: &Surface, section: &Section, size: f64) -> Result<Trace> {
             Surface::Plane(_) => Ok(Trace::Line),
             Surface::Cylinder { frame, radius } => {
                 if parallel(frame.z, f.z) {
-                    Ok(Trace::Arc {
-                        centre: section.project(frame.origin),
-                        radius,
-                    })
+                    Ok(Trace::Arc { centre: section.project(frame.origin), radius })
                 } else {
                     Err(unsupported())
                 }
@@ -371,11 +336,7 @@ fn corner_of(body: &Body, run: &Run, section: &Section, size: f64) -> Result<Cor
     }
     // Convex if going into one face takes you below the other.
     let convex = sides[1].into.dot(sides[0].normal) < 0.0;
-    Ok(Corner {
-        p: section.project(p3),
-        sides,
-        convex,
-    })
+    Ok(Corner { p: section.project(p3), sides, convex })
 }
 
 /// The swept profile for a corner, and the points used to judge its reach.
@@ -440,10 +401,7 @@ fn fillet_circle(p: Vec2, a: &Side, b: &Side, r: f64, convex: bool) -> Result<(V
     }
     let offset = |s: &Side| -> Option<Off> {
         match s.trace {
-            Trace::Line => Some(Off::Line {
-                q: p + s.normal * (side * r),
-                d: s.into,
-            }),
+            Trace::Line => Some(Off::Line { q: p + s.normal * (side * r), d: s.into }),
             Trace::Arc { centre, radius } => {
                 // The normal points away from the arc's centre on a convex surface.
                 let bulging = s.normal.dot(p - centre) > 0.0;
@@ -531,10 +489,7 @@ fn end_condition(
     dir: Vec3,
     station: f64,
 ) -> Result<End> {
-    let reach_section = points
-        .iter()
-        .flat_map(|a| points.iter().map(move |b| a.dist(*b)))
-        .fold(0.0, f64::max);
+    let reach_section = points.iter().flat_map(|a| points.iter().map(move |b| a.dist(*b))).fold(0.0, f64::max);
     let margin = (reach_section * 0.05).max(1e-3);
 
     // Continuing smoothly into another blended edge: both tools meet at this section.
@@ -572,11 +527,7 @@ fn end_condition(
         if run.faces.contains(&f) {
             continue;
         }
-        let touches = face
-            .loops
-            .iter()
-            .flatten()
-            .any(|c| body.start_vertex(*c) == v);
+        let touches = face.loops.iter().flatten().any(|c| body.start_vertex(*c) == v);
         if touches {
             blockers.push(f);
         }
@@ -609,11 +560,7 @@ fn end_condition(
             if plane.z.cross(dir).norm() > 1e-6 {
                 // An oblique wall: the tool has to end along it, not square across.
                 let inward = section.lift(c, station) - dir * step;
-                return Ok(End::Clip {
-                    plane,
-                    keep: inward,
-                    reach: reach_section * 3.0 + margin,
-                });
+                return Ok(End::Clip { plane, keep: inward, reach: reach_section * 3.0 + margin });
             }
         }
     }
@@ -652,21 +599,13 @@ fn sweep(profile: &Profile, run: &Run, section: &Section, ends: [End; 2], featur
             let sweep_angle = ((run.t1 + a1) - start).min(TAU - 1e-3);
             let (s, c) = start.sin_cos();
             let x = f.x * c + f.y * s;
-            let frame = Frame {
-                origin: f.origin,
-                x,
-                y: f.z.cross(x),
-                z: f.z,
-            };
+            let frame = Frame { origin: f.origin, x, y: f.z.cross(x), z: f.z };
             revolve(profile, &frame, sweep_angle, feature)?
         }
     } else {
         let length = run.t1 - run.t0;
         let f = section.frame;
-        let frame = Frame {
-            origin: f.origin - f.z * e0,
-            ..f
-        };
+        let frame = Frame { origin: f.origin - f.z * e0, ..f };
         extrude(profile, &frame, length + e0 + e1, feature)?
     };
     for end in &ends {
@@ -715,12 +654,7 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
             [End::Flush, End::Flush]
         } else {
             let (d0, d1, s0, s1) = if section.circular {
-                (
-                    -run.curve.derivative(run.t0).normalized(),
-                    run.curve.derivative(run.t1).normalized(),
-                    run.t0,
-                    run.t1,
-                )
+                (-run.curve.derivative(run.t0).normalized(), run.curve.derivative(run.t1).normalized(), run.t0, run.t1)
             } else {
                 let d = section.frame.z;
                 (-d, d, 0.0, run.t1 - run.t0)
@@ -752,10 +686,7 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
     // Only the last step needs the full checks, and they apply to the final result.
     let total = cuts.len() + adds.len();
     let mut out = body.clone();
-    let steps = cuts
-        .iter()
-        .map(|t| (t, BoolOp::Subtract))
-        .chain(adds.iter().map(|t| (t, BoolOp::Union)));
+    let steps = cuts.iter().map(|t| (t, BoolOp::Subtract)).chain(adds.iter().map(|t| (t, BoolOp::Union)));
     for (i, (tool, op)) in steps.enumerate() {
         let checks = if i + 1 == total { Checks::Full } else { Checks::Interim };
         out = boolean_with(&out, tool, op, checks)?;
@@ -850,12 +781,7 @@ fn sphere_corner(
 impl Body {
     /// Indices of edges that satisfy a predicate.
     pub fn edges_where(&self, mut pred: impl FnMut(usize, &Edge) -> bool) -> Vec<usize> {
-        self.edges
-            .iter()
-            .enumerate()
-            .filter(|(i, e)| pred(*i, e))
-            .map(|(i, _)| i)
-            .collect()
+        self.edges.iter().enumerate().filter(|(i, e)| pred(*i, e)).map(|(i, _)| i).collect()
     }
 
     /// Whether the edge is a straight line parallel to a direction.
@@ -888,4 +814,3 @@ impl Body {
         out
     }
 }
-

@@ -25,16 +25,8 @@ fn lift_seg(seg: &Seg, frame: &Frame, z: f64) -> (Curve, f64, f64) {
             let (pa, pb) = (frame.point(a.x, a.y, z), frame.point(b.x, b.y, z));
             (Curve::line_through(pa, pb), 0.0, pa.dist(pb))
         }
-        SegGeom::Arc {
-            center,
-            radius,
-            a0,
-            a1,
-        } => {
-            let f = Frame {
-                origin: frame.point(center.x, center.y, z),
-                ..*frame
-            };
+        SegGeom::Arc { center, radius, a0, a1 } => {
+            let f = Frame { origin: frame.point(center.x, center.y, z), ..*frame };
             (Curve::Circle { frame: f, radius }, a0, a1)
         }
     }
@@ -48,13 +40,7 @@ pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> R
         return Err(Error::InvalidInput(format!("extrude height {height} is too small")));
     }
     let (frame, height) = if height < 0.0 {
-        (
-            Frame {
-                origin: frame.origin + frame.z * height,
-                ..*frame
-            },
-            -height,
-        )
+        (Frame { origin: frame.origin + frame.z * height, ..*frame }, -height)
     } else {
         (*frame, height)
     };
@@ -81,16 +67,7 @@ pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> R
         let rails: Vec<Coedge> = (0..n)
             .map(|i| {
                 let p = body.vertices[lower[i]];
-                body.add_edge(
-                    Curve::Line {
-                        origin: p,
-                        dir: frame.z,
-                    },
-                    0.0,
-                    height,
-                    lower[i],
-                    upper[i],
-                )
+                body.add_edge(Curve::Line { origin: p, dir: frame.z }, 0.0, height, lower[i], upper[i])
             })
             .collect();
         let mut bottom = Vec::with_capacity(n);
@@ -110,24 +87,11 @@ pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> R
                     // Outward is to the right of travel, and x * y = normal.
                     let (pa, pb) = (frame.point(a.x, a.y, 0.0), frame.point(b.x, b.y, 0.0));
                     let x = (pb - pa).normalized();
-                    let s = Surface::Plane(Frame {
-                        origin: pa,
-                        x,
-                        y: frame.z,
-                        z: x.cross(frame.z),
-                    });
+                    let s = Surface::Plane(Frame { origin: pa, x, y: frame.z, z: x.cross(frame.z) });
                     (s, false)
                 }
-                SegGeom::Arc {
-                    center,
-                    radius,
-                    a0,
-                    a1,
-                } => {
-                    let f = Frame {
-                        origin: frame.point(center.x, center.y, 0.0),
-                        ..frame
-                    };
+                SegGeom::Arc { center, radius, a0, a1 } => {
+                    let f = Frame { origin: frame.point(center.x, center.y, 0.0), ..frame };
                     // Counter-clockwise keeps material toward the axis, so the
                     // outward normal is the radial direction.
                     (Surface::Cylinder { frame: f, radius }, a1 < a0)
@@ -145,10 +109,7 @@ pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> R
     }
 
     body.add_face(Surface::Plane(frame), true, bottom_loops, tag(SLOT_START_CAP));
-    let top_frame = Frame {
-        origin: frame.origin + frame.z * height,
-        ..frame
-    };
+    let top_frame = Frame { origin: frame.origin + frame.z * height, ..frame };
     body.add_face(Surface::Plane(top_frame), false, top_loops, tag(SLOT_END_CAP));
     body.compute_shells();
     validate(&body).map_err(Error::InvalidBody)?;
@@ -245,19 +206,9 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
                 let (pa, pb) = (body.vertices[a], body.vertices[b]);
                 body.add_edge(Curve::line_through(pa, pb), 0.0, pa.dist(pb), a, b)
             }
-            SegGeom::Arc {
-                center,
-                radius,
-                a0,
-                a1,
-            } => {
+            SegGeom::Arc { center, radius, a0, a1 } => {
                 // The profile plane has x = radial and y = axis.
-                let frame = Frame {
-                    origin: f.origin + r * center.x + f.z * center.y,
-                    x: r,
-                    y: f.z,
-                    z: r.cross(f.z),
-                };
+                let frame = Frame { origin: f.origin + r * center.x + f.z * center.y, x: r, y: f.z, z: r.cross(f.z) };
                 body.add_edge(Curve::Circle { frame, radius }, a0, a1, a, b)
             }
         };
@@ -283,16 +234,10 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
             // Sweep edge at a profile vertex between two stations.
             let mut sweep = |body: &mut Body, vert: usize, p: Vec2, k: usize| -> Coedge {
                 *sweeps.entry((w, vert, k)).or_insert_with(|| {
-                    let circle = Frame {
-                        origin: f.origin + f.z * p.y,
-                        ..f
-                    };
+                    let circle = Frame { origin: f.origin + f.z * p.y, ..f };
                     let (va, vb) = (vertex_ids[&(w, vert, k)], vertex_ids[&(w, vert, k + 1)]);
                     body.add_edge(
-                        Curve::Circle {
-                            frame: circle,
-                            radius: p.x,
-                        },
+                        Curve::Circle { frame: circle, radius: p.x },
                         sweep_angle(k),
                         sweep_angle(k + 1),
                         va,
@@ -326,11 +271,7 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
                 }
                 along_b.reverse();
                 let loops = if full {
-                    let (outer, inner) = if pa.x > pb.x {
-                        (along_a, along_b)
-                    } else {
-                        (along_b, along_a)
-                    };
+                    let (outer, inner) = if pa.x > pb.x { (along_a, along_b) } else { (along_b, along_a) };
                     if inner.is_empty() {
                         vec![outer]
                     } else {
@@ -338,7 +279,8 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
                     }
                 } else {
                     let m0 = meridian(&mut body, &mut meridians, &vertex_ids, &f, sweep_angle(0), (w, i, 0), wire);
-                    let m1 = meridian(&mut body, &mut meridians, &vertex_ids, &f, sweep_angle(steps), (w, i, steps), wire);
+                    let m1 =
+                        meridian(&mut body, &mut meridians, &vertex_ids, &f, sweep_angle(steps), (w, i, steps), wire);
                     let mut lp = along_a;
                     lp.push(m1);
                     lp.extend(along_b);
@@ -352,11 +294,21 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
                     if !a_axis {
                         lp.push(sweep(&mut body, i, pa, k));
                     }
-                    lp.push(meridian(&mut body, &mut meridians, &vertex_ids, &f, sweep_angle(wrap(k + 1)), (w, i, wrap(k + 1)), wire));
+                    lp.push(meridian(
+                        &mut body,
+                        &mut meridians,
+                        &vertex_ids,
+                        &f,
+                        sweep_angle(wrap(k + 1)),
+                        (w, i, wrap(k + 1)),
+                        wire,
+                    ));
                     if !b_axis {
                         lp.push(sweep(&mut body, j, pb, k).flipped());
                     }
-                    lp.push(meridian(&mut body, &mut meridians, &vertex_ids, &f, sweep_angle(k), (w, i, k), wire).flipped());
+                    lp.push(
+                        meridian(&mut body, &mut meridians, &vertex_ids, &f, sweep_angle(k), (w, i, k), wire).flipped(),
+                    );
                     body.add_face(surface, flipped, vec![lp], tag(SLOT_SEG_BASE + seg.id));
                 }
             }
@@ -382,20 +334,10 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
     if !full {
         // Start cap: normal is -Y, with chart x radial and y along the axis, so
         // the profile keeps its own direction.
-        let start_frame = Frame {
-            origin: f.origin,
-            x: f.x,
-            y: f.z,
-            z: -f.y,
-        };
+        let start_frame = Frame { origin: f.origin, x: f.x, y: f.z, z: -f.y };
         body.add_face(Surface::Plane(start_frame), false, caps_start, tag(SLOT_START_CAP));
         let r = radial(angle);
-        let end_frame = Frame {
-            origin: f.origin,
-            x: f.z,
-            y: r,
-            z: f.z.cross(r),
-        };
+        let end_frame = Frame { origin: f.origin, x: f.z, y: r, z: f.z.cross(r) };
         body.add_face(Surface::Plane(end_frame), false, caps_end, tag(SLOT_END_CAP));
     }
 
@@ -410,15 +352,9 @@ fn surface_of_seg(seg: &Seg, f: &Frame) -> Surface {
         SegGeom::Line { a, b } => {
             let (dr, dz) = (b.x - a.x, b.y - a.y);
             if dz.abs() < TOL {
-                Surface::Plane(Frame {
-                    origin: f.origin + f.z * a.y,
-                    ..*f
-                })
+                Surface::Plane(Frame { origin: f.origin + f.z * a.y, ..*f })
             } else if dr.abs() < TOL {
-                Surface::Cylinder {
-                    frame: *f,
-                    radius: a.x,
-                }
+                Surface::Cylinder { frame: *f, radius: a.x }
             } else {
                 // Cones are stored widening along their own +z.
                 let up = if dr / dz > 0.0 { f.z } else { -f.z };
@@ -430,18 +366,11 @@ fn surface_of_seg(seg: &Seg, f: &Frame) -> Surface {
             }
         }
         SegGeom::Arc { center, radius, .. } => {
-            let frame = Frame {
-                origin: f.origin + f.z * center.y,
-                ..*f
-            };
+            let frame = Frame { origin: f.origin + f.z * center.y, ..*f };
             if center.x.abs() < TOL {
                 Surface::Sphere { frame, radius }
             } else {
-                Surface::Torus {
-                    frame,
-                    major: center.x,
-                    minor: radius,
-                }
+                Surface::Torus { frame, major: center.x, minor: radius }
             }
         }
     }
@@ -487,22 +416,8 @@ pub fn sphere(frame: &Frame, radius: f64, feature: u32) -> Result<Body> {
     }
     let arc = Wire {
         segs: vec![
-            Seg {
-                geom: SegGeom::Arc {
-                    center: v2(0.0, 0.0),
-                    radius,
-                    a0: -PI / 2.0,
-                    a1: PI / 2.0,
-                },
-                id: 0,
-            },
-            Seg {
-                geom: SegGeom::Line {
-                    a: v2(0.0, radius),
-                    b: v2(0.0, -radius),
-                },
-                id: 1,
-            },
+            Seg { geom: SegGeom::Arc { center: v2(0.0, 0.0), radius, a0: -PI / 2.0, a1: PI / 2.0 }, id: 0 },
+            Seg { geom: SegGeom::Line { a: v2(0.0, radius), b: v2(0.0, -radius) }, id: 1 },
         ],
     };
     revolve(&Profile::new(arc), frame, TAU, feature)

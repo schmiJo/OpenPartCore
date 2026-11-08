@@ -38,19 +38,11 @@ pub enum Ssi {
 }
 
 fn empty() -> Ssi {
-    Ssi::Curves {
-        curves: Vec::new(),
-        crossings: Vec::new(),
-    }
+    Ssi::Curves { curves: Vec::new(), crossings: Vec::new() }
 }
 
 fn closed_circle(frame: Frame, radius: f64) -> SsiCurve {
-    SsiCurve {
-        curve: Curve::Circle { frame, radius },
-        closed: true,
-        t0: 0.0,
-        t1: TAU,
-    }
+    SsiCurve { curve: Curve::Circle { frame, radius }, closed: true, t0: 0.0, t1: TAU }
 }
 
 /// An infinite line clipped to a range covering the region of interest.
@@ -58,12 +50,7 @@ fn line_in_region(point: Vec3, dir: Vec3, region: &Aabb) -> SsiCurve {
     let centre = region.center();
     let origin = point + dir * (centre - point).dot(dir);
     let reach = region.diagonal() + 1.0;
-    SsiCurve {
-        curve: Curve::Line { origin, dir },
-        closed: false,
-        t0: -reach,
-        t1: reach,
-    }
+    SsiCurve { curve: Curve::Line { origin, dir }, closed: false, t0: -reach, t1: reach }
 }
 
 fn parallel(a: Vec3, b: Vec3, size: f64) -> bool {
@@ -75,7 +62,10 @@ pub fn coincident(a: &Surface, b: &Surface, size: f64) -> Option<bool> {
     let close = |x: f64, y: f64| (x - y).abs() <= TOL;
     match (*a, *b) {
         (Surface::Plane(f), Surface::Plane(g)) => {
-            if parallel(f.z, g.z, size) && (f.origin - g.origin).dot(g.z).abs() <= TOL && (g.origin - f.origin).dot(f.z).abs() <= TOL {
+            if parallel(f.z, g.z, size)
+                && (f.origin - g.origin).dot(g.z).abs() <= TOL
+                && (g.origin - f.origin).dot(f.z).abs() <= TOL
+            {
                 Some(f.z.dot(g.z) > 0.0)
             } else {
                 None
@@ -85,10 +75,7 @@ pub fn coincident(a: &Surface, b: &Surface, size: f64) -> Option<bool> {
             let d = g.origin - f.origin;
             (close(r, s) && parallel(f.z, g.z, size) && (d - f.z * d.dot(f.z)).norm() <= TOL).then_some(true)
         }
-        (
-            Surface::Cone { frame: f, half_angle: x, .. },
-            Surface::Cone { frame: g, half_angle: y, .. },
-        ) => {
+        (Surface::Cone { frame: f, half_angle: x, .. }, Surface::Cone { frame: g, half_angle: y, .. }) => {
             let same = f.z.dot(g.z) > 0.0
                 && parallel(f.z, g.z, size)
                 && (x - y).abs() * size.max(1.0) <= TOL
@@ -98,10 +85,9 @@ pub fn coincident(a: &Surface, b: &Surface, size: f64) -> Option<bool> {
         (Surface::Sphere { frame: f, radius: r }, Surface::Sphere { frame: g, radius: s }) => {
             (close(r, s) && f.origin.dist(g.origin) <= TOL).then_some(true)
         }
-        (
-            Surface::Torus { frame: f, major: m, minor: r },
-            Surface::Torus { frame: g, major: n, minor: s },
-        ) => (close(m, n) && close(r, s) && parallel(f.z, g.z, size) && f.origin.dist(g.origin) <= TOL).then_some(true),
+        (Surface::Torus { frame: f, major: m, minor: r }, Surface::Torus { frame: g, major: n, minor: s }) => {
+            (close(m, n) && close(r, s) && parallel(f.z, g.z, size) && f.origin.dist(g.origin) <= TOL).then_some(true)
+        }
         _ => None,
     }
 }
@@ -151,33 +137,21 @@ fn common_axis(a: &Surface, b: &Surface, size: f64) -> Option<(Vec3, Vec3)> {
 fn meridian_of(s: &Surface, o: Vec3, z: Vec3) -> Option<Meridian> {
     let height = |q: Vec3| (q - o).dot(z);
     match *s {
-        Surface::Plane(f) => Some(Meridian::Line {
-            p: v2(0.0, height(f.origin)),
-            d: v2(1.0, 0.0),
-        }),
-        Surface::Cylinder { frame, radius } => Some(Meridian::Line {
-            p: v2(radius, height(frame.origin)),
-            d: v2(0.0, 1.0),
-        }),
-        Surface::Cone {
-            frame,
-            radius,
-            half_angle,
-        } => {
+        Surface::Plane(f) => Some(Meridian::Line { p: v2(0.0, height(f.origin)), d: v2(1.0, 0.0) }),
+        Surface::Cylinder { frame, radius } => {
+            Some(Meridian::Line { p: v2(radius, height(frame.origin)), d: v2(0.0, 1.0) })
+        }
+        Surface::Cone { frame, radius, half_angle } => {
             let sense = frame.z.dot(z).signum();
             Some(Meridian::Line {
                 p: v2(radius, height(frame.origin)),
                 d: v2(half_angle.sin(), half_angle.cos() * sense),
             })
         }
-        Surface::Sphere { frame, radius } => Some(Meridian::Circle {
-            c: v2(0.0, height(frame.origin)),
-            r: radius,
-        }),
-        Surface::Torus { frame, major, minor } => Some(Meridian::Circle {
-            c: v2(major, height(frame.origin)),
-            r: minor,
-        }),
+        Surface::Sphere { frame, radius } => Some(Meridian::Circle { c: v2(0.0, height(frame.origin)), r: radius }),
+        Surface::Torus { frame, major, minor } => {
+            Some(Meridian::Circle { c: v2(major, height(frame.origin)), r: minor })
+        }
     }
 }
 
@@ -243,10 +217,7 @@ fn coaxial(a: &Surface, b: &Surface, o: Vec3, z: Vec3) -> Ssi {
             curves.push(circle);
         }
     }
-    Ssi::Curves {
-        curves,
-        crossings: Vec::new(),
-    }
+    Ssi::Curves { curves, crossings: Vec::new() }
 }
 
 // ----- Closed forms for the remaining common pairs -----
@@ -259,10 +230,7 @@ fn plane_plane(f: &Frame, g: &Frame, region: &Aabb) -> Ssi {
     let n2 = dir.norm2();
     let (d1, d2) = (f.z.dot(f.origin), g.z.dot(g.origin));
     let point = (g.z.cross(dir) * d1 + dir.cross(f.z) * d2) / n2;
-    Ssi::Curves {
-        curves: vec![line_in_region(point, dir.normalized(), region)],
-        crossings: Vec::new(),
-    }
+    Ssi::Curves { curves: vec![line_in_region(point, dir.normalized(), region)], crossings: Vec::new() }
 }
 
 fn plane_cylinder_ellipse(f: &Frame, c: &Frame, radius: f64) -> SsiCurve {
@@ -272,12 +240,7 @@ fn plane_cylinder_ellipse(f: &Frame, c: &Frame, radius: f64) -> SsiCurve {
     let x = (a - n * dot).normalized();
     SsiCurve {
         curve: Curve::Ellipse {
-            frame: Frame {
-                origin: centre,
-                x,
-                y: n.cross(x),
-                z: n,
-            },
+            frame: Frame { origin: centre, x, y: n.cross(x), z: n },
             major: radius / dot.abs(),
             minor: radius,
         },
@@ -301,20 +264,11 @@ fn plane_cylinder(f: &Frame, c: &Frame, radius: f64, region: &Aabb) -> Ssi {
         } else {
             let half = (radius * radius - signed * signed).sqrt();
             let e = n.cross(a).normalized();
-            vec![
-                line_in_region(foot + e * half, a, region),
-                line_in_region(foot - e * half, a, region),
-            ]
+            vec![line_in_region(foot + e * half, a, region), line_in_region(foot - e * half, a, region)]
         };
-        return Ssi::Curves {
-            curves,
-            crossings: Vec::new(),
-        };
+        return Ssi::Curves { curves, crossings: Vec::new() };
     }
-    Ssi::Curves {
-        curves: vec![plane_cylinder_ellipse(f, c, radius)],
-        crossings: Vec::new(),
-    }
+    Ssi::Curves { curves: vec![plane_cylinder_ellipse(f, c, radius)], crossings: Vec::new() }
 }
 
 fn plane_cone(f: &Frame, cone: &Surface, region: &Aabb) -> Ssi {
@@ -339,21 +293,14 @@ fn plane_cone(f: &Frame, cone: &Surface, region: &Aabb) -> Ssi {
         let w = a.cross(e);
         let theta = q.clamp(-1.0, 1.0).acos();
         let ruling = |angle: f64| (e * angle.cos() + w * angle.sin()) * sa + a * ca;
-        let reach = (region.max - apex).norm().max((region.min - apex).norm()) + 1.0;
-        let line = |dir: Vec3| SsiCurve {
-            curve: Curve::Line { origin: apex, dir },
-            closed: false,
-            t0: 0.0,
-            t1: reach,
-        };
+        // Far enough to reach any point of the region from the apex.
+        let reach = apex.dist(region.center()) + region.diagonal() + 1.0;
+        let line = |dir: Vec3| SsiCurve { curve: Curve::Line { origin: apex, dir }, closed: false, t0: 0.0, t1: reach };
         let mut curves = vec![line(ruling(theta))];
         if theta > 1e-7 && theta < PI - 1e-7 {
             curves.push(line(ruling(-theta)));
         }
-        return Ssi::Curves {
-            curves,
-            crossings: Vec::new(),
-        };
+        return Ssi::Curves { curves, crossings: Vec::new() };
     }
 
     // Dandelin: both ends of the major axis lie on rulings in the meridian plane
@@ -378,16 +325,7 @@ fn plane_cone(f: &Frame, cone: &Surface, region: &Aabb) -> Ssi {
     let minor = (rho * rho - d * d).max(0.0).sqrt();
     Ssi::Curves {
         curves: vec![SsiCurve {
-            curve: Curve::Ellipse {
-                frame: Frame {
-                    origin: centre,
-                    x,
-                    y: n.cross(x),
-                    z: n,
-                },
-                major,
-                minor,
-            },
+            curve: Curve::Ellipse { frame: Frame { origin: centre, x, y: n.cross(x), z: n }, major, minor },
             closed: true,
             t0: 0.0,
             t1: TAU,
@@ -467,14 +405,12 @@ pub fn intersect(a: &Surface, b: &Surface, region: &Aabb) -> Ssi {
     }
     match (a, b) {
         (Surface::Plane(f), Surface::Plane(g)) => plane_plane(f, g, region),
-        (Surface::Plane(f), Surface::Cylinder { frame, radius }) | (Surface::Cylinder { frame, radius }, Surface::Plane(f)) => {
-            plane_cylinder(f, frame, *radius, region)
-        }
+        (Surface::Plane(f), Surface::Cylinder { frame, radius })
+        | (Surface::Cylinder { frame, radius }, Surface::Plane(f)) => plane_cylinder(f, frame, *radius, region),
         (Surface::Plane(f), Surface::Cone { .. }) => plane_cone(f, b, region),
         (Surface::Cone { .. }, Surface::Plane(f)) => plane_cone(f, a, region),
-        (Surface::Plane(f), Surface::Torus { frame, major, minor }) | (Surface::Torus { frame, major, minor }, Surface::Plane(f)) => {
-            plane_torus(f, frame, *major, *minor, size)
-        }
+        (Surface::Plane(f), Surface::Torus { frame, major, minor })
+        | (Surface::Torus { frame, major, minor }, Surface::Plane(f)) => plane_torus(f, frame, *major, *minor, size),
         (Surface::Cylinder { frame: f, radius: r }, Surface::Cylinder { frame: g, radius: s }) => {
             cylinder_cylinder(f, *r, g, *s, region)
         }
@@ -654,16 +590,11 @@ fn contour_at(
                 // the point is on the faces being intersected. Elsewhere, any pairing
                 // will do, because those pieces get discarded.
                 let centre = corner(i, j) + v2(dx / 2.0, dy / 2.0);
-                let at = critical_point(a, chart, b, centre, 2.0 * dx.hypot(dy))
-                    .map_or(centre, |(uv, _)| uv);
+                let at = critical_point(a, chart, b, centre, 2.0 * dx.hypot(dy)).map_or(centre, |(uv, _)| uv);
                 if relevant(b.project(a.from_chart(chart, at))) {
-                    return Err(Trouble::TooCoarse(format!(
-                        "{} and {} intersect near a tangency",
-                        a.name(),
-                        b.name()
-                    )));
+                    return Err(Trouble::TooCoarse(format!("{} and {} intersect near a tangency", a.name(), b.name())));
                 }
-                for pair in found.chunks_exact(2) {
+                for pair in found.as_chunks::<2>().0 {
                     links.entry(pair[0]).or_default().push(pair[1]);
                     links.entry(pair[1]).or_default().push(pair[0]);
                 }
@@ -767,12 +698,7 @@ fn contour_at(
         }
         let curve = sampled_from_points(points, a, b).map_err(Trouble::Fatal)?;
         let n = curve_len(&curve);
-        out.push(SsiCurve {
-            curve,
-            closed,
-            t0: 0.0,
-            t1: (n - 1) as f64,
-        });
+        out.push(SsiCurve { curve, closed, t0: 0.0, t1: (n - 1) as f64 });
     }
     Ok(out)
 }
@@ -784,12 +710,16 @@ fn curve_len(c: &Curve) -> usize {
     }
 }
 
-/// Builds a sampled curve, computing tangents from the two surfaces.
-pub fn sampled_from_points(points: Vec<Vec3>, a: &Surface, b: &Surface) -> Result<Curve> {
-    let n = points.len();
-    let mut tangents = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = a.normal(points[i]).cross(b.normal(points[i]));
+/// Largest turn between neighbouring samples. Everything that uses a sampled curve,
+/// from volume integrals to mesh edges, needs samples dense enough to follow it.
+const MAX_SAMPLE_TURN: f64 = 12.0 * PI / 180.0;
+
+/// Tangents along a sampled curve. The cross product of the two normals is continuous
+/// along a smooth curve and never vanishes, so one sign fits the whole curve.
+fn curve_tangents(points: &[Vec3], a: &Surface, b: &Surface) -> Result<Vec<Vec3>> {
+    let mut tangents = Vec::with_capacity(points.len());
+    for &p in points {
+        let t = a.normal(p).cross(b.normal(p));
         if t.norm() < 1e-7 {
             return Err(Error::NearDegenerate(format!(
                 "{} and {} are tangent along their intersection",
@@ -797,14 +727,51 @@ pub fn sampled_from_points(points: Vec<Vec3>, a: &Surface, b: &Surface) -> Resul
                 b.name()
             )));
         }
-        // Point the tangent along the direction of travel.
-        let along = if i + 1 < n { points[i + 1] - points[i] } else { points[i] - points[i - 1] };
-        let t = t.normalized();
-        tangents.push(if t.dot(along) >= 0.0 { t } else { -t });
+        tangents.push(t.normalized());
     }
-    Ok(Curve::Sampled(Arc::new(SampledCurve {
-        points,
-        tangents,
-        surfaces: (*a, *b),
-    })))
+    let mut agreement = 0.0;
+    for (w, t) in points.windows(2).zip(&tangents) {
+        agreement += (w[1] - w[0]).dot(*t);
+    }
+    if agreement < 0.0 {
+        for t in &mut tangents {
+            *t = -*t;
+        }
+    }
+    Ok(tangents)
+}
+
+/// Builds a sampled curve through points on both surfaces, adding points wherever the
+/// curve turns too fast between samples. Tight spots such as the tip of a hyperbola on
+/// a slender cone can be far smaller than anything the tracer's grid sees.
+pub fn sampled_from_points(points: Vec<Vec3>, a: &Surface, b: &Surface) -> Result<Curve> {
+    let mut points = points;
+    let limit = MAX_SAMPLE_TURN.cos();
+    for _pass in 0..8 {
+        let tangents = curve_tangents(&points, a, b)?;
+        let mut denser = Vec::with_capacity(points.len());
+        let mut changed = false;
+        for i in 0..points.len() - 1 {
+            denser.push(points[i]);
+            let (p, q) = (points[i], points[i + 1]);
+            let chord = p.dist(q);
+            if tangents[i].dot(tangents[i + 1]) < limit && chord > 1e-5 {
+                // Cubic Hermite midpoint, snapped back onto both surfaces.
+                let mid = (p + q) * 0.5 + (tangents[i] - tangents[i + 1]) * (chord / 8.0);
+                if let Some(m) = refine_on_two(a, b, mid) {
+                    if m.dist(p) > 1e-6 && m.dist(q) > 1e-6 {
+                        denser.push(m);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        denser.push(points[points.len() - 1]);
+        points = denser;
+        if !changed {
+            break;
+        }
+    }
+    let tangents = curve_tangents(&points, a, b)?;
+    Ok(Curve::Sampled(Arc::new(SampledCurve { points, tangents, surfaces: (*a, *b) })))
 }

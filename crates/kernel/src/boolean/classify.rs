@@ -79,12 +79,7 @@ impl<'a> Index<'a> {
         for b in &face_boxes {
             bounds.union(b);
         }
-        Index {
-            body,
-            edge_boxes,
-            face_boxes,
-            bounds,
-        }
+        Index { body, edge_boxes, face_boxes, bounds }
     }
 
     /// Locates a point relative to a face. A point farther than `tol` from the
@@ -176,11 +171,7 @@ impl<'a> Index<'a> {
 
 fn ray_hits_box(p: Vec3, d: Vec3, b: &Aabb) -> bool {
     let (mut lo, mut hi) = (0.0f64, f64::INFINITY);
-    for (o, v, min, max) in [
-        (p.x, d.x, b.min.x, b.max.x),
-        (p.y, d.y, b.min.y, b.max.y),
-        (p.z, d.z, b.min.z, b.max.z),
-    ] {
+    for (o, v, min, max) in [(p.x, d.x, b.min.x, b.max.x), (p.y, d.y, b.min.y, b.max.y), (p.z, d.z, b.min.z, b.max.z)] {
         if v.abs() < 1e-300 {
             if o < min || o > max {
                 return false;

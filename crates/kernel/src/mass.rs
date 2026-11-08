@@ -159,11 +159,13 @@ pub fn mass_properties(body: &Body) -> MassProps {
     out
 }
 
+/// Flux contribution to the volume, and area, of each face, about a reference point.
+pub fn per_face(body: &Body, reference: Vec3) -> Vec<(f64, f64)> {
+    body.faces.iter().map(|f| face_integrals(body, f, reference)).collect()
+}
+
 /// Signed volume of one shell. Positive encloses material, negative is a void.
 pub fn shell_volume(body: &Body, shell: usize) -> f64 {
     let reference = body.aabb().center();
-    body.shells[shell]
-        .iter()
-        .map(|&f| face_integrals(body, &body.faces[f], reference).0)
-        .sum()
+    body.shells[shell].iter().map(|&f| face_integrals(body, &body.faces[f], reference).0).sum()
 }

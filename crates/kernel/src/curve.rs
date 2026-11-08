@@ -13,11 +13,7 @@ pub enum Curve {
     /// `t` is the angle in the frame's XY plane.
     Circle { frame: Frame, radius: f64 },
     /// `t` is the eccentric angle.
-    Ellipse {
-        frame: Frame,
-        major: f64,
-        minor: f64,
-    },
+    Ellipse { frame: Frame, major: f64, minor: f64 },
     /// `t` runs over `[0, n-1]`, one unit per sample.
     Sampled(Arc<SampledCurve>),
 }
@@ -73,21 +69,14 @@ impl SampledCurve {
     pub fn speed_bound(&self) -> f64 {
         // A cubic Hermite segment with tangent lengths equal to its chord has
         // speed at most 1.5 * chord, plus a margin for the snap to the surfaces.
-        let chord = self
-            .points
-            .windows(2)
-            .map(|w| w[0].dist(w[1]))
-            .fold(0.0, f64::max);
+        let chord = self.points.windows(2).map(|w| w[0].dist(w[1])).fold(0.0, f64::max);
         chord * 1.6
     }
 }
 
 impl Curve {
     pub fn line_through(a: Vec3, b: Vec3) -> Curve {
-        Curve::Line {
-            origin: a,
-            dir: (b - a).normalized(),
-        }
+        Curve::Line { origin: a, dir: (b - a).normalized() }
     }
 
     pub fn eval(&self, t: f64) -> Vec3 {
@@ -97,11 +86,7 @@ impl Curve {
                 let (s, c) = t.sin_cos();
                 frame.origin + frame.x * (radius * c) + frame.y * (radius * s)
             }
-            Curve::Ellipse {
-                frame,
-                major,
-                minor,
-            } => {
+            Curve::Ellipse { frame, major, minor } => {
                 let (s, c) = t.sin_cos();
                 frame.origin + frame.x * (major * c) + frame.y * (minor * s)
             }
@@ -117,11 +102,7 @@ impl Curve {
                 let (s, c) = t.sin_cos();
                 frame.y * (radius * c) - frame.x * (radius * s)
             }
-            Curve::Ellipse {
-                frame,
-                major,
-                minor,
-            } => {
+            Curve::Ellipse { frame, major, minor } => {
                 let (s, c) = t.sin_cos();
                 frame.y * (minor * c) - frame.x * (major * s)
             }
@@ -212,23 +193,11 @@ impl Curve {
     /// Rigidly transforms the curve.
     pub fn transformed(&self, t: &Frame) -> Curve {
         match self {
-            Curve::Line { origin, dir } => Curve::Line {
-                origin: t.to_world(*origin),
-                dir: t.dir_to_world(*dir),
-            },
-            Curve::Circle { frame, radius } => Curve::Circle {
-                frame: t.compose(frame),
-                radius: *radius,
-            },
-            Curve::Ellipse {
-                frame,
-                major,
-                minor,
-            } => Curve::Ellipse {
-                frame: t.compose(frame),
-                major: *major,
-                minor: *minor,
-            },
+            Curve::Line { origin, dir } => Curve::Line { origin: t.to_world(*origin), dir: t.dir_to_world(*dir) },
+            Curve::Circle { frame, radius } => Curve::Circle { frame: t.compose(frame), radius: *radius },
+            Curve::Ellipse { frame, major, minor } => {
+                Curve::Ellipse { frame: t.compose(frame), major: *major, minor: *minor }
+            }
             Curve::Sampled(c) => Curve::Sampled(Arc::new(SampledCurve {
                 points: c.points.iter().map(|p| t.to_world(*p)).collect(),
                 tangents: c.tangents.iter().map(|d| t.dir_to_world(*d)).collect(),
@@ -247,15 +216,8 @@ mod tests {
         let f = Frame::new(v3(1.0, 2.0, 3.0), v3(0.2, 0.3, 1.0), Vec3::X);
         let curves = [
             Curve::line_through(v3(0.0, 0.0, 0.0), v3(1.0, 2.0, 3.0)),
-            Curve::Circle {
-                frame: f,
-                radius: 3.0,
-            },
-            Curve::Ellipse {
-                frame: f,
-                major: 5.0,
-                minor: 2.0,
-            },
+            Curve::Circle { frame: f, radius: 3.0 },
+            Curve::Ellipse { frame: f, major: 5.0, minor: 2.0 },
         ];
         for c in &curves {
             for i in 0..20 {
@@ -270,10 +232,7 @@ mod tests {
 
     #[test]
     fn closest_point_on_arc_respects_the_interval() {
-        let c = Curve::Circle {
-            frame: Frame::WORLD,
-            radius: 2.0,
-        };
+        let c = Curve::Circle { frame: Frame::WORLD, radius: 2.0 };
         let (t, d) = c.closest(v3(0.0, 3.0, 0.0), 0.0, PI);
         assert!((t - PI / 2.0).abs() < 1e-12 && (d - 1.0).abs() < 1e-12);
         // The point lies beyond the end of the arc, so an endpoint must win.

@@ -12,11 +12,7 @@ pub fn write_binary(mesh: &Mesh, name: &str) -> Vec<u8> {
     out.extend_from_slice(&header);
     out.extend_from_slice(&(mesh.triangles.len() as u32).to_le_bytes());
     for t in &mesh.triangles {
-        let (a, b, c) = (
-            mesh.positions[t[0] as usize],
-            mesh.positions[t[1] as usize],
-            mesh.positions[t[2] as usize],
-        );
+        let (a, b, c) = (mesh.positions[t[0] as usize], mesh.positions[t[1] as usize], mesh.positions[t[2] as usize]);
         let n = (b - a).cross(c - a);
         let n = if n.norm() > 0.0 { n.normalized() } else { n };
         for v in [n, a, b, c] {
@@ -34,11 +30,7 @@ pub fn write_ascii(mesh: &Mesh, name: &str) -> String {
     use std::fmt::Write;
     let mut s = format!("solid {name}\n");
     for t in &mesh.triangles {
-        let (a, b, c) = (
-            mesh.positions[t[0] as usize],
-            mesh.positions[t[1] as usize],
-            mesh.positions[t[2] as usize],
-        );
+        let (a, b, c) = (mesh.positions[t[0] as usize], mesh.positions[t[1] as usize], mesh.positions[t[2] as usize]);
         let n = (b - a).cross(c - a);
         let n = if n.norm() > 0.0 { n.normalized() } else { n };
         let _ = writeln!(s, "  facet normal {} {} {}\n    outer loop", n.x, n.y, n.z);

@@ -40,7 +40,8 @@ fn extras() -> Vec<(&'static str, Result<Body>)> {
         let plate = box_solid(&Frame::translation(v3(-20.0, -20.0, 0.0)), 40.0, 40.0, 5.0, 1).unwrap();
         let boss = cylinder(&Frame::translation(v3(0.0, 0.0, 5.0)), 6.0, 10.0, 2).unwrap();
         let t = union(&plate, &boss).unwrap();
-        let foot = t.edges_where(|i, _| (t.edge_midpoint(i).z - 5.0).abs() < 1e-9 && t.edge_is_arc_of_radius(i, 6.0))[0];
+        let foot =
+            t.edges_where(|i, _| (t.edge_midpoint(i).z - 5.0).abs() < 1e-9 && t.edge_is_arc_of_radius(i, 6.0))[0];
         fillet(&t, &[foot], 2.0, 3)
     };
     let chamfered_rim = {
@@ -93,7 +94,11 @@ fn main() {
         std::fs::write(format!("{dir}/{name}.step"), coreshape::export::step::write_step(body, name)).unwrap();
         let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal())).unwrap();
         std::fs::write(format!("{dir}/{name}.stl"), coreshape::export::stl::write_binary(&mesh, name)).unwrap();
-        let _ = writeln!(manifest, "{name},{},{},{},{},{},{}", props.volume, props.area, report.faces, report.edges, report.vertices, report.shells);
+        let _ = writeln!(
+            manifest,
+            "{name},{},{},{},{},{},{}",
+            props.volume, props.area, report.faces, report.edges, report.vertices, report.shells
+        );
     }
     std::fs::write(format!("{dir}/manifest.csv"), manifest).unwrap();
     println!("wrote {} models to {dir}", bodies.len());

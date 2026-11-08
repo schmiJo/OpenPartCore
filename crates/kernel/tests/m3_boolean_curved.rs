@@ -8,7 +8,11 @@ fn vol(b: &Body) -> f64 {
 }
 
 fn close(a: f64, b: f64, rel: f64, what: &str) {
-    assert!((a - b).abs() <= rel * b.abs().max(1.0), "{what}: got {a}, expected {b} (rel {:e})", (a - b).abs() / b.abs());
+    assert!(
+        (a - b).abs() <= rel * b.abs().max(1.0),
+        "{what}: got {a}, expected {b} (rel {:e})",
+        (a - b).abs() / b.abs()
+    );
 }
 
 fn z_at(z: f64) -> Frame {
@@ -268,6 +272,18 @@ fn cone_cut_by_planes() {
     close(vol(&d), PI * 16.0 * 8.0 / 6.0, 1e-10, "other half cone");
 }
 
+/// Regression: the ruling from the apex was clipped short at larger scales, leaving
+/// the cone uncut. Found by the browser self test at r = 25, h = 45.
+#[test]
+fn axial_cone_cut_works_at_any_scale() {
+    for (r, h) in [(0.5, 0.9), (4.0, 8.0), (25.0, 45.0), (25.0, 50.0), (300.0, 700.0)] {
+        let c = cone_frustum(&Frame::WORLD, r, 0.0, h, 1).unwrap();
+        let half = box_solid(&Frame::translation(v3(0.0, -2.0 * r, -1.0)), 2.0 * r, 4.0 * r, h + 2.0, 2).unwrap();
+        let d = subtract(&c, &half).unwrap_or_else(|e| panic!("r={r} h={h}: {e}"));
+        close(vol(&d), PI * r * r * h / 6.0, 1e-10, "half cone");
+    }
+}
+
 #[test]
 fn oblique_plane_cut_makes_an_ellipse_on_cylinders_and_cones() {
     let c = cylinder(&z_at(-10.0), 2.0, 20.0, 1).unwrap();
@@ -330,14 +346,8 @@ fn general_curved_pairs() {
 
 #[test]
 fn flange_with_bolt_circle() {
-    let w = Wire::polygon(&[
-        v2(13.0, 0.0),
-        v2(50.0, 0.0),
-        v2(50.0, 12.0),
-        v2(25.0, 12.0),
-        v2(25.0, 40.0),
-        v2(13.0, 40.0),
-    ]);
+    let w =
+        Wire::polygon(&[v2(13.0, 0.0), v2(50.0, 0.0), v2(50.0, 12.0), v2(25.0, 12.0), v2(25.0, 40.0), v2(13.0, 40.0)]);
     let mut flange = revolve(&Profile::new(w), &Frame::WORLD, TAU, 1).unwrap();
     let start = vol(&flange);
     let n = 6;
@@ -401,6 +411,27 @@ fn internally_tangent_sphere_and_cylinder_refuses_rather_than_lies() {
             let v = mass_properties(&d).volume;
             let i = intersect(&a, &b).unwrap();
             close(v + mass_properties(&i).volume, mass_properties(&a).volume, 1e-7, "tangent bore");
+        }
+    }
+}
+
+/// Regression from fuzzing (GeneralPrimitives seed 4564): a plane cuts a slender cone
+/// near its apex in a tight hyperbola. Sampling it at the grid's spacing put a wrong
+/// value of about 4e-4 relative into the volume, which the identities caught.
+#[test]
+fn tight_hyperbola_on_a_slender_cone_keeps_exact_volumes() {
+    use coreshape::fuzz::{make_shape, Category};
+    let category = Category::GeneralPrimitives;
+    let mut rng = Rng::new(4564 ^ ((category as u64 + 1) << 40));
+    let a = make_shape(category, &mut rng).unwrap();
+    let b = make_shape(category, &mut rng).unwrap();
+    all_ops(&a, &b, "tight hyperbola");
+    let d = subtract(&a, &b).unwrap();
+    for e in &d.edges {
+        if let Curve::Sampled(c) = &e.curve {
+            for w in c.tangents.windows(2) {
+                assert!(w[0].dot(w[1]) > 0.97, "samples turn too far");
+            }
         }
     }
 }

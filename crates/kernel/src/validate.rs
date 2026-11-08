@@ -84,10 +84,7 @@ fn check_edge_use(body: &Body, errors: &mut Vec<String>) {
         match uses.as_slice() {
             [a, b] => {
                 if a.3 == b.3 {
-                    errors.push(format!(
-                        "edge {i} is used twice in the same direction (faces {} and {})",
-                        a.0, b.0
-                    ));
+                    errors.push(format!("edge {i} is used twice in the same direction (faces {} and {})", a.0, b.0));
                 }
             }
             _ => errors.push(format!("edge {i} is used by {} coedges, not 2", uses.len())),
@@ -169,9 +166,7 @@ fn check_euler(body: &Body, errors: &mut Vec<String>) -> Vec<usize> {
         // V - E + F - H = 2(1 - G) for one closed orientable shell.
         let chi = v - e + f - holes;
         if chi % 2 != 0 || chi > 2 {
-            errors.push(format!(
-                "shell {s} fails Euler-Poincare: V={v} E={e} F={f} H={holes}, chi={chi}"
-            ));
+            errors.push(format!("shell {s} fails Euler-Poincare: V={v} E={e} F={f} H={holes}, chi={chi}"));
             genus.push(0);
         } else {
             genus.push(((2 - chi) / 2) as usize);
@@ -179,10 +174,7 @@ fn check_euler(body: &Body, errors: &mut Vec<String>) -> Vec<usize> {
     }
     let total: usize = body.shells.iter().map(Vec::len).sum();
     if total != body.faces.len() {
-        errors.push(format!(
-            "shells list {total} faces but the body has {}",
-            body.faces.len()
-        ));
+        errors.push(format!("shells list {total} faces but the body has {}", body.faces.len()));
     }
     genus
 }
@@ -209,11 +201,7 @@ fn check_geometry(body: &Body, errors: &mut Vec<String>) {
                     let p = body.coedge_point(c, k as f64 / 4.0);
                     let d = face.surface.sdf(p).abs();
                     if d > GEOM_TOL {
-                        errors.push(format!(
-                            "edge {} is {d:e} off the {} of face {f}",
-                            c.edge,
-                            face.surface.name()
-                        ));
+                        errors.push(format!("edge {} is {d:e} off the {} of face {f}", c.edge, face.surface.name()));
                         break;
                     }
                 }

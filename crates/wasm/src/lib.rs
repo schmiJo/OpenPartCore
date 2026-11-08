@@ -83,14 +83,15 @@ pub extern "C" fn cs_catalog() -> *const u8 {
                     }
                     let _ = write!(
                         s,
-                        "{{\"key\":{},\"label\":{},\"unit\":{},\"min\":{},\"max\":{},\"step\":{},\"value\":{}}}",
+                        "{{\"key\":{},\"label\":{},\"unit\":{},\"min\":{},\"max\":{},\"step\":{},\"value\":{},\"choices\":[{}]}}",
                         json_str(p.key),
                         json_str(p.label),
                         json_str(p.unit),
                         p.min,
                         p.max,
                         p.step,
-                        p.default
+                        p.default,
+                        p.choices.iter().map(|c| json_str(c)).collect::<Vec<_>>().join(",")
                     );
                 }
                 s.push_str("]}");
@@ -226,7 +227,7 @@ fn fill(out: &mut Output, outcome: &Outcome) {
     let genus: Vec<String> = report.genus.iter().map(|g| g.to_string()).collect();
     let bounds = mesh.bounds();
     out.info = format!(
-        "{{\"ok\":true,{head},\"volume\":{},\"area\":{},\"vertices\":{},\"edges\":{},\"faces\":{},\"shells\":{},\"genus\":[{}],\"kinds\":[{},{},{},{},{}],\"triangles\":{},\"openEdges\":{},\"bounds\":[{},{},{},{},{},{}]}}",
+        "{{\"ok\":true,{head},\"volume\":{},\"area\":{},\"vertices\":{},\"edges\":{},\"faces\":{},\"shells\":{},\"genus\":[{}],\"kinds\":[{},{},{},{},{}],\"triangles\":{},\"openEdges\":{},\"contacts\":{},\"bounds\":[{},{},{},{},{},{}]}}",
         m.volume,
         m.area,
         report.vertices,
@@ -241,6 +242,7 @@ fn fill(out: &mut Output, outcome: &Outcome) {
         kinds[4],
         mesh.triangles.len(),
         mesh.open_edge_count(),
+        body.contact_vertices(),
         bounds.min.x,
         bounds.min.y,
         bounds.min.z,

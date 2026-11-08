@@ -19,10 +19,7 @@ pub struct Coedge {
 
 impl Coedge {
     pub fn flipped(self) -> Coedge {
-        Coedge {
-            edge: self.edge,
-            reversed: !self.reversed,
-        }
+        Coedge { edge: self.edge, reversed: !self.reversed }
     }
 }
 
@@ -115,22 +112,9 @@ impl Body {
     /// parameter `tb`, and returns the coedge pointing from `a` to `b`.
     pub fn add_edge(&mut self, curve: Curve, ta: f64, tb: f64, a: usize, b: usize) -> Coedge {
         let reversed = ta > tb;
-        let (t0, t1, v0, v1) = if reversed {
-            (tb, ta, b, a)
-        } else {
-            (ta, tb, a, b)
-        };
-        self.edges.push(Edge {
-            curve,
-            t0,
-            t1,
-            v0,
-            v1,
-        });
-        Coedge {
-            edge: self.edges.len() - 1,
-            reversed,
-        }
+        let (t0, t1, v0, v1) = if reversed { (tb, ta, b, a) } else { (ta, tb, a, b) };
+        self.edges.push(Edge { curve, t0, t1, v0, v1 });
+        Coedge { edge: self.edges.len() - 1, reversed }
     }
 
     pub fn start_vertex(&self, c: Coedge) -> usize {
@@ -197,13 +181,7 @@ impl Body {
     /// Adds a face and fits its chart to its boundary.
     pub fn add_face(&mut self, surface: Surface, flipped: bool, loops: Vec<Vec<Coedge>>, tag: FaceTag) -> usize {
         let chart = self.fit_face_chart(&surface, flipped, &loops);
-        self.faces.push(Face {
-            surface,
-            flipped,
-            chart,
-            loops,
-            tag,
-        });
+        self.faces.push(Face { surface, flipped, chart, loops, tag });
         self.faces.len() - 1
     }
 
@@ -249,6 +227,18 @@ impl Body {
             shells.push(shell);
         }
         self.shells = shells;
+    }
+
+    /// Number of points where the body touches itself: places a Boolean separated into
+    /// duplicate vertices because more than one fan of faces met there. A body with any
+    /// is valid and manifold as a model, but it would be a zero-thickness contact as a
+    /// physical part, so callers may want to warn about it.
+    pub fn contact_vertices(&self) -> usize {
+        let mut seen: std::collections::HashMap<[u64; 3], usize> = std::collections::HashMap::new();
+        for p in &self.vertices {
+            *seen.entry([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).or_insert(0) += 1;
+        }
+        seen.values().filter(|&&n| n > 1).count()
     }
 
     /// Rigidly transforms the body.
@@ -297,16 +287,11 @@ impl Body {
     /// Bounds of the face boundary in its chart.
     pub fn face_chart_bounds(&self, f: usize) -> (Vec2, Vec2) {
         let face = &self.faces[f];
-        let (mut lo, mut hi) = (
-            v2(f64::INFINITY, f64::INFINITY),
-            v2(f64::NEG_INFINITY, f64::NEG_INFINITY),
-        );
+        let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
         for lp in &face.loops {
             for &c in lp {
                 for i in 0..=16 {
-                    let uv = face
-                        .surface
-                        .to_chart(&face.chart, self.coedge_point(c, i as f64 / 16.0));
+                    let uv = face.surface.to_chart(&face.chart, self.coedge_point(c, i as f64 / 16.0));
                     lo = v2(lo.x.min(uv.x), lo.y.min(uv.y));
                     hi = v2(hi.x.max(uv.x), hi.y.max(uv.y));
                 }

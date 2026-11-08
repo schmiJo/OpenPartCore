@@ -23,6 +23,7 @@ type Num = Arc<dyn Fn(&[f64]) -> f64 + Send + Sync>;
 type FrameFn = Arc<dyn Fn(&[f64]) -> Frame + Send + Sync>;
 type ProfilesFn = Arc<dyn Fn(&[f64]) -> Result<Vec<Profile>> + Send + Sync>;
 type EdgeFilter = Arc<dyn Fn(&Body, usize, &[f64]) -> bool + Send + Sync>;
+type BodyFn = Arc<dyn Fn(&[f64]) -> Result<Body> + Send + Sync>;
 
 /// How a new solid combines with the body so far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,10 +42,7 @@ pub struct FaceRef {
 
 impl FaceRef {
     fn tag(self) -> FaceTag {
-        FaceTag {
-            feature: self.feature.0 as u32 + 1,
-            slot: self.slot,
-        }
+        FaceTag { feature: self.feature.0 as u32 + 1, slot: self.slot }
     }
 }
 
@@ -58,34 +56,22 @@ const REGION_SLOTS: u32 = 100_000;
 impl FeatureId {
     /// The cap an extrude or revolve starts from.
     pub fn start_cap(self) -> FaceRef {
-        FaceRef {
-            feature: self,
-            slot: SLOT_START_CAP,
-        }
+        FaceRef { feature: self, slot: SLOT_START_CAP }
     }
 
     /// The cap an extrude or revolve ends at.
     pub fn end_cap(self) -> FaceRef {
-        FaceRef {
-            feature: self,
-            slot: SLOT_END_CAP,
-        }
+        FaceRef { feature: self, slot: SLOT_END_CAP }
     }
 
     /// The face swept from a segment of the sketch.
     pub fn side(self, segment: u32) -> FaceRef {
-        FaceRef {
-            feature: self,
-            slot: SLOT_SEG_BASE + segment,
-        }
+        FaceRef { feature: self, slot: SLOT_SEG_BASE + segment }
     }
 
     /// The face swept from a segment of one region of a sketch with several regions.
     pub fn side_in_region(self, region: u32, segment: u32) -> FaceRef {
-        FaceRef {
-            feature: self,
-            slot: SLOT_SEG_BASE + segment + region * REGION_SLOTS,
-        }
+        FaceRef { feature: self, slot: SLOT_SEG_BASE + segment + region * REGION_SLOTS }
     }
 }
 
@@ -132,29 +118,12 @@ impl EdgeQuery {
 
 #[derive(Clone)]
 enum Op {
-    Sketch {
-        frame: FrameFn,
-        profiles: ProfilesFn,
-    },
-    Extrude {
-        sketch: FeatureId,
-        start: Num,
-        length: Num,
-        mode: Mode,
-    },
-    Revolve {
-        sketch: FeatureId,
-        angle: Num,
-        mode: Mode,
-    },
-    Fillet {
-        edges: EdgeQuery,
-        radius: Num,
-    },
-    Chamfer {
-        edges: EdgeQuery,
-        distance: Num,
-    },
+    Sketch { frame: FrameFn, profiles: ProfilesFn },
+    Extrude { sketch: FeatureId, start: Num, length: Num, mode: Mode },
+    Revolve { sketch: FeatureId, angle: Num, mode: Mode },
+    Fillet { edges: EdgeQuery, radius: Num },
+    Chamfer { edges: EdgeQuery, distance: Num },
+    Custom { build: BodyFn },
 }
 
 #[derive(Clone)]
@@ -225,10 +194,7 @@ impl History {
     fn push(&mut self, kind: &str, op: Op) -> FeatureId {
         // Named the way people read them: Sketch 1, Extrude 2, Fillet 1.
         let count = self.features.iter().filter(|f| f.name.starts_with(kind)).count();
-        self.features.push(Feature {
-            name: format!("{kind} {}", count + 1),
-            op,
-        });
+        self.features.push(Feature { name: format!("{kind} {}", count + 1), op });
         self.cache.push(None);
         FeatureId(self.features.len() - 1)
     }
@@ -247,13 +213,7 @@ impl History {
         frame: impl Fn(&[f64]) -> Frame + Send + Sync + 'static,
         profiles: impl Fn(&[f64]) -> Result<Vec<Profile>> + Send + Sync + 'static,
     ) -> FeatureId {
-        self.push(
-            "Sketch",
-            Op::Sketch {
-                frame: Arc::new(frame),
-                profiles: Arc::new(profiles),
-            },
-        )
+        self.push("Sketch", Op::Sketch { frame: Arc::new(frame), profiles: Arc::new(profiles) })
     }
 
     /// Extrudes a sketch along its normal, starting `start` from the sketch plane and
@@ -265,48 +225,31 @@ impl History {
         length: impl Fn(&[f64]) -> f64 + Send + Sync + 'static,
         mode: Mode,
     ) -> FeatureId {
-        self.push(
-            "Extrude",
-            Op::Extrude {
-                sketch,
-                start: num(start),
-                length: num(length),
-                mode,
-            },
-        )
+        self.push("Extrude", Op::Extrude { sketch, start: num(start), length: num(length), mode })
     }
 
     /// Revolves a sketch about its frame's Z axis. Profile x is the distance from the
     /// axis and profile y the height along it.
-    pub fn revolve(&mut self, sketch: FeatureId, angle: impl Fn(&[f64]) -> f64 + Send + Sync + 'static, mode: Mode) -> FeatureId {
-        self.push(
-            "Revolve",
-            Op::Revolve {
-                sketch,
-                angle: num(angle),
-                mode,
-            },
-        )
+    pub fn revolve(
+        &mut self,
+        sketch: FeatureId,
+        angle: impl Fn(&[f64]) -> f64 + Send + Sync + 'static,
+        mode: Mode,
+    ) -> FeatureId {
+        self.push("Revolve", Op::Revolve { sketch, angle: num(angle), mode })
     }
 
     pub fn fillet(&mut self, edges: EdgeQuery, radius: impl Fn(&[f64]) -> f64 + Send + Sync + 'static) -> FeatureId {
-        self.push(
-            "Fillet",
-            Op::Fillet {
-                edges,
-                radius: num(radius),
-            },
-        )
+        self.push("Fillet", Op::Fillet { edges, radius: num(radius) })
     }
 
     pub fn chamfer(&mut self, edges: EdgeQuery, distance: impl Fn(&[f64]) -> f64 + Send + Sync + 'static) -> FeatureId {
-        self.push(
-            "Chamfer",
-            Op::Chamfer {
-                edges,
-                distance: num(distance),
-            },
-        )
+        self.push("Chamfer", Op::Chamfer { edges, distance: num(distance) })
+    }
+
+    /// A body computed directly from the parameters, replacing the body so far.
+    pub fn custom(&mut self, build: impl Fn(&[f64]) -> Result<Body> + Send + Sync + 'static) -> FeatureId {
+        self.push("Solid", Op::Custom { build: Arc::new(build) })
     }
 
     /// Rebuilds through feature `upto` (all of them when `None`), reusing every step
@@ -326,20 +269,12 @@ impl History {
             let feature = self.features[i].clone();
             let kind = kind_of(&feature.op);
             if i >= last {
-                steps.push(Step {
-                    name: feature.name,
-                    kind,
-                    state: StepState::RolledBack,
-                });
+                steps.push(Step { name: feature.name, kind, state: StepState::RolledBack });
                 continue;
             }
             if failed.is_some() {
                 self.cache[i] = None;
-                steps.push(Step {
-                    name: feature.name,
-                    kind,
-                    state: StepState::Blocked,
-                });
+                steps.push(Step { name: feature.name, kind, state: StepState::Blocked });
                 continue;
             }
             let signature = signature_of(&feature.op, params);
@@ -356,11 +291,7 @@ impl History {
                 if !is_sketch {
                     body = self.cache[i].as_ref().unwrap().body.clone();
                 }
-                steps.push(Step {
-                    name: feature.name,
-                    kind,
-                    state: StepState::Reused,
-                });
+                steps.push(Step { name: feature.name, kind, state: StepState::Reused });
                 continue;
             }
             match self.run_step(i, &feature.op, params, body.clone()) {
@@ -372,25 +303,13 @@ impl History {
                             body_changed = true;
                         }
                     }
-                    self.cache[i] = Some(Cached {
-                        signature,
-                        body: body.clone(),
-                        sketch,
-                    });
-                    steps.push(Step {
-                        name: feature.name,
-                        kind,
-                        state: StepState::Rebuilt,
-                    });
+                    self.cache[i] = Some(Cached { signature, body: body.clone(), sketch });
+                    steps.push(Step { name: feature.name, kind, state: StepState::Rebuilt });
                 }
                 Err(e) => {
                     self.cache[i] = None;
                     failed = Some(i);
-                    steps.push(Step {
-                        name: feature.name,
-                        kind,
-                        state: StepState::Failed(e.to_string()),
-                    });
+                    steps.push(Step { name: feature.name, kind, state: StepState::Failed(e.to_string()) });
                 }
             }
         }
@@ -420,17 +339,9 @@ impl History {
                 }
                 Ok((body, Some((frame(params), Arc::new(list)))))
             }
-            Op::Extrude {
-                sketch,
-                start,
-                length,
-                mode,
-            } => {
+            Op::Extrude { sketch, start, length, mode } => {
                 let (frame, list) = sketch_output(sketch)?;
-                let shifted = Frame {
-                    origin: frame.origin + frame.z * start(params),
-                    ..frame
-                };
+                let shifted = Frame { origin: frame.origin + frame.z * start(params), ..frame };
                 let h = length(params);
                 let tools = list
                     .iter()
@@ -459,6 +370,7 @@ impl History {
                 let list = resolve_edges(edges, &current, params)?;
                 Ok((Some(Arc::new(chamfer(&current, &list, distance(params), feature)?)), None))
             }
+            Op::Custom { build } => Ok((Some(Arc::new(build(params)?)), None)),
         }
     }
 }
@@ -470,6 +382,7 @@ fn kind_of(op: &Op) -> &'static str {
         Op::Revolve { .. } => "revolve",
         Op::Fillet { .. } => "fillet",
         Op::Chamfer { .. } => "chamfer",
+        Op::Custom { .. } => "solid",
     }
 }
 
@@ -481,6 +394,7 @@ fn signature_of(op: &Op, params: &[f64]) -> String {
         Op::Revolve { angle, .. } => format!("{:x}", angle(params).to_bits()),
         Op::Fillet { radius, .. } => format!("{:x}", radius(params).to_bits()),
         Op::Chamfer { distance, .. } => format!("{:x}", distance(params).to_bits()),
+        Op::Custom { .. } => format!("{params:?}"),
     }
 }
 
@@ -503,9 +417,7 @@ fn combine(body: Option<&Body>, tools: Vec<Body>, mode: Mode) -> Result<Body> {
             if mode != Mode::Add {
                 return Err(Error::InvalidInput("there is no body yet to cut from".into()));
             }
-            tools
-                .next()
-                .ok_or_else(|| Error::InvalidInput("the sketch has no closed regions".into()))?
+            tools.next().ok_or_else(|| Error::InvalidInput("the sketch has no closed regions".into()))?
         }
     };
     match mode {
@@ -542,9 +454,7 @@ fn resolve_edges(query: &EdgeQuery, body: &Body, params: &[f64]) -> Result<Vec<u
     list.sort_unstable();
     list.dedup();
     if list.is_empty() {
-        return Err(Error::InvalidInput(
-            "the edges this feature refers to no longer exist in the model".into(),
-        ));
+        return Err(Error::InvalidInput("the edges this feature refers to no longer exist in the model".into()));
     }
     Ok(list)
 }

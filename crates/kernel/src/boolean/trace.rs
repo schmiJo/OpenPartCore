@@ -110,7 +110,12 @@ fn prune_dangling(edges: &[Edge], half: &mut Vec<Coedge>) {
 
 /// Traces directed edges into faces. Returns one list of loops per face, with the
 /// outer loop first.
-pub fn trace_faces(fc: &FaceChart, edges: &[Edge], vertices: &[Vec3], half_edges: &[Coedge]) -> Result<Vec<Vec<Vec<Coedge>>>> {
+pub fn trace_faces(
+    fc: &FaceChart,
+    edges: &[Edge],
+    vertices: &[Vec3],
+    half_edges: &[Coedge],
+) -> Result<Vec<Vec<Vec<Coedge>>>> {
     let mut half: Vec<Coedge> = half_edges.to_vec();
     prune_dangling(edges, &mut half);
     if half.is_empty() {
@@ -235,12 +240,14 @@ pub fn trace_faces(fc: &FaceChart, edges: &[Edge], vertices: &[Vec3], half_edges
 /// the boundary. The boundary here is a polygon that cuts corners on curved edges, so
 /// a point close to it could be on the wrong side of the true curve. Candidates come
 /// from scanning across the region, and the ones with the most clearance win.
-pub fn interior_points(surface: &Surface, chart: &Chart, edges: &[Edge], loops: &[Vec<Coedge>], wanted: usize) -> Vec<Vec2> {
-    let fc = FaceChart {
-        surface,
-        chart,
-        flipped: false,
-    };
+pub fn interior_points(
+    surface: &Surface,
+    chart: &Chart,
+    edges: &[Edge],
+    loops: &[Vec<Coedge>],
+    wanted: usize,
+) -> Vec<Vec2> {
+    let fc = FaceChart { surface, chart, flipped: false };
     let polys: Vec<Vec<Vec2>> = loops.iter().map(|l| polygon_of(&fc, edges, l)).collect();
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for &p in polys.iter().flatten() {
@@ -275,7 +282,7 @@ pub fn interior_points(surface: &Surface, chart: &Chart, edges: &[Edge], loops: 
             }
         }
         xs.sort_by(f64::total_cmp);
-        for pair in xs.chunks_exact(2) {
+        for pair in xs.as_chunks::<2>().0 {
             // Not only span middles: a dangling contact edge can run right along a
             // line of symmetry, where every middle would land on it.
             for along in [0.5, 0.381966, 0.618034, 0.271, 0.729] {

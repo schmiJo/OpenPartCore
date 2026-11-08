@@ -19,11 +19,25 @@ fn main() {
         let mut seen: Vec<String> = Vec::new();
         for f in &s.faces {
             let d = match f.surface {
-                Surface::Plane(fr) => format!("plane n=({:.2} {:.2} {:.2}) d={:.2}", fr.z.x, fr.z.y, fr.z.z, fr.z.dot(fr.origin)),
-                Surface::Cylinder { frame, radius } => format!("cyl o=({:.2} {:.2} {:.2}) z=({:.2} {:.2} {:.2}) r={radius:.3}", frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z),
-                Surface::Cone { frame, radius, half_angle } => format!("cone o=({:.2} {:.2} {:.2}) z=({:.2} {:.2} {:.2}) r={radius:.3} a={:.3}", frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z, half_angle),
-                Surface::Sphere { frame, radius } => format!("sphere o=({:.2} {:.2} {:.2}) r={radius:.3}", frame.origin.x, frame.origin.y, frame.origin.z),
-                Surface::Torus { frame, major, minor } => format!("torus o=({:.2} {:.2} {:.2}) z=({:.2} {:.2} {:.2}) R={major:.3} r={minor:.3}", frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z),
+                Surface::Plane(fr) => {
+                    format!("plane n=({:.2} {:.2} {:.2}) d={:.2}", fr.z.x, fr.z.y, fr.z.z, fr.z.dot(fr.origin))
+                }
+                Surface::Cylinder { frame, radius } => format!(
+                    "cyl o=({:.2} {:.2} {:.2}) z=({:.2} {:.2} {:.2}) r={radius:.3}",
+                    frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z
+                ),
+                Surface::Cone { frame, radius, half_angle } => format!(
+                    "cone o=({:.2} {:.2} {:.2}) z=({:.2} {:.2} {:.2}) r={radius:.3} a={:.3}",
+                    frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z, half_angle
+                ),
+                Surface::Sphere { frame, radius } => format!(
+                    "sphere o=({:.2} {:.2} {:.2}) r={radius:.3}",
+                    frame.origin.x, frame.origin.y, frame.origin.z
+                ),
+                Surface::Torus { frame, major, minor } => format!(
+                    "torus o=({:.2} {:.2} {:.2}) z=({:.2} {:.2} {:.2}) R={major:.3} r={minor:.3}",
+                    frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z
+                ),
             };
             if !d.starts_with("plane") && !seen.contains(&d) {
                 println!("  {n} {d}");
@@ -31,7 +45,10 @@ fn main() {
             }
         }
         let bb = s.aabb();
-        println!("  {n} box ({:.2} {:.2} {:.2}) ({:.2} {:.2} {:.2})", bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z);
+        println!(
+            "  {n} box ({:.2} {:.2} {:.2}) ({:.2} {:.2} {:.2})",
+            bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z
+        );
     }
     for op in [BoolOp::Union, BoolOp::Subtract, BoolOp::Intersect] {
         match coreshape::boolean::boolean(&a, &b, op) {
@@ -41,11 +58,25 @@ fn main() {
                     match tessellate(&r, &TessParams::for_size(r.aabb().diagonal())) {
                         Ok(m) => {
                             for (p, q) in m.open_edges().iter().take(12) {
-                                println!("   open ({:.4} {:.4} {:.4}) - ({:.4} {:.4} {:.4})", p.x, p.y, p.z, q.x, q.y, q.z);
+                                println!(
+                                    "   open ({:.4} {:.4} {:.4}) - ({:.4} {:.4} {:.4})",
+                                    p.x, p.y, p.z, q.x, q.y, q.z
+                                );
                             }
                             if !m.open_edges().is_empty() {
                                 for (i, f) in r.faces.iter().enumerate() {
-                                    let pts: Vec<Vec<String>> = f.loops.iter().map(|l| l.iter().map(|&c| { let p = r.vertices[r.start_vertex(c)]; format!("({:.2} {:.2} {:.2})", p.x, p.y, p.z) }).collect()).collect();
+                                    let pts: Vec<Vec<String>> = f
+                                        .loops
+                                        .iter()
+                                        .map(|l| {
+                                            l.iter()
+                                                .map(|&c| {
+                                                    let p = r.vertices[r.start_vertex(c)];
+                                                    format!("({:.2} {:.2} {:.2})", p.x, p.y, p.z)
+                                                })
+                                                .collect()
+                                        })
+                                        .collect();
                                     println!("   face {i} {} flipped={}: {:?}", f.surface.name(), f.flipped, pts);
                                 }
                             }

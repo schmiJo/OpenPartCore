@@ -73,11 +73,7 @@ impl Vec3 {
         self.x * o.x + self.y * o.y + self.z * o.z
     }
     pub fn cross(self, o: Vec3) -> Vec3 {
-        v3(
-            self.y * o.z - self.z * o.y,
-            self.z * o.x - self.x * o.z,
-            self.x * o.y - self.y * o.x,
-        )
+        v3(self.y * o.z - self.z * o.y, self.z * o.x - self.x * o.z, self.x * o.y - self.y * o.x)
     }
     pub fn norm2(self) -> f64 {
         self.dot(self)
@@ -128,12 +124,7 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub const WORLD: Frame = Frame {
-        origin: Vec3::ZERO,
-        x: Vec3::X,
-        y: Vec3::Y,
-        z: Vec3::Z,
-    };
+    pub const WORLD: Frame = Frame { origin: Vec3::ZERO, x: Vec3::X, y: Vec3::Y, z: Vec3::Z };
 
     /// Frame with the given Z axis; X is `x_hint` made perpendicular to it.
     pub fn new(origin: Vec3, z: Vec3, x_hint: Vec3) -> Frame {
@@ -143,12 +134,7 @@ impl Frame {
             x = z.any_perpendicular();
         }
         let x = x.normalized();
-        Frame {
-            origin,
-            x,
-            y: z.cross(x),
-            z,
-        }
+        Frame { origin, x, y: z.cross(x), z }
     }
 
     /// Frame with the given Z axis and an arbitrary X axis.
@@ -157,10 +143,7 @@ impl Frame {
     }
 
     pub fn translation(t: Vec3) -> Frame {
-        Frame {
-            origin: t,
-            ..Frame::WORLD
-        }
+        Frame { origin: t, ..Frame::WORLD }
     }
 
     /// Rotation by `angle` radians about the line through `origin` along `axis`.
@@ -168,12 +151,7 @@ impl Frame {
         let k = axis.normalized();
         let (s, c) = angle.sin_cos();
         let rot = |v: Vec3| v * c + k.cross(v) * s + k * (k.dot(v) * (1.0 - c));
-        Frame {
-            origin: origin - rot(origin),
-            x: rot(Vec3::X),
-            y: rot(Vec3::Y),
-            z: rot(Vec3::Z),
-        }
+        Frame { origin: origin - rot(origin), x: rot(Vec3::X), y: rot(Vec3::Y), z: rot(Vec3::Z) }
     }
 
     pub fn to_local(&self, p: Vec3) -> Vec3 {
@@ -231,10 +209,7 @@ impl Aabb {
 
     pub fn inflated(&self, d: f64) -> Aabb {
         let e = v3(d, d, d);
-        Aabb {
-            min: self.min - e,
-            max: self.max + e,
-        }
+        Aabb { min: self.min - e, max: self.max + e }
     }
 
     pub fn overlaps(&self, o: &Aabb) -> bool {
@@ -380,11 +355,7 @@ impl Rng {
 
     pub fn unit_vector(&mut self) -> Vec3 {
         loop {
-            let v = v3(
-                self.range(-1.0, 1.0),
-                self.range(-1.0, 1.0),
-                self.range(-1.0, 1.0),
-            );
+            let v = v3(self.range(-1.0, 1.0), self.range(-1.0, 1.0), self.range(-1.0, 1.0));
             let n = v.norm();
             if n > 0.1 && n <= 1.0 {
                 return v / n;

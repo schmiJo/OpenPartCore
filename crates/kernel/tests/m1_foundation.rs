@@ -66,18 +66,12 @@ fn rounded_plate_matches() {
 
 #[test]
 fn arc_over_180_degrees_is_split_into_valid_faces() {
-    let w = PathBuilder::new(v2(0.0, 0.0))
-        .line_to(v2(2.0, 0.0))
-        .arc_to(v2(0.0, 2.0), v2(0.0, 0.0), true)
-        .close();
+    let w = PathBuilder::new(v2(0.0, 0.0)).line_to(v2(2.0, 0.0)).arc_to(v2(0.0, 2.0), v2(0.0, 0.0), true).close();
     let b = extrude(&Profile::new(w), &Frame::WORLD, 1.0, 1).unwrap();
     check("quarter disc", &b, PI, 2.0 * PI + (4.0 + PI));
 
     // Three quarters of a disc: the arc spans 270 degrees.
-    let w = PathBuilder::new(v2(0.0, 0.0))
-        .line_to(v2(2.0, 0.0))
-        .arc_to(v2(0.0, -2.0), v2(0.0, 0.0), true)
-        .close();
+    let w = PathBuilder::new(v2(0.0, 0.0)).line_to(v2(2.0, 0.0)).arc_to(v2(0.0, -2.0), v2(0.0, 0.0), true).close();
     let b = extrude(&Profile::new(w), &Frame::WORLD, 1.0, 1).unwrap();
     let area = 3.0 * PI;
     check("three quarter disc", &b, area, 2.0 * area + 4.0 + 3.0 * PI);
@@ -129,14 +123,8 @@ fn cones_match() {
 #[test]
 fn flange_blank_revolve_matches_pappus_terms() {
     // A stepped ring: hub r 10..20 height 30, flange r 10..40 height 8.
-    let w = Wire::polygon(&[
-        v2(10.0, 0.0),
-        v2(40.0, 0.0),
-        v2(40.0, 8.0),
-        v2(20.0, 8.0),
-        v2(20.0, 30.0),
-        v2(10.0, 30.0),
-    ]);
+    let w =
+        Wire::polygon(&[v2(10.0, 0.0), v2(40.0, 0.0), v2(40.0, 8.0), v2(20.0, 8.0), v2(20.0, 30.0), v2(10.0, 30.0)]);
     let b = revolve(&Profile::new(w), &off_world(), TAU, 1).unwrap();
     let volume = PI * (20.0f64 * 20.0 - 100.0) * 30.0 + PI * (1600.0f64 - 400.0) * 8.0;
     let area = PI * (1600.0 - 100.0)  // bottom
@@ -190,10 +178,7 @@ fn revolved_profile_with_a_hole_has_a_void_shell() {
 #[test]
 fn spheroid_cap_and_lens_revolves_match() {
     // A dome: quarter arc plus a flat base. Half a sphere of radius 3.
-    let w = PathBuilder::new(v2(0.0, 0.0))
-        .line_to(v2(3.0, 0.0))
-        .arc_to(v2(0.0, 3.0), v2(0.0, 0.0), true)
-        .close();
+    let w = PathBuilder::new(v2(0.0, 0.0)).line_to(v2(3.0, 0.0)).arc_to(v2(0.0, 3.0), v2(0.0, 0.0), true).close();
     let b = revolve(&Profile::new(w), &Frame::WORLD, TAU, 1).unwrap();
     check("dome", &b, 2.0 / 3.0 * PI * 27.0, 2.0 * PI * 9.0 + PI * 9.0);
 }

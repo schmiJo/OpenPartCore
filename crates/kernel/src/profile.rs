@@ -6,7 +6,10 @@ use crate::math::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SegGeom {
-    Line { a: Vec2, b: Vec2 },
+    Line {
+        a: Vec2,
+        b: Vec2,
+    },
     /// Runs from angle `a0` to angle `a1`: counter-clockwise when `a1 > a0`,
     /// clockwise otherwise.
     Arc {
@@ -38,12 +41,7 @@ impl Seg {
     pub fn at(&self, s: f64) -> Vec2 {
         match self.geom {
             SegGeom::Line { a, b } => a.lerp(b, s),
-            SegGeom::Arc {
-                center,
-                radius,
-                a0,
-                a1,
-            } => {
+            SegGeom::Arc { center, radius, a0, a1 } => {
                 let t = a0 + (a1 - a0) * s;
                 center + v2(t.cos(), t.sin()) * radius
             }
@@ -69,26 +67,14 @@ impl Seg {
     pub fn length(&self) -> f64 {
         match self.geom {
             SegGeom::Line { a, b } => a.dist(b),
-            SegGeom::Arc {
-                radius, a0, a1, ..
-            } => radius * (a1 - a0).abs(),
+            SegGeom::Arc { radius, a0, a1, .. } => radius * (a1 - a0).abs(),
         }
     }
 
     pub fn reversed(&self) -> Seg {
         let geom = match self.geom {
             SegGeom::Line { a, b } => SegGeom::Line { a: b, b: a },
-            SegGeom::Arc {
-                center,
-                radius,
-                a0,
-                a1,
-            } => SegGeom::Arc {
-                center,
-                radius,
-                a0: a1,
-                a1: a0,
-            },
+            SegGeom::Arc { center, radius, a0, a1 } => SegGeom::Arc { center, radius, a0: a1, a1: a0 },
         };
         Seg { geom, id: self.id }
     }
@@ -97,25 +83,12 @@ impl Seg {
     /// span more than that, so this happens before any surface is created.
     fn split_for_faces(&self, out: &mut Vec<Seg>) {
         match self.geom {
-            SegGeom::Arc {
-                center,
-                radius,
-                a0,
-                a1,
-            } if (a1 - a0).abs() > PI + 1e-9 => {
+            SegGeom::Arc { center, radius, a0, a1 } if (a1 - a0).abs() > PI + 1e-9 => {
                 let n = ((a1 - a0).abs() / PI).ceil() as usize;
                 for i in 0..n {
                     let s0 = a0 + (a1 - a0) * i as f64 / n as f64;
                     let s1 = a0 + (a1 - a0) * (i + 1) as f64 / n as f64;
-                    out.push(Seg {
-                        geom: SegGeom::Arc {
-                            center,
-                            radius,
-                            a0: s0,
-                            a1: s1,
-                        },
-                        id: self.id,
-                    });
+                    out.push(Seg { geom: SegGeom::Arc { center, radius, a0: s0, a1: s1 }, id: self.id });
                 }
             }
             _ => out.push(*self),
@@ -126,14 +99,8 @@ impl Seg {
     fn area_term(&self) -> f64 {
         match self.geom {
             SegGeom::Line { a, b } => 0.5 * a.cross(b),
-            SegGeom::Arc {
-                center,
-                radius,
-                a0,
-                a1,
-            } => {
-                0.5 * (radius * radius * (a1 - a0)
-                    + radius * center.x * (a1.sin() - a0.sin())
+            SegGeom::Arc { center, radius, a0, a1 } => {
+                0.5 * (radius * radius * (a1 - a0) + radius * center.x * (a1.sin() - a0.sin())
                     - radius * center.y * (a1.cos() - a0.cos()))
             }
         }
@@ -152,18 +119,12 @@ impl Wire {
     }
 
     pub fn reversed(&self) -> Wire {
-        Wire {
-            segs: self.segs.iter().rev().map(Seg::reversed).collect(),
-        }
+        Wire { segs: self.segs.iter().rev().map(Seg::reversed).collect() }
     }
 
     /// Axis-aligned rectangle with corner at `(x, y)`.
     pub fn rect(x: f64, y: f64, w: f64, h: f64) -> Wire {
-        PathBuilder::new(v2(x, y))
-            .line_to(v2(x + w, y))
-            .line_to(v2(x + w, y + h))
-            .line_to(v2(x, y + h))
-            .close()
+        PathBuilder::new(v2(x, y)).line_to(v2(x + w, y)).line_to(v2(x + w, y + h)).line_to(v2(x, y + h)).close()
     }
 
     /// Rectangle centred on the origin.
@@ -174,24 +135,8 @@ impl Wire {
     pub fn circle(center: Vec2, radius: f64) -> Wire {
         Wire {
             segs: vec![
-                Seg {
-                    geom: SegGeom::Arc {
-                        center,
-                        radius,
-                        a0: 0.0,
-                        a1: PI,
-                    },
-                    id: 0,
-                },
-                Seg {
-                    geom: SegGeom::Arc {
-                        center,
-                        radius,
-                        a0: PI,
-                        a1: TAU,
-                    },
-                    id: 0,
-                },
+                Seg { geom: SegGeom::Arc { center, radius, a0: 0.0, a1: PI }, id: 0 },
+                Seg { geom: SegGeom::Arc { center, radius, a0: PI, a1: TAU }, id: 0 },
             ],
         }
     }
@@ -228,17 +173,7 @@ impl Wire {
                 .map(|s| Seg {
                     geom: match s.geom {
                         SegGeom::Line { a, b } => SegGeom::Line { a: a + by, b: b + by },
-                        SegGeom::Arc {
-                            center,
-                            radius,
-                            a0,
-                            a1,
-                        } => SegGeom::Arc {
-                            center: center + by,
-                            radius,
-                            a0,
-                            a1,
-                        },
+                        SegGeom::Arc { center, radius, a0, a1 } => SegGeom::Arc { center: center + by, radius, a0, a1 },
                     },
                     id: s.id,
                 })
@@ -277,10 +212,7 @@ impl Wire {
         }
         for (i, s) in self.segs.iter().enumerate() {
             if !s.length().is_finite() || s.length() < MIN_FEATURE {
-                return Err(Error::InvalidProfile(format!(
-                    "{what} wire: segment {i} is too short ({:e})",
-                    s.length()
-                )));
+                return Err(Error::InvalidProfile(format!("{what} wire: segment {i} is too short ({:e})", s.length())));
             }
             let next = &self.segs[(i + 1) % self.segs.len()];
             if s.end().dist(next.start()) > TOL {
@@ -332,22 +264,11 @@ pub struct PathBuilder {
 
 impl PathBuilder {
     pub fn new(start: Vec2) -> PathBuilder {
-        PathBuilder {
-            start,
-            cursor: start,
-            segs: Vec::new(),
-            next_id: 0,
-        }
+        PathBuilder { start, cursor: start, segs: Vec::new(), next_id: 0 }
     }
 
     pub fn line_to(mut self, p: Vec2) -> PathBuilder {
-        self.segs.push(Seg {
-            geom: SegGeom::Line {
-                a: self.cursor,
-                b: p,
-            },
-            id: self.next_id,
-        });
+        self.segs.push(Seg { geom: SegGeom::Line { a: self.cursor, b: p }, id: self.next_id });
         self.next_id += 1;
         self.cursor = p;
         self
@@ -368,15 +289,7 @@ impl PathBuilder {
                 a1 -= TAU;
             }
         }
-        self.segs.push(Seg {
-            geom: SegGeom::Arc {
-                center,
-                radius,
-                a0,
-                a1,
-            },
-            id: self.next_id,
-        });
+        self.segs.push(Seg { geom: SegGeom::Arc { center, radius, a0, a1 }, id: self.next_id });
         self.next_id += 1;
         self.cursor = end;
         self
@@ -402,33 +315,15 @@ pub struct Profile {
 
 impl Profile {
     pub fn new(outer: Wire) -> Profile {
-        let outer = if outer.signed_area() < 0.0 {
-            outer.reversed()
-        } else {
-            outer
-        };
-        Profile {
-            outer,
-            holes: Vec::new(),
-        }
+        let outer = if outer.signed_area() < 0.0 { outer.reversed() } else { outer };
+        Profile { outer, holes: Vec::new() }
     }
 
     pub fn with_hole(mut self, hole: Wire) -> Profile {
-        let hole = if hole.signed_area() > 0.0 {
-            hole.reversed()
-        } else {
-            hole
-        };
+        let hole = if hole.signed_area() > 0.0 { hole.reversed() } else { hole };
         // Give each hole's segments ids that no other wire in the profile uses.
         let base = 1000 * (self.holes.len() as u32 + 1);
-        let segs = hole
-            .segs
-            .iter()
-            .map(|s| Seg {
-                geom: s.geom,
-                id: s.id + base,
-            })
-            .collect();
+        let segs = hole.segs.iter().map(|s| Seg { geom: s.geom, id: s.id + base }).collect();
         self.holes.push(Wire { segs });
         self
     }
@@ -515,15 +410,7 @@ mod tests {
         assert!(outside.validate().is_err());
         let crossing = Profile::new(Wire::rect_centered(1.0, 1.0)).with_hole(Wire::circle(v2(0.5, 0.0), 0.2));
         assert!(crossing.validate().is_err());
-        let open = Wire {
-            segs: vec![Seg {
-                geom: SegGeom::Line {
-                    a: v2(0.0, 0.0),
-                    b: v2(1.0, 0.0),
-                },
-                id: 0,
-            }],
-        };
+        let open = Wire { segs: vec![Seg { geom: SegGeom::Line { a: v2(0.0, 0.0), b: v2(1.0, 0.0) }, id: 0 }] };
         assert!(Profile::new(open).validate().is_err());
     }
 }

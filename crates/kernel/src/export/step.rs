@@ -132,11 +132,7 @@ impl Writer {
                 let a = self.axis(frame);
                 self.entity(&format!("CYLINDRICAL_SURFACE('',#{a},{})", real(*radius)))
             }
-            Surface::Cone {
-                frame,
-                radius,
-                half_angle,
-            } => {
+            Surface::Cone { frame, radius, half_angle } => {
                 let a = self.axis(frame);
                 self.entity(&format!("CONICAL_SURFACE('',#{a},{},{})", real(*radius), real(*half_angle)))
             }
@@ -154,10 +150,7 @@ impl Writer {
 
 /// Writes a body as a STEP file. Dimensions are in millimetres.
 pub fn write_step(body: &Body, name: &str) -> String {
-    let mut w = Writer {
-        out: String::new(),
-        next: 1,
-    };
+    let mut w = Writer { out: String::new(), next: 1 };
     let product = quote(name);
 
     // Product structure: required by the schema even for one part.
@@ -197,10 +190,7 @@ pub fn write_step(body: &Body, name: &str) -> String {
         .iter()
         .map(|e| {
             let c = w.curve(&e.curve);
-            w.entity(&format!(
-                "EDGE_CURVE('',#{},#{},#{c},.T.)",
-                vertex_ids[e.v0], vertex_ids[e.v1]
-            ))
+            w.entity(&format!("EDGE_CURVE('',#{},#{},#{c},.T.)", vertex_ids[e.v0], vertex_ids[e.v1]))
         })
         .collect();
 
@@ -230,10 +220,8 @@ pub fn write_step(body: &Body, name: &str) -> String {
             }
             let same = face.flipped == invert;
             let same = if same { ".T." } else { ".F." };
-            faces.push(format!(
-                "#{}",
-                w.entity(&format!("ADVANCED_FACE('',({}),#{surface},{same})", bounds.join(",")))
-            ));
+            faces
+                .push(format!("#{}", w.entity(&format!("ADVANCED_FACE('',({}),#{surface},{same})", bounds.join(",")))));
         }
         w.entity(&format!("CLOSED_SHELL('',({}))", faces.join(",")))
     };
@@ -270,18 +258,12 @@ pub fn write_step(body: &Body, name: &str) -> String {
                     format!("#{}", w.entity(&format!("ORIENTED_CLOSED_SHELL('',*,#{s},.F.)")))
                 })
                 .collect();
-            solids.push(format!(
-                "#{}",
-                w.entity(&format!("BREP_WITH_VOIDS('',#{shell},({}))", oriented.join(",")))
-            ));
+            solids.push(format!("#{}", w.entity(&format!("BREP_WITH_VOIDS('',#{shell},({}))", oriented.join(",")))));
         }
     }
 
     let origin = w.axis(&Frame::WORLD);
-    let rep = w.entity(&format!(
-        "ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{origin},{}),#{ctx})",
-        solids.join(",")
-    ));
+    let rep = w.entity(&format!("ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{origin},{}),#{ctx})", solids.join(",")));
     w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{def_shape},#{rep})"));
 
     format!(
