@@ -693,13 +693,21 @@ fn classify_piece(piece: &Piece, bodies: [&Body; 2], index: &[Index; 2], arr: &A
         return Ok(Class::Out);
     }
     let size = index[0].bounds.diagonal().max(index[1].bounds.diagonal());
+    // A few well-placed points settle most regions. If they don't all agree, or there are too few, the
+    // thorough search decides, so choosing quickly can't cause a refusal the thorough way wouldn't.
+    let quick = interior_points(&face.surface, &face.chart, &arr.edges, &piece.loops, 4, true);
+    if quick.len() >= 4 {
+        if let Some(class) = unanimous(&quick, face, bodies, index, other, size) {
+            return Ok(class);
+        }
+    }
     let mut answer: Option<Class> = None;
     let mut clean_samples = 0;
     let mut touching = None;
     // Every clean sample must agree. A region that is partly inside and partly
     // outside means an intersection curve was missed, and the region should have
     // been cut, so that is an error however plausible the rest looks.
-    let samples = interior_points(&face.surface, &face.chart, &arr.edges, &piece.loops, 8);
+    let samples = interior_points(&face.surface, &face.chart, &arr.edges, &piece.loops, 8, false);
     if samples.is_empty() {
         return Err(Error::Internal("a face region has no interior point".into()));
     }
@@ -760,6 +768,33 @@ fn classify_piece(piece: &Piece, bodies: [&Body; 2], index: &[Index; 2], arr: &A
 /// exactly when it is in A or in B, and so on. This doesn't depend on anything the
 /// Boolean computed, so it catches errors the topology checks can't see. Half the
 /// points go where the two bodies overlap, since that is where mistakes happen.
+/// The class all of these chart points give, if they all give one cleanly.
+fn unanimous(samples: &[Vec2], face: &Face, bodies: [&Body; 2], index: &[Index; 2], other: usize, size: f64) -> Option<Class> {
+    let mut answer = None;
+    for &uv in samples {
+        let p = face.surface.from_chart(&face.chart, uv);
+        let class = match index[other].locate_in_body(p) {
+            BodyLoc::Inside => Class::In,
+            BodyLoc::Outside => Class::Out,
+            BodyLoc::OnFace(g) => {
+                let of = &bodies[other].faces[g];
+                ssi::coincident(&face.surface, &of.surface, size)?;
+                if face.outward_normal(p).dot(of.outward_normal(p)) > 0.0 {
+                    Class::OnSame
+                } else {
+                    Class::OnOpposite
+                }
+            }
+        };
+        match answer {
+            None => answer = Some(class),
+            Some(a) if a != class => return None,
+            Some(_) => {}
+        }
+    }
+    answer
+}
+
 fn verify_membership(index: &[Index; 2], result: &Body, op: BoolOp, points: usize) -> Result<()> {
     let out = Index::new(result);
     let mut all = index[0].bounds;

@@ -27,6 +27,12 @@ impl TessParams {
     pub fn for_size(size: f64) -> TessParams {
         TessParams { chord: (size * 4e-4).max(1e-4), angle: 18f64.to_radians() }
     }
+
+    /// A lighter mesh, for following a dimension as it's dragged: about a fifth of the triangles
+    /// on curved parts, and quick to make.
+    pub fn draft_for_size(size: f64) -> TessParams {
+        TessParams { chord: (size * 1.2e-3).max(3e-4), angle: 30f64.to_radians() }
+    }
 }
 
 /// A triangle mesh. Vertices are not shared between faces, so each face keeps its

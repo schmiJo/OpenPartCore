@@ -158,16 +158,42 @@ are no faster than before. 400 holes: 0.77 s at once, 7.9 s one by one, and 19.7
   in depth-first connected order, which passed from all 12 start faces tried (breadth-first 10 of 12,
   random about half). This is an observed property of that checker, not a rule from the standard.
 
+## Slider speed
+
+Measured in Chrome as WebAssembly on this desktop, for one step of a slider, in milliseconds. The two figures are the last and the first
+slider, since the first usually affects more features. `python3 scripts/selftest_web.py` prints these.
+
+| Model | Before | While dragging now | When a drag pauses now |
+|---|---|---|---|
+| Bracket | 22, 71 | 12, 30 | 18, 37 |
+| Flange | 81, 119 | 28, 36 | 61, 67 |
+| Rounded block | 178, 165 | 62, 54 | 84, 74 |
+| Mounting plate | 188, 296 | 51, 93 | 121, 172 |
+| Crossed cylinders | 73, 7 | 24, 5 | 82, 7 |
+| Turned knob | 27, 31 | 16, 20 | 34, 33 |
+| Ring sector | 88, 93 | 37, 29 | 121, 92 |
+
+While dragging, a slider gets a lighter mesh (about a fifth of the triangles on curved parts) and volume and area wait, shown dimmed. All of the
+kernel's checks still run: skipping the slower ones was measured, and saved under 10%, so they stay on. About 140 ms after the slider stops,
+the full mesh and the exact numbers follow. Saves and exports always use the finished result.
+
+The kernel itself got two to four times faster on these models:
+
+- **Choosing where to test a region** took about 40% of a rebuild. A quick search now settles most regions, and the old thorough search still runs
+  if the quick points are too few or disagree, so it can't add a refusal. The same 258 fuzz cases are refused as before.
+- **Blends** apply tools that don't touch together, as separate shells, instead of cutting a growing body again for each.
+
 ## Not tested
 
-- **On a real iPhone or in Safari.** The viewer has only run in headless Chrome with a software
-  renderer. The controls, shaders and touch handling are written for iOS but haven't been used on it.
+- **Safari in depth.** The stand-alone page has been opened on a real iPhone over the local network, where it ran and looked right, and
+  its sliders felt a little laggy before the speed work below. Nothing has measured it there, and the self test only runs in headless
+  Chrome. The speed work hasn't yet been judged on the phone.
 - **The hosted page itself.** It has been published but not opened. If the host's content policy
   blocks WebAssembly, the page shows an error saying it could not start.
-- **Phone performance.** Measured on this desktop in wasm under headless Chrome, a slider change
-  took 45-110 ms on the bracket, 195-270 ms on the flange, about 300 ms on the rounded block and
-  390-630 ms on the mounting plate, before the later scaling work. That is a few times slower than
-  native. A phone's speed has not been measured.
+- **Phone performance.** See the slider times below, which are from this desktop. A phone's haven't been measured.
+- **Whether the hosted page allows workers.** The kernel runs in a worker so that a rebuild can't hold up the page. If a host forbids
+  workers it runs in the page instead, with the same results and checks, and the page can stall during a rebuild. The self test runs both
+  ways, but not on the host itself.
 - **Running on macOS and Windows.** The kernel compiles for both, but tests have only run on Linux.
 - **The download path on the hosted page.** Saving uses the host's download capability with the
   file wrapped in a zip, because `.step` and `.stl` aren't on its allowlist.

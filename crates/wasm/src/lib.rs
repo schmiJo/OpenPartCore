@@ -162,8 +162,10 @@ fn clear_mesh(out: &mut Output) {
     out.lines.clear();
 }
 
-fn fill_mesh(out: &mut Output, body: &Body) -> Result<coreshape::Mesh> {
-    let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal()))?;
+fn fill_mesh(out: &mut Output, body: &Body, draft: bool) -> Result<coreshape::Mesh> {
+    let size = body.aabb().diagonal();
+    let params = if draft { TessParams::draft_for_size(size) } else { TessParams::for_size(size) };
+    let mesh = tessellate(body, &params)?;
     clear_mesh(out);
     for p in &mesh.positions {
         out.positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
@@ -194,8 +196,10 @@ fn fill_mesh(out: &mut Output, body: &Body) -> Result<coreshape::Mesh> {
     Ok(mesh)
 }
 
-/// Fills the output for a rebuild's outcome.
-fn fill(out: &mut Output, outcome: &Outcome) {
+/// Fills the output for a rebuild's outcome. A draft is for following a drag: a lighter mesh and no
+/// mass properties, which are what the time goes on once the solid itself is built. The solid is the
+/// same one, with every check done.
+fn fill(out: &mut Output, outcome: &Outcome, draft: bool) {
     let features = features_json(outcome);
     let failed = outcome.failed.map_or("null".to_string(), |i| i.to_string());
     let rebuilt = outcome.steps.iter().filter(|s| s.state == StepState::Rebuilt).count();
@@ -207,7 +211,7 @@ fn fill(out: &mut Output, outcome: &Outcome) {
         out.info = format!("{{\"ok\":true,\"empty\":true,{head}}}");
         return;
     };
-    let mesh = match fill_mesh(out, &body) {
+    let mesh = match fill_mesh(out, &body, draft) {
         Ok(m) => m,
         Err(e) => {
             out.info = format!("{{\"ok\":false,\"error\":{},{head}}}", json_str(&e.to_string()));
@@ -221,7 +225,12 @@ fn fill(out: &mut Output, outcome: &Outcome) {
             return;
         }
     };
-    let m = mass_properties(&body);
+    let (volume, area) = if draft {
+        ("null".to_string(), "null".to_string())
+    } else {
+        let m = mass_properties(&body);
+        (m.volume.to_string(), m.area.to_string())
+    };
     let mut kinds = [0usize; 5];
     for f in &body.faces {
         kinds[surface_kind(&f.surface) as usize] += 1;
@@ -229,9 +238,9 @@ fn fill(out: &mut Output, outcome: &Outcome) {
     let genus: Vec<String> = report.genus.iter().map(|g| g.to_string()).collect();
     let bounds = mesh.bounds();
     out.info = format!(
-        "{{\"ok\":true,{head},\"volume\":{},\"area\":{},\"vertices\":{},\"edges\":{},\"faces\":{},\"shells\":{},\"genus\":[{}],\"kinds\":[{},{},{},{},{}],\"triangles\":{},\"openEdges\":{},\"contacts\":{},\"bounds\":[{},{},{},{},{},{}]}}",
-        m.volume,
-        m.area,
+        "{{\"ok\":true,\"draft\":{draft},{head},\"volume\":{},\"area\":{},\"vertices\":{},\"edges\":{},\"faces\":{},\"shells\":{},\"genus\":[{}],\"kinds\":[{},{},{},{},{}],\"triangles\":{},\"openEdges\":{},\"contacts\":{},\"bounds\":[{},{},{},{},{},{}]}}",
+        volume,
+        area,
         report.vertices,
         report.edges,
         report.faces,
@@ -256,14 +265,15 @@ fn fill(out: &mut Output, outcome: &Outcome) {
 }
 
 /// Rebuilds a model. `rollback` is the index of the last feature to apply, or
-/// negative for all of them. Returns a pointer to a table of twelve `u32`s: pointer
+/// negative for all of them. `draft` is non-zero for a lighter result, while a dimension is
+/// being dragged. Returns a pointer to a table of twelve `u32`s: pointer
 /// and length for positions, normals, surface kinds, indices, edge segments and the
 /// JSON info string.
 ///
 /// # Safety
 /// `params` must point to `n` readable `f64`s.
 #[no_mangle]
-pub unsafe extern "C" fn cs_build(model: usize, params: *const f64, n: usize, rollback: i32) -> *const u32 {
+pub unsafe extern "C" fn cs_build(model: usize, params: *const f64, n: usize, rollback: i32, draft: i32) -> *const u32 {
     let values = std::slice::from_raw_parts(params, n);
     STATE.with(|s| {
         let mut out = s.borrow_mut();
@@ -277,7 +287,7 @@ pub unsafe extern "C" fn cs_build(model: usize, params: *const f64, n: usize, ro
             let upto = (rollback >= 0).then_some(rollback as usize);
             let outcome = doc.rebuild(upto);
             out.current = Some((model, variant));
-            fill(out, &outcome);
+            fill(out, &outcome, draft != 0);
         }
         out.table = [
             out.positions.as_ptr() as u32,

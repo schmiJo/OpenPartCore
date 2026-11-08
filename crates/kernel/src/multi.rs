@@ -94,11 +94,55 @@ pub fn merged_tools(tools: &[Body]) -> Result<Body> {
 /// Applies many tools to a target at once. `Union` adds them all, `Subtract` removes them all, and
 /// `Intersect` keeps what lies inside any of them.
 pub fn boolean_many(target: &Body, tools: &[Body], op: BoolOp) -> Result<Body> {
+    boolean_many_with(target, tools, op, Checks::Full)
+}
+
+/// As `boolean_many`, with control over how much the result is checked.
+pub fn boolean_many_with(target: &Body, tools: &[Body], op: BoolOp, checks: Checks) -> Result<Body> {
     if tools.is_empty() {
         return Ok(target.clone());
     }
-    let tool = merged_tools(tools)?;
-    boolean_with(target, &tool, op, Checks::Full)
+    if op == BoolOp::Intersect {
+        let tool = merged_tools(tools)?;
+        return boolean_with(target, &tool, op, checks);
+    }
+    // Adding or removing tools can go in any order, so each round takes as many as don't touch each
+    // other, as separate shells of one body. A rounded box's 20 tools need about 5 rounds this way.
+    let rounds = rounds_of(tools);
+    let total = rounds.len();
+    let mut current = target.clone();
+    for (k, round) in rounds.into_iter().enumerate() {
+        let tool = if round.len() == 1 {
+            tools[round[0]].clone()
+        } else {
+            compound(&round.iter().map(|&t| tools[t].clone()).collect::<Vec<Body>>())
+        };
+        let level = if k + 1 == total { checks } else { Checks::Interim };
+        current = boolean_with(&current, &tool, op, level)?;
+    }
+    Ok(current)
+}
+
+/// Sorts tools into rounds whose members' boxes don't touch. Greedy, biggest first: any answer is
+/// correct, and fewer rounds is only faster.
+fn rounds_of(tools: &[Body]) -> Vec<Vec<usize>> {
+    let boxes: Vec<Aabb> = tools.iter().map(|t| t.aabb().inflated(4.0 * TOL)).collect();
+    let touching = |a: &Aabb, b: &Aabb| {
+        a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y && a.min.z <= b.max.z && b.min.z <= a.max.z
+    };
+    let mut order: Vec<usize> = (0..tools.len()).collect();
+    order.sort_by(|&a, &b| boxes[b].diagonal().total_cmp(&boxes[a].diagonal()));
+    let mut rounds: Vec<Vec<usize>> = Vec::new();
+    for t in order {
+        match rounds.iter().position(|r| r.iter().all(|&o| !touching(&boxes[t], &boxes[o]))) {
+            Some(r) => rounds[r].push(t),
+            None => rounds.push(vec![t]),
+        }
+    }
+    for r in &mut rounds {
+        r.sort_unstable();
+    }
+    rounds
 }
 
 /// One step of a sweep. Each carries on from the direction the last one ended in, so a path is

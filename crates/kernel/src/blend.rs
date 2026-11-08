@@ -13,6 +13,7 @@
 use crate::boolean::classify::{BodyLoc, FaceLoc, Index};
 use crate::boolean::ssi::coincident;
 use crate::boolean::{boolean_with, BoolOp, Checks};
+use crate::multi::boolean_many_with;
 use crate::build::{box_solid, extrude, revolve, sphere};
 use crate::curve::Curve;
 use crate::error::{Error, Result};
@@ -798,6 +799,17 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
         }
     }
 
+    // Tools that don't touch can go in together, which is far cheaper than cutting a growing body again
+    // for each. A blend's tools can meet each other at corners, so if that refuses, one at a time still
+    // gets its chance.
+    let at_once = (|| -> Result<Body> {
+        let then = if adds.is_empty() { Checks::Full } else { Checks::Interim };
+        let cut = boolean_many_with(body, &cuts, BoolOp::Subtract, then)?;
+        boolean_many_with(&cut, &adds, BoolOp::Union, Checks::Full)
+    })();
+    if let Ok(out) = at_once {
+        return Ok(out);
+    }
     // Only the last step needs the full checks, and they apply to the final result.
     let total = cuts.len() + adds.len();
     let mut out = body.clone();

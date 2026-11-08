@@ -168,6 +168,7 @@ dd { margin: 0; text-align: right; font: 400 13.5px/1.6 var(--num); font-variant
   main { grid-template-rows: none; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); }
   #panel { order: -1; border-top: 0; border-right: 1px solid var(--rule); }
 }
+.stale { opacity: 0.45; }
 </style>
 
 <div id="app">
@@ -519,37 +520,126 @@ function attachNavigation(view, canvas, onDoubleTap) {
 }
 
 // ----- Kernel bridge -----
-class Kernel {
-  constructor(exports) {
-    this.x = exports;
-    this.decoder = new TextDecoder();
-  }
-  str(ptr, len) { return this.decoder.decode(new Uint8Array(this.x.memory.buffer, ptr, len)); }
-  catalog() {
-    const p = this.x.cs_catalog();
-    return JSON.parse(this.str(p, this.x.cs_catalog_len()));
-  }
-  build(model, values, rollback) {
-    const n = values.length;
-    const ptr = this.x.cs_alloc_f64(n);
-    new Float64Array(this.x.memory.buffer, ptr, n).set(values);
-    const t = this.x.cs_build(model, ptr, n, rollback);
-    this.x.cs_free_f64(ptr, n);
-    const table = new Uint32Array(this.x.memory.buffer, t, 12);
-    const m = this.x.memory.buffer;
+// Written as one function so that its text can also start the worker.
+function kernelClass() {
+  return class Kernel {
+    constructor(exports) {
+      this.x = exports;
+      this.decoder = new TextDecoder();
+    }
+    str(ptr, len) { return this.decoder.decode(new Uint8Array(this.x.memory.buffer, ptr, len)); }
+    catalog() {
+      const p = this.x.cs_catalog();
+      return JSON.parse(this.str(p, this.x.cs_catalog_len()));
+    }
+    build(model, values, rollback, draft) {
+      const n = values.length;
+      const ptr = this.x.cs_alloc_f64(n);
+      new Float64Array(this.x.memory.buffer, ptr, n).set(values);
+      const t = this.x.cs_build(model, ptr, n, rollback, draft ? 1 : 0);
+      this.x.cs_free_f64(ptr, n);
+      const table = new Uint32Array(this.x.memory.buffer, t, 12);
+      const m = this.x.memory.buffer;
+      return {
+        positions: new Float32Array(m, table[0], table[1]),
+        normals: new Float32Array(m, table[2], table[3]),
+        kinds: new Uint8Array(m, table[4], table[5]),
+        indices: new Uint32Array(m, table[6], table[7]),
+        segments: new Float32Array(m, table[8], table[9]),
+        info: JSON.parse(this.str(table[10], table[11])),
+      };
+    }
+    exportFile(kind) {
+      const p = { step: this.x.cs_export_step, stl: this.x.cs_export_stl, coreshape: this.x.cs_export_document }[kind]();
+      return p ? new Uint8Array(this.x.memory.buffer, p, this.x.cs_export_len()).slice() : null;
+    }
+  };
+}
+
+// The worker's whole program. It answers one request at a time, in order.
+function workerMain(Kernel) {
+  let kernel = null;
+  self.onmessage = async (e) => {
+    const m = e.data;
+    if (m.type === "init") {
+      const { instance } = await WebAssembly.instantiate(m.bytes, {});
+      kernel = new Kernel(instance.exports);
+      self.postMessage({ type: "ready", catalog: kernel.catalog() });
+    } else if (m.type === "build") {
+      const t0 = performance.now();
+      const r = kernel.build(m.model, m.values, m.rollback, m.draft);
+      // Copies, since these views are into the kernel's own memory. Then they can move across for free.
+      const copy = { positions: r.positions.slice(), normals: r.normals.slice(), kinds: r.kinds.slice(), indices: r.indices.slice(), segments: r.segments.slice(), info: r.info };
+      self.postMessage({ type: "built", id: m.id, result: copy, ms: performance.now() - t0 },
+        [copy.positions.buffer, copy.normals.buffer, copy.kinds.buffer, copy.indices.buffer, copy.segments.buffer]);
+    } else if (m.type === "export") {
+      const data = kernel.exportFile(m.kind);
+      self.postMessage({ type: "exported", id: m.id, data }, data ? [data.buffer] : []);
+    }
+  };
+}
+
+// Runs the kernel in a worker, so that a rebuild never holds up the page: the slider and the view keep
+// moving while it works. A host may not allow workers. Then it runs here instead, and still works.
+async function startKernel(bytes, allowWorker) {
+  const Kernel = kernelClass();
+  const inPage = async () => {
+    const { instance } = await WebAssembly.instantiate(bytes, {});
+    const kernel = new Kernel(instance.exports);
     return {
-      positions: new Float32Array(m, table[0], table[1]),
-      normals: new Float32Array(m, table[2], table[3]),
-      kinds: new Uint8Array(m, table[4], table[5]),
-      indices: new Uint32Array(m, table[6], table[7]),
-      segments: new Float32Array(m, table[8], table[9]),
-      info: JSON.parse(this.str(table[10], table[11])),
+      usesWorker: false,
+      catalog: kernel.catalog(),
+      // Let the page draw first, since the build will hold it up.
+      build: async (model, values, rollback, draft) => {
+        await new Promise((r) => setTimeout(r, 0));
+        const t0 = performance.now();
+        const result = kernel.build(model, values, rollback, draft);
+        return { result, ms: performance.now() - t0 };
+      },
+      exportFile: async (kind) => kernel.exportFile(kind),
     };
+  };
+  if (!allowWorker || typeof Worker === "undefined") return inPage();
+  let worker;
+  try {
+    const source = `(${workerMain.toString()})((${kernelClass.toString()})());`;
+    worker = new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
+  } catch (_) {
+    return inPage();
   }
-  exportFile(kind) {
-    const p = { step: this.x.cs_export_step, stl: this.x.cs_export_stl, coreshape: this.x.cs_export_document }[kind]();
-    return p ? new Uint8Array(this.x.memory.buffer, p, this.x.cs_export_len()).slice() : null;
+  const pending = new Map();
+  let nextId = 1;
+  const ask = (message, transfer) => new Promise((resolve) => {
+    const id = nextId++;
+    pending.set(id, resolve);
+    worker.postMessage({ ...message, id }, transfer || []);
+  });
+  const catalog = await new Promise((resolve) => {
+    const give_up = setTimeout(() => resolve(null), 4000);
+    worker.onerror = () => { clearTimeout(give_up); resolve(null); };
+    worker.onmessage = (e) => {
+      if (e.data.type === "ready") { clearTimeout(give_up); resolve(e.data.catalog); }
+    };
+    worker.postMessage({ type: "init", bytes });
+  });
+  if (!catalog) {
+    worker.terminate();
+    return inPage();
   }
+  worker.onmessage = (e) => {
+    const resolve = pending.get(e.data.id);
+    pending.delete(e.data.id);
+    if (resolve) resolve(e.data);
+  };
+  return {
+    usesWorker: true,
+    catalog,
+    build: async (model, values, rollback, draft) => {
+      const r = await ask({ type: "build", model, values, rollback, draft });
+      return { result: r.result, ms: r.ms };
+    },
+    exportFile: async (kind) => (await ask({ type: "export", kind })).data,
+  };
 }
 
 // ----- App -----
@@ -596,51 +686,68 @@ function makeZip(name, data) {
 
 async function start() {
   const bytes = Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0));
-  const { instance } = await WebAssembly.instantiate(bytes, {});
-  const kernel = new Kernel(instance.exports);
-  const catalog = kernel.catalog();
+  const kernel = await startKernel(bytes, new URLSearchParams(location.search).get("worker") !== "0");
+  const catalog = kernel.catalog;
   const view = new Viewer($("view"));
-  let current = 0, lastBounds = null, queued = false, rollback = -1, lastInfo = null;
+  let current = 0, lastBounds = null, rollback = -1, lastInfo = null;
 
   const GLYPHS = { sketch: "S", extrude: "E", revolve: "R", fillet: "F", chamfer: "C", solid: "B" };
   const STATE_TEXT = { rebuilt: "rebuilt", reused: "reused", rolledback: "", blocked: "blocked", failed: "failed" };
 
+  let rowsKey = "", barKey = "";
+  // Rows are only made when the list itself changes. A drag updates them in place, and asks the
+  // browser to lay out the page only if the bar has to move.
   const renderFeatures = (info) => {
     const box = $("featureRows");
-    box.textContent = "";
     const count = info.features.length;
     const last = rollback < 0 ? count - 1 : rollback;
+    const key = current + ":" + info.features.map((f) => `${f.kind}|${f.name}|${f.error}`).join(";");
+    if (key !== rowsKey) {
+      rowsKey = key;
+      barKey = "";
+      box.textContent = "";
+      info.features.forEach((f, i) => {
+        const row = document.createElement("button");
+        row.type = "button";
+        const g = document.createElement("span");
+        g.className = "glyph";
+        g.textContent = GLYPHS[f.kind] || "?";
+        const n = document.createElement("span");
+        n.className = "name";
+        n.textContent = f.name;
+        const st = document.createElement("span");
+        st.className = "state";
+        row.append(g, n, st);
+        if (f.error) {
+          const why = document.createElement("span");
+          why.className = "why";
+          why.textContent = f.error;
+          row.append(why);
+        }
+        row.addEventListener("click", () => setRollback(i === count - 1 ? -1 : i));
+        box.append(row);
+      });
+    }
     info.features.forEach((f, i) => {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "feat " + f.state + (i > last || f.state === "blocked" ? " off" : "");
-      const g = document.createElement("span");
-      g.className = "glyph";
-      g.textContent = GLYPHS[f.kind] || "?";
-      const n = document.createElement("span");
-      n.className = "name";
-      n.textContent = f.name;
-      const st = document.createElement("span");
-      st.className = "state";
-      st.textContent = STATE_TEXT[f.state] ?? "";
-      row.append(g, n, st);
-      if (f.error) {
-        const why = document.createElement("span");
-        why.className = "why";
-        why.textContent = f.error;
-        row.append(why);
-      }
-      row.addEventListener("click", () => setRollback(i === count - 1 ? -1 : i));
-      box.append(row);
+      const row = box.children[i];
+      const name = "feat " + f.state + (i > last || f.state === "blocked" ? " off" : "");
+      if (row.className !== name) row.className = name;
+      const text = STATE_TEXT[f.state] ?? "";
+      const st = row.querySelector(".state");
+      if (st.textContent !== text) st.textContent = text;
     });
     // The bar is one element that moves. iOS stops delivering a touch drag if the
     // element it started on is removed, so it must never be re-created during a drag.
-    const bar = $("rollback");
-    bar.setAttribute("aria-valuemin", "0");
-    bar.setAttribute("aria-valuemax", String(count - 1));
-    bar.setAttribute("aria-valuenow", String(last));
-    const row = box.children[last];
-    bar.style.top = row ? row.offsetTop + row.offsetHeight + "px" : "0";
+    const nextBar = `${count}:${last}`;
+    if (nextBar !== barKey) {
+      barKey = nextBar;
+      const bar = $("rollback");
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", String(count - 1));
+      bar.setAttribute("aria-valuenow", String(last));
+      const row = box.children[last];
+      bar.style.top = row ? row.offsetTop + row.offsetHeight + "px" : "0";
+    }
   };
 
   // Dragging the bar: the feature nearest above the pointer is the last one applied.
@@ -685,6 +792,7 @@ async function start() {
       $("rValid").innerHTML = '<span class="chip">No solid yet</span>';
       for (const id of ["rVolume", "rArea", "rTopo", "rShells", "rContacts", "rTris", "rOpen"]) $(id).textContent = "\u2013";
       $("legend").textContent = "";
+      delete $("legend").dataset.key;
       return;
     }
     if (!info.ok) {
@@ -694,44 +802,90 @@ async function start() {
     $("rValid").innerHTML = failed
       ? '<span class="chip bad">Stopped early</span>'
       : '<span class="chip good">Valid</span>';
-    $("rVolume").textContent = fmtSig(info.volume) + " mm\u00b3";
-    $("rArea").textContent = fmtSig(info.area) + " mm\u00b2";
+    // While dragging, volume and area wait for the drag to pause.
+    if (info.draft) {
+      $("rVolume").classList.add("stale");
+      $("rArea").classList.add("stale");
+    } else {
+      $("rVolume").classList.remove("stale");
+      $("rArea").classList.remove("stale");
+      $("rVolume").textContent = fmtSig(info.volume) + " mm\u00b3";
+      $("rArea").textContent = fmtSig(info.area) + " mm\u00b2";
+    }
     $("rTopo").textContent = `${info.faces}, ${info.edges}, ${info.vertices}`;
     $("rShells").textContent = `${info.shells}, ${info.genus.join(" ")}`;
     $("rContacts").textContent = info.contacts ? `${info.contacts} ${info.contacts === 1 ? "point" : "points"}` : "nowhere";
     $("rTris").textContent = fmt0.format(info.triangles);
     $("rOpen").textContent = String(info.openEdges);
     const legend = $("legend");
-    legend.textContent = "";
-    KINDS.forEach((k, i) => {
-      const s = document.createElement("span");
-      if (!info.kinds[i]) s.className = "faint";
-      s.innerHTML = `<i style="background:var(--s-${k})"></i>${k}<b>${info.kinds[i]}</b>`;
-      legend.append(s);
-    });
+    const legendKey = info.kinds.join(",");
+    if (legend.dataset.key !== legendKey) {
+      legend.dataset.key = legendKey;
+      legend.textContent = "";
+      KINDS.forEach((k, i) => {
+        const s = document.createElement("span");
+        if (!info.kinds[i]) s.className = "faint";
+        s.innerHTML = `<i style="background:var(--s-${k})"></i>${k}<b>${info.kinds[i]}</b>`;
+        legend.append(s);
+      });
+    }
   };
 
-  const rebuild = (fit) => {
-    const m = catalog[current];
-    const t0 = performance.now();
-    const r = kernel.build(current, m.params.map((p) => p.value), rollback);
-    if (r.info.ok) {
-      view.setMesh(r.positions, r.normals, r.kinds, r.indices, r.segments);
-      if (r.info.bounds) lastBounds = r.info.bounds;
+  // One build at a time, and only ever the newest request: a drag can't queue up work the finger has
+  // already moved past. Every result that does arrive is shown, so the model keeps up as best it can.
+  let busy = false, wanted = null, settleTimer = null, waiters = [];
+  const idle = () => !busy && !wanted && settleTimer === null;
+  const wake = () => {
+    if (idle()) {
+      const list = waiters;
+      waiters = [];
+      list.forEach((r) => r());
     }
-    const ms = performance.now() - t0;
-    updateReadout(r.info, ms);
-    if (fit && lastBounds) view.fit(lastBounds);
-    window.__lastBuild = { info: r.info, ms };
   };
+  const pump = async () => {
+    if (busy || !wanted) return;
+    busy = true;
+    const req = wanted;
+    wanted = null;
+    const { result: r, ms } = await kernel.build(req.model, req.values, req.rollback, req.draft);
+    busy = false;
+    // A model chosen since this was asked for has its own build coming.
+    if (req.model === current) {
+      if (r.info.ok) {
+        view.setMesh(r.positions, r.normals, r.kinds, r.indices, r.segments);
+        if (r.info.bounds) lastBounds = r.info.bounds;
+      }
+      updateReadout(r.info, ms);
+      if (req.fit && lastBounds) view.fit(lastBounds);
+      window.__lastBuild = { info: r.info, ms };
+      if (window.__buildLog) window.__buildLog.push({ draft: r.info.draft, triangles: r.info.triangles, ms });
+    }
+    pump();
+    wake();
+  };
+  const request = (fit, draft) => {
+    const m = catalog[current];
+    wanted = { model: current, values: m.params.map((p) => p.value), rollback, draft, fit: fit || (wanted ? wanted.fit : false) };
+    pump();
+  };
+  const settled = () => new Promise((r) => {
+    if (idle()) r();
+    else waiters.push(r);
+  });
+  const rebuild = (fit) => {
+    if (settleTimer !== null) { clearTimeout(settleTimer); settleTimer = null; }
+    request(fit, false);
+    return settled();
+  };
+  // While a slider moves: a lighter mesh and no mass properties. All the kernel's checks still run. When it
+  // pauses, the full mesh and the exact volume follow.
   const schedule = () => {
-    if (queued) return;
-    queued = true;
-    // Normally the next frame. Browsers can stop delivering frames (a hidden tab, a
-    // paused view), and a dimension change must not get stuck waiting for one.
-    const run = () => { if (queued) { queued = false; rebuild(false); } };
-    requestAnimationFrame(run);
-    setTimeout(run, 120);
+    request(false, true);
+    if (settleTimer !== null) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      request(false, false);
+    }, 140);
   };
 
   const selectModel = (i) => {
@@ -761,7 +915,7 @@ async function start() {
       input.addEventListener("input", () => { p.value = Number(input.value); show(); schedule(); });
       dims.append(row);
     }
-    rebuild(true);
+    return rebuild(true);
   };
 
   catalog.forEach((m, i) => {
@@ -801,8 +955,9 @@ async function start() {
   let saveFile = null;
   // <standalone>
   if (HOST === "standalone") {
-    saveFile = (kind, mime) => {
-      const data = kernel.exportFile(kind);
+    saveFile = async (kind, mime) => {
+      await settled();
+      const data = await kernel.exportFile(kind);
       if (!data) return;
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([data], { type: mime }));
@@ -820,7 +975,8 @@ async function start() {
     window.claude.use("downloads").then((downloads) => {
       if (!downloads) return;
       saveFile = async (kind) => {
-        const data = kernel.exportFile(kind);
+        await settled();
+        const data = await kernel.exportFile(kind);
         if (!data) return;
         note("");
         const name = `${catalog[current].id}.${kind}`;
@@ -846,13 +1002,13 @@ async function start() {
   if (query.get("az")) view.az = Number(query.get("az"));
   if (query.get("el")) view.el = Number(query.get("el"));
   if (query.get("kinds")) { view.byKind = true; $("tKinds").setAttribute("aria-pressed", "true"); }
-  selectModel(first);
-  if (query.get("roll")) { setRollback(Number(query.get("roll"))); }
+  await selectModel(first);
+  if (query.get("roll")) { setRollback(Number(query.get("roll"))); await settled(); }
   window.addEventListener("hashchange", () => {
     const i = catalog.findIndex((m) => "#" + m.id === location.hash);
     if (i >= 0 && i !== current) selectModel(i);
   });
-  window.__viewer = { view, kernel, catalog, selectModel, rebuild };
+  window.__viewer = { view, kernel, catalog, selectModel, rebuild, settled, usesWorker: kernel.usesWorker };
 }
 
 start().catch((e) => {

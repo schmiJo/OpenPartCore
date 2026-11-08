@@ -244,12 +244,17 @@ pub fn trace_faces(
 /// the boundary. The boundary here is a polygon that cuts corners on curved edges, so
 /// a point close to it could be on the wrong side of the true curve. Candidates come
 /// from scanning across the region, and the ones with the most clearance win.
+///
+/// With `quick`, a few well-spread scan lines are tried and only points with real clearance are
+/// returned, possibly none. Measuring clearance is the costly part of classifying a region, so a caller
+/// tries this first and comes back for the thorough search if it gets too few, or if they disagree.
 pub fn interior_points(
     surface: &Surface,
     chart: &Chart,
     edges: &[Edge],
     loops: &[Vec<Coedge>],
     wanted: usize,
+    quick: bool,
 ) -> Vec<Vec2> {
     let fc = FaceChart { surface, chart, flipped: false };
     // Each loop with its bounds, so that far-away loops cost one comparison.
@@ -288,38 +293,41 @@ pub fn interior_points(
         }
         best
     };
-    let mut candidates: Vec<(f64, Vec2)> = Vec::new();
-    let scans = 15;
-    for k in 0..scans {
-        // The offset keeps scan lines off vertices and symmetry planes.
-        let y = lo + (hi - lo) * ((k as f64 + 0.5) / scans as f64) + (hi - lo) * 1.37e-5;
-        let mut xs = Vec::new();
-        for (poly, a, b) in &polys {
-            if y < a.y || y > b.y {
-                continue;
+    let search = |scans: usize, widest: usize, alongs: &[f64]| -> Vec<(f64, Vec2)> {
+        let mut candidates: Vec<(f64, Vec2)> = Vec::new();
+        for k in 0..scans {
+            // The offset keeps scan lines off vertices and symmetry planes.
+            let y = lo + (hi - lo) * ((k as f64 + 0.5) / scans as f64) + (hi - lo) * 1.37e-5;
+            let mut xs = Vec::new();
+            for (poly, a, b) in &polys {
+                if y < a.y || y > b.y {
+                    continue;
+                }
+                for i in 0..poly.len() {
+                    let (p0, p1) = (poly[i], poly[(i + 1) % poly.len()]);
+                    if (p0.y > y) != (p1.y > y) {
+                        xs.push(p0.x + (y - p0.y) / (p1.y - p0.y) * (p1.x - p0.x));
+                    }
+                }
             }
-            for i in 0..poly.len() {
-                let (p0, p1) = (poly[i], poly[(i + 1) % poly.len()]);
-                if (p0.y > y) != (p1.y > y) {
-                    xs.push(p0.x + (y - p0.y) / (p1.y - p0.y) * (p1.x - p0.x));
+            xs.sort_by(f64::total_cmp);
+            // Only the widest few spans on each scan line: a plate with hundreds of holes
+            // has hundreds of spans per line, and the point only needs room around it.
+            let mut spans: Vec<(f64, f64)> = xs.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+            spans.sort_by(|p, q| (q.1 - q.0).total_cmp(&(p.1 - p.0)));
+            spans.truncate(widest);
+            for (x0, x1) in spans {
+                // Not only span middles: a dangling contact edge can run right along a
+                // line of symmetry, where every middle would land on it.
+                for along in alongs {
+                    let q = v2(x0 + (x1 - x0) * along, y);
+                    candidates.push((clearance(q), q));
                 }
             }
         }
-        xs.sort_by(f64::total_cmp);
-        // Only the widest few spans on each scan line: a plate with hundreds of holes
-        // has hundreds of spans per line, and the point only needs room around it.
-        let mut spans: Vec<(f64, f64)> = xs.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-        spans.sort_by(|p, q| (q.1 - q.0).total_cmp(&(p.1 - p.0)));
-        spans.truncate(3);
-        for (x0, x1) in spans {
-            // Not only span middles: a dangling contact edge can run right along a
-            // line of symmetry, where every middle would land on it.
-            for along in [0.5, 0.381966, 0.618034, 0.271, 0.729] {
-                let q = v2(x0 + (x1 - x0) * along, y);
-                candidates.push((clearance(q), q));
-            }
-        }
-    }
+        candidates
+    };
+    let mut candidates = if quick { search(5, 2, &[0.381966, 0.618034, 0.271]) } else { search(15, 3, &[0.5, 0.381966, 0.618034, 0.271, 0.729]) };
     candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
     let Some(&(best, _)) = candidates.first() else {
         return Vec::new();
@@ -332,6 +340,9 @@ pub fn interior_points(
         if picked.iter().all(|p| p.dist(q) > best * 0.5) {
             picked.push(q);
         }
+    }
+    if quick {
+        return picked;
     }
     // A narrow region may not have room for spread-out points. Use what exists.
     for &(_, q) in &candidates {
