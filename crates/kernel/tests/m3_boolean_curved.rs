@@ -435,3 +435,45 @@ fn tight_hyperbola_on_a_slender_cone_keeps_exact_volumes() {
         }
     }
 }
+
+/// Exact reference for review seed 7000138, where a cone's apex lies on a cylinder and
+/// their bases touch internally. The common region is a stack of circle-circle lenses, so
+/// its volume comes from direct integration. OpenCASCADE gives 5.45529 here, 6.5 ppm high.
+#[test]
+fn cone_apex_on_a_cylinder_matches_exact_integration() {
+    let a = cone_frustum(&Frame::new(v3(0.0, 1.0, 2.0), Vec3::Z, Vec3::X), 2.0, 0.0, 4.0, 1).unwrap();
+    let b = cylinder(&Frame::translation(v3(0.0, 2.0, 2.0)), 1.0, 4.0, 2).unwrap();
+    let common = 5.455259503248;
+    let (u, d, i) = all_ops(&a, &b, "apex on cylinder");
+    close(vol(&i), common, 1e-11, "common");
+    close(vol(&d), PI * 16.0 / 3.0 - common, 1e-11, "cut");
+    close(vol(&u), PI * 16.0 / 3.0 + PI * 4.0 - common, 1e-11, "union");
+}
+
+/// Review seeds that once failed the identities or were refused for grid-level reasons.
+#[test]
+fn review_seeds_satisfy_the_identities() {
+    use coreshape::fuzz::{run_case, Category};
+    for seed in [7000138, 7000418, 3833] {
+        let out = run_case(Category::AlignedPrimitives, seed, 100);
+        assert!(out.wrong.is_empty(), "seed {seed}: {:?}", out.wrong);
+        assert!(out.refusals.is_empty(), "seed {seed}: {:?}", out.refusals);
+    }
+}
+
+/// Holes in one profile used to take seconds through pairwise validation.
+#[test]
+fn many_holes_in_one_profile() {
+    let n = 20;
+    let mut p = Profile::new(Wire::rect(0.0, 0.0, 400.0, 400.0));
+    for i in 0..n {
+        for j in 0..n {
+            let s = 380.0 / n as f64;
+            p = p.with_hole(Wire::circle(v2(10.0 + s * (i as f64 + 0.5), 10.0 + s * (j as f64 + 0.5)), s * 0.3));
+        }
+    }
+    let b = extrude(&p, &Frame::WORLD, 10.0, 1).unwrap();
+    assert_eq!(validate(&b).unwrap().genus, vec![400]);
+    let r = 380.0 / n as f64 * 0.3;
+    close(vol(&b), 1600000.0 - 400.0 * PI * r * r * 10.0, 1e-10, "perforated plate");
+}

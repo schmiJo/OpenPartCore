@@ -348,28 +348,60 @@ impl Profile {
 
     pub fn validate(&self) -> Result<()> {
         self.outer.check("outer")?;
+        let outer_flat = self.outer.flatten();
+        let bounds = |flat: &[(Vec2, Vec2, usize)]| {
+            let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
+            for &(a, _, _) in flat {
+                lo = v2(lo.x.min(a.x), lo.y.min(a.y));
+                hi = v2(hi.x.max(a.x), hi.y.max(a.y));
+            }
+            (lo, hi)
+        };
+        let flats: Vec<Vec<(Vec2, Vec2, usize)>> = self.holes.iter().map(Wire::flatten).collect();
+        let boxes: Vec<(Vec2, Vec2)> = flats.iter().map(|f| bounds(f)).collect();
         for (i, h) in self.holes.iter().enumerate() {
             h.check(&format!("hole {i}"))?;
             if !self.outer.contains(h.segs[0].start()) {
                 return Err(Error::InvalidProfile(format!("hole {i} is outside the outer wire")));
             }
-            for (a, b, _) in h.flatten() {
-                for (c, d, _) in self.outer.flatten() {
+            let (lo, hi) = boxes[i];
+            for &(c, d, _) in &outer_flat {
+                let clear = c.x.max(d.x) < lo.x || c.x.min(d.x) > hi.x || c.y.max(d.y) < lo.y || c.y.min(d.y) > hi.y;
+                if clear {
+                    continue;
+                }
+                for &(a, b, _) in &flats[i] {
                     if segments_cross(a, b, c, d) {
                         return Err(Error::InvalidProfile(format!("hole {i} crosses the outer wire")));
                     }
                 }
             }
-            for (j, other) in self.holes.iter().enumerate().skip(i + 1) {
-                for (a, b, _) in h.flatten() {
-                    for (c, d, _) in other.flatten() {
+        }
+        // Sweep across x so that only holes whose bounds overlap are ever compared.
+        let mut order: Vec<usize> = (0..self.holes.len()).collect();
+        order.sort_by(|&a, &b| boxes[a].0.x.total_cmp(&boxes[b].0.x));
+        for (k, &i) in order.iter().enumerate() {
+            let (lo, hi) = boxes[i];
+            for &j in &order[k + 1..] {
+                let (lo2, hi2) = boxes[j];
+                if lo2.x > hi.x {
+                    break;
+                }
+                if lo2.y > hi.y || hi2.y < lo.y {
+                    continue;
+                }
+                let (first, second) = (i.min(j), i.max(j));
+                for &(a, b, _) in &flats[i] {
+                    for &(c, d, _) in &flats[j] {
                         if segments_cross(a, b, c, d) {
-                            return Err(Error::InvalidProfile(format!("holes {i} and {j} cross")));
+                            return Err(Error::InvalidProfile(format!("holes {first} and {second} cross")));
                         }
                     }
                 }
-                if other.contains(h.segs[0].start()) || h.contains(other.segs[0].start()) {
-                    return Err(Error::InvalidProfile(format!("holes {i} and {j} are nested")));
+                if self.holes[j].contains(self.holes[i].segs[0].start())
+                    || self.holes[i].contains(self.holes[j].segs[0].start())
+                {
+                    return Err(Error::InvalidProfile(format!("holes {first} and {second} are nested")));
                 }
             }
         }

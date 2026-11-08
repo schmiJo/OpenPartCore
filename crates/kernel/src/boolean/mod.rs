@@ -323,7 +323,7 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
     validate(&body).map_err(Error::InvalidBody)?;
     match checks {
         Checks::Full => {
-            verify_meshable(&body)?;
+            verify_meshable(&body, bodies)?;
             verify_membership(&index, &body, op, 40)?;
         }
         Checks::Interim => verify_membership(&index, &body, op, 12)?,
@@ -331,16 +331,62 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
     Ok(body)
 }
 
+/// Identifies an edge by its geometry, so that an edge can be recognised across a
+/// Boolean that renumbered it.
+fn edge_signature(body: &Body, e: usize) -> u64 {
+    let edge = &body.edges[e];
+    let kind: u64 = match edge.curve {
+        Curve::Line { .. } => 1,
+        Curve::Circle { .. } => 2,
+        Curve::Ellipse { .. } => 3,
+        Curve::Sampled(_) => 4,
+    };
+    let (p, q) = (body.vertices[edge.v0], body.vertices[edge.v1]);
+    let mut h: u64 = 0xcbf29ce484222325 ^ kind;
+    for x in [p.x, p.y, p.z, q.x, q.y, q.z, edge.t1 - edge.t0] {
+        h = (h ^ x.to_bits()).wrapping_mul(0x100000001b3);
+        h ^= h >> 29;
+    }
+    h
+}
+
 /// A result can pass every topological check and still hold two edges that run
 /// within tolerance of each other, for instance an intersection curve tangent to
 /// a face boundary. Such a body can't be meshed or machined reliably, so it is
 /// refused here rather than discovered later.
-fn verify_meshable(body: &Body) -> Result<()> {
-    if body.faces.is_empty() {
+///
+/// Meshing the whole body after every operation made long chains quadratic. A face with
+/// no new edges was checked when it was made, so this triangulates only the faces that
+/// have new ones. Only if one of those fails does it mesh the whole body for the final
+/// verdict, since the mesher can often resolve a conflict with denser sampling.
+fn verify_meshable(result: &Body, inputs: [&Body; 2]) -> Result<()> {
+    if result.faces.is_empty() {
         return Ok(());
     }
-    let size = body.aabb().diagonal();
-    let mesh = crate::tess::tessellate(body, &crate::tess::TessParams::for_size(size))
+    let mut known = HashSet::new();
+    for body in inputs {
+        for e in 0..body.edges.len() {
+            known.insert(edge_signature(body, e));
+        }
+    }
+    let is_new: Vec<bool> = (0..result.edges.len()).map(|e| !known.contains(&edge_signature(result, e))).collect();
+    let mut bounds = Aabb::EMPTY;
+    for &p in &result.vertices {
+        bounds.add(p);
+    }
+    let params = crate::tess::TessParams::for_size(bounds.diagonal().max(1e-9));
+    let changed_faces_mesh = (0..result.faces.len()).all(|f| {
+        !result.faces[f].loops.iter().flatten().any(|c| is_new[c.edge])
+            || crate::tess::face_meshes_cleanly(result, f, &is_new, &params)
+    });
+    if !changed_faces_mesh {
+        verify_by_meshing(result, &params)?;
+    }
+    Ok(())
+}
+
+fn verify_by_meshing(body: &Body, params: &crate::tess::TessParams) -> Result<()> {
+    let mesh = crate::tess::tessellate(body, params)
         .map_err(|e| Error::NearDegenerate(format!("the result has edges too close to tell apart: {e}")))?;
     let open = mesh.open_edge_count();
     if open != 0 {

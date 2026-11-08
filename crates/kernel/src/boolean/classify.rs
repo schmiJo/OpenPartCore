@@ -26,7 +26,29 @@ pub struct Index<'a> {
     pub body: &'a Body,
     pub edge_boxes: Vec<Aabb>,
     pub face_boxes: Vec<Aabb>,
+    /// Chart bounds of each loop of each face. A face can have hundreds of holes, and a
+    /// point outside a closed loop's bounds gets no winding from it and is near none of
+    /// its edges, so most loops can be skipped without touching their edges.
+    pub loop_boxes: Vec<Vec<(Vec2, Vec2)>>,
     pub bounds: Aabb,
+}
+
+/// Bounds of a loop in its face's chart, with a margin for curve between samples.
+fn loop_bounds(body: &Body, f: usize, l: usize) -> (Vec2, Vec2) {
+    let face = &body.faces[f];
+    let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
+    for &c in &face.loops[l] {
+        let e = &body.edges[c.edge];
+        let samples = if matches!(e.curve, Curve::Line { .. }) { 1 } else { 8 };
+        for k in 0..=samples {
+            let t = e.t0 + (e.t1 - e.t0) * k as f64 / samples as f64;
+            let uv = face.surface.to_chart(&face.chart, e.curve.eval(t));
+            lo = v2(lo.x.min(uv.x), lo.y.min(uv.y));
+            hi = v2(hi.x.max(uv.x), hi.y.max(uv.y));
+        }
+    }
+    let margin = (hi - lo).norm() * 0.15;
+    (v2(lo.x - margin, lo.y - margin), v2(hi.x + margin, hi.y + margin))
 }
 
 /// Winding angle of an edge around a chart point, refined near the point so that
@@ -79,7 +101,10 @@ impl<'a> Index<'a> {
         for b in &face_boxes {
             bounds.union(b);
         }
-        Index { body, edge_boxes, face_boxes, bounds }
+        let loop_boxes = (0..body.faces.len())
+            .map(|f| (0..body.faces[f].loops.len()).map(|l| loop_bounds(body, f, l)).collect())
+            .collect();
+        Index { body, edge_boxes, face_boxes, loop_boxes, bounds }
     }
 
     /// Locates a point relative to a face. A point farther than `tol` from the
@@ -89,7 +114,21 @@ impl<'a> Index<'a> {
         if face.surface.sdf(p).abs() > tol || !self.face_boxes[f].inflated(tol).contains(p) {
             return FaceLoc::Outside;
         }
-        for lp in &face.loops {
+        let target = face.surface.to_chart(&face.chart, p);
+        let near = 16.0 * tol;
+        let in_box = |l: usize| {
+            let (lo, hi) = self.loop_boxes[f][l];
+            target.x >= lo.x - near && target.x <= hi.x + near && target.y >= lo.y - near && target.y <= hi.y + near
+        };
+        // Outside the outer loop's bounds means outside the face.
+        if !in_box(0) {
+            return FaceLoc::Outside;
+        }
+        let mut winding = 0.0;
+        for (l, lp) in face.loops.iter().enumerate() {
+            if l > 0 && !in_box(l) {
+                continue;
+            }
             for c in lp {
                 if self.edge_boxes[c.edge].inflated(tol).contains(p) {
                     let e = &self.body.edges[c.edge];
@@ -98,10 +137,6 @@ impl<'a> Index<'a> {
                     }
                 }
             }
-        }
-        let target = face.surface.to_chart(&face.chart, p);
-        let mut winding = 0.0;
-        for lp in &face.loops {
             for c in lp {
                 winding += edge_winding(&face.surface, &face.chart, &self.body.edges[c.edge], c.reversed, target);
             }

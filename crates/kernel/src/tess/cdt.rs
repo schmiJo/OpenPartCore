@@ -539,14 +539,27 @@ impl Cdt {
     /// Marks triangles inside a set of closed polygons given as vertex ids: a point
     /// is inside when it has a non-zero total winding.
     pub fn mark_inside(&mut self, loops: &[Vec<u32>]) {
-        let polys: Vec<Vec<[f64; 2]>> =
-            loops.iter().map(|l| l.iter().map(|&v| [self.p(v)[0] as f64, self.p(v)[1] as f64]).collect()).collect();
+        let polys: Vec<(Vec<[f64; 2]>, [f64; 4])> = loops
+            .iter()
+            .map(|l| {
+                let poly: Vec<[f64; 2]> = l.iter().map(|&v| [self.p(v)[0] as f64, self.p(v)[1] as f64]).collect();
+                let mut b = [f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY];
+                for p in &poly {
+                    b = [b[0].min(p[0]), b[1].max(p[0]), b[2].min(p[1]), b[3].max(p[1])];
+                }
+                (poly, b)
+            })
+            .collect();
         self.mark_inside_with(|q| {
             let mut w = 0.0;
-            for poly in &polys {
+            for (poly, b) in &polys {
+                // A closed loop gives no winding to a point outside its bounds.
+                if q[0] < b[0] || q[0] > b[1] || q[1] < b[2] || q[1] > b[3] {
+                    continue;
+                }
                 for i in 0..poly.len() {
-                    let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-                    let (ux, uy, vx, vy) = (a[0] - q[0], a[1] - q[1], b[0] - q[0], b[1] - q[1]);
+                    let (a, c) = (poly[i], poly[(i + 1) % poly.len()]);
+                    let (ux, uy, vx, vy) = (a[0] - q[0], a[1] - q[1], c[0] - q[0], c[1] - q[1]);
                     w += (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
                 }
             }

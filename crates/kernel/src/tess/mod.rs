@@ -121,7 +121,24 @@ impl Mesh {
 
 /// Samples an edge. The first and last points are exactly its vertices. `density`
 /// multiplies the number of samples.
-fn edge_polyline(e: &Edge, vertices: &[Vec3], params: &TessParams, density: usize) -> Vec<Vec3> {
+///
+/// `graded` adds samples at power-of-two distances from each end. Two curves leaving a
+/// vertex tangentially can have chords that cross however dense they are, if their
+/// samples fall at different distances. Sampled at the same distances, the chords keep
+/// the same order as the curves, and these distances mean the same on every edge.
+///
+/// No sample lands closer than `min_gap` to either end. Tangent curves separate with the
+/// square of the distance from their shared vertex, so below about the square root of
+/// the mesher's grid they can't be told apart, and rounding could put them in the wrong
+/// order. Leaving those samples out moves the mesh far less than the chord tolerance.
+pub fn edge_polyline(
+    e: &Edge,
+    vertices: &[Vec3],
+    params: &TessParams,
+    density: usize,
+    graded: bool,
+    min_gap: f64,
+) -> Vec<Vec3> {
     let dt = e.t1 - e.t0;
     let base = match &e.curve {
         Curve::Line { .. } => 1,
@@ -137,13 +154,45 @@ fn edge_polyline(e: &Edge, vertices: &[Vec3], params: &TessParams, density: usiz
         Curve::Sampled(_) => (dt.ceil() as usize).max(2),
     };
     let steps = base * density;
-    let mut pts = Vec::with_capacity(steps + 1);
-    pts.push(vertices[e.v0]);
-    for i in 1..steps {
-        pts.push(e.curve.eval(e.t0 + dt * i as f64 / steps as f64));
+    let mut params_on_curve: Vec<f64> = (1..steps).map(|i| e.t0 + dt * i as f64 / steps as f64).collect();
+    if graded {
+        let length_guess = dt * e.curve.derivative(e.t0 + dt / 2.0).norm();
+        let (speed0, speed1) = (e.curve.derivative(e.t0).norm().max(1e-12), e.curve.derivative(e.t1).norm().max(1e-12));
+        let mut distance = 2f64.powi((length_guess / 2.0).max(1e-300).log2().floor() as i32);
+        for _ in 0..24 {
+            let (a, b) = (e.t0 + distance / speed0, e.t1 - distance / speed1);
+            if a > e.t0 && a < e.t1 {
+                params_on_curve.push(a);
+            }
+            if b > e.t0 && b < e.t1 {
+                params_on_curve.push(b);
+            }
+            distance /= 2.0;
+        }
+        params_on_curve.sort_by(f64::total_cmp);
+        params_on_curve.dedup_by(|a, b| (*a - *b).abs() < dt * 1e-9);
     }
-    pts.push(vertices[e.v1]);
+    let (first, last) = (vertices[e.v0], vertices[e.v1]);
+    let mut pts = Vec::with_capacity(params_on_curve.len() + 2);
+    pts.push(first);
+    for &t in &params_on_curve {
+        let p = e.curve.eval(t);
+        if p.dist(first) > min_gap && p.dist(last) > min_gap {
+            pts.push(p);
+        }
+    }
+    // A curved edge keeps at least one interior point, so that two arcs between the
+    // same vertices never collapse onto one chord.
+    if pts.len() == 1 && !params_on_curve.is_empty() {
+        pts.push(e.curve.eval(e.t0 + dt / 2.0));
+    }
+    pts.push(last);
     pts
+}
+
+/// The sampling floor for a body of this size. See `edge_polyline`.
+pub fn min_sample_gap(size: f64) -> f64 {
+    size / 16384.0
 }
 
 /// Tessellates a body into a watertight mesh.
@@ -154,10 +203,20 @@ fn edge_polyline(e: &Edge, vertices: &[Vec3], params: &TessParams, density: usiz
 /// points, so a partial redo could tear the mesh.
 pub fn tessellate(body: &Body, params: &TessParams) -> Result<Mesh> {
     let mut density = vec![1usize; body.edges.len()];
+    let mut graded = vec![false; body.edges.len()];
+    let mut bounds = Aabb::EMPTY;
+    for &p in &body.vertices {
+        bounds.add(p);
+    }
+    let min_gap = min_sample_gap(bounds.diagonal());
     let mut last_error = None;
     for _attempt in 0..5 {
-        let mut polylines: Vec<Vec<Vec3>> =
-            body.edges.iter().zip(&density).map(|(e, &d)| edge_polyline(e, &body.vertices, params, d)).collect();
+        let mut polylines: Vec<Vec<Vec3>> = body
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(i, e)| edge_polyline(e, &body.vertices, params, density[i], graded[i], min_gap))
+            .collect();
         let mut mesh = Mesh::default();
         let mut crossing = None;
         for f in 0..body.faces.len() {
@@ -176,12 +235,100 @@ pub fn tessellate(body: &Body, params: &TessParams) -> Result<Mesh> {
                 for lp in &body.faces[f].loops {
                     for c in lp {
                         density[c.edge] *= 2;
+                        graded[c.edge] = true;
                     }
                 }
             }
         }
     }
     Err(last_error.unwrap())
+}
+
+/// Whether the part of a face around its new edges triangulates with its boundary intact:
+/// no crossing edges, and every boundary segment appearing as a mesh edge with nothing
+/// else left open. This is the part of meshing that can fail, since refinement only adds
+/// interior points. Only loops near the new edges can conflict with them, so a plate with
+/// hundreds of holes costs no more than its one new hole.
+pub fn face_meshes_cleanly(body: &Body, f: usize, is_new: &[bool], params: &TessParams) -> bool {
+    let face = &body.faces[f];
+    let mut bounds = Aabb::EMPTY;
+    for &p in &body.vertices {
+        bounds.add(p);
+    }
+    let min_gap = min_sample_gap(bounds.diagonal());
+    let mut polylines: Vec<Vec<Vec3>> = vec![Vec::new(); body.edges.len()];
+    for &c in face.loops.iter().flatten() {
+        if polylines[c.edge].is_empty() {
+            polylines[c.edge] = edge_polyline(&body.edges[c.edge], &body.vertices, params, 1, false, min_gap);
+        }
+    }
+    // Chart bounds of each edge, and of everything new on this face.
+    let edge_box = |e: usize| {
+        let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
+        for &p in &polylines[e] {
+            let uv = face.surface.to_chart(&face.chart, p);
+            lo = v2(lo.x.min(uv.x), lo.y.min(uv.y));
+            hi = v2(hi.x.max(uv.x), hi.y.max(uv.y));
+        }
+        (lo, hi)
+    };
+    let (mut new_lo, mut new_hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
+    for &c in face.loops.iter().flatten() {
+        if is_new[c.edge] {
+            let (lo, hi) = edge_box(c.edge);
+            new_lo = v2(new_lo.x.min(lo.x), new_lo.y.min(lo.y));
+            new_hi = v2(new_hi.x.max(hi.x), new_hi.y.max(hi.y));
+        }
+    }
+    let margin = (new_hi - new_lo).norm() * 0.05 + 1e-9;
+    let chosen: Vec<usize> = (0..face.loops.len())
+        .filter(|&l| {
+            face.loops[l].iter().any(|c| {
+                if is_new[c.edge] {
+                    return true;
+                }
+                let (lo, hi) = edge_box(c.edge);
+                lo.x <= new_hi.x + margin
+                    && hi.x >= new_lo.x - margin
+                    && lo.y <= new_hi.y + margin
+                    && hi.y >= new_lo.y - margin
+            })
+        })
+        .collect();
+
+    // Directed segments cancel where a loop runs both ways along a slit. What remains,
+    // ignoring direction because a subset of loops can enclose the opposite side, should
+    // be exactly the mesh's open edges.
+    let key = |p: Vec3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+    let net = |list: &mut HashMap<[[u64; 3]; 2], i32>, a: [u64; 3], b: [u64; 3]| {
+        if a < b {
+            *list.entry([a, b]).or_insert(0) += 1;
+        } else if b < a {
+            *list.entry([b, a]).or_insert(0) -= 1;
+        }
+    };
+    let mut expected: HashMap<[[u64; 3]; 2], i32> = HashMap::new();
+    for &l in &chosen {
+        for &c in &face.loops[l] {
+            for w in polylines[c.edge].windows(2) {
+                let (a, b) = if c.reversed { (w[1], w[0]) } else { (w[0], w[1]) };
+                net(&mut expected, key(a), key(b));
+            }
+        }
+    }
+    expected.retain(|_, v| *v != 0);
+    let mut mesh = Mesh::default();
+    if build_face(body, f, &polylines, params, &mut mesh, false, Some(&chosen)).is_err() {
+        return false;
+    }
+    let mut open: HashMap<[[u64; 3]; 2], i32> = HashMap::new();
+    for t in &mesh.triangles {
+        for i in 0..3 {
+            net(&mut open, key(mesh.positions[t[i] as usize]), key(mesh.positions[t[(i + 1) % 3] as usize]));
+        }
+    }
+    open.retain(|_, v| *v != 0);
+    open.len() == expected.len() && open.keys().all(|k| expected.contains_key(k))
 }
 
 struct FaceFrame {
@@ -206,6 +353,18 @@ fn tessellate_face(
     params: &TessParams,
     mesh: &mut Mesh,
 ) -> Result<()> {
+    build_face(body, f, polylines, params, mesh, true, None)
+}
+
+fn build_face(
+    body: &Body,
+    f: usize,
+    polylines: &[Vec<Vec3>],
+    params: &TessParams,
+    mesh: &mut Mesh,
+    refine_surface: bool,
+    only_loops: Option<&[usize]>,
+) -> Result<()> {
     let face = &body.faces[f];
     let (surface, chart) = (&face.surface, &face.chart);
 
@@ -213,7 +372,9 @@ fn tessellate_face(
     let chains: Vec<Vec<Vec3>> = face
         .loops
         .iter()
-        .map(|lp| {
+        .enumerate()
+        .filter(|(l, _)| only_loops.is_none_or(|chosen| chosen.contains(l)))
+        .map(|(_, lp)| {
             let mut chain = Vec::new();
             for &c in lp {
                 let line = &polylines[c.edge];
@@ -261,7 +422,7 @@ fn tessellate_face(
     }
     cdt.mark_inside(&loop_ids);
 
-    if !matches!(surface, Surface::Plane(_)) {
+    if refine_surface && !matches!(surface, Surface::Plane(_)) {
         refine(&mut cdt, &frame, surface, chart, &mut point_of, params);
     }
 

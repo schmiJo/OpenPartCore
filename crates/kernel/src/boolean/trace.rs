@@ -62,13 +62,17 @@ fn near_start(e: &Edge, c: Coedge, dist: f64) -> Vec3 {
 }
 
 fn polygon_of(fc: &FaceChart, edges: &[Edge], lp: &[Coedge]) -> Vec<Vec2> {
+    polygon_with(fc, edges, lp, 32)
+}
+
+fn polygon_with(fc: &FaceChart, edges: &[Edge], lp: &[Coedge], per_curve: usize) -> Vec<Vec2> {
     let mut pts = Vec::new();
     for &c in lp {
         let e = &edges[c.edge];
         let n = match &e.curve {
             crate::curve::Curve::Line { .. } if matches!(fc.surface, Surface::Plane(_)) => 1,
             crate::curve::Curve::Sampled(_) => ((e.t1 - e.t0).ceil() as usize).clamp(4, 512),
-            _ => 32,
+            _ => per_curve,
         };
         for i in 0..n {
             let s = i as f64 / n as f64;
@@ -248,21 +252,38 @@ pub fn interior_points(
     wanted: usize,
 ) -> Vec<Vec2> {
     let fc = FaceChart { surface, chart, flipped: false };
-    let polys: Vec<Vec<Vec2>> = loops.iter().map(|l| polygon_of(&fc, edges, l)).collect();
+    // Each loop with its bounds, so that far-away loops cost one comparison.
+    let polys: Vec<(Vec<Vec2>, Vec2, Vec2)> = loops
+        .iter()
+        .map(|l| {
+            let poly = polygon_with(&fc, edges, l, 16);
+            let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
+            for p in &poly {
+                lo = v2(lo.x.min(p.x), lo.y.min(p.y));
+                hi = v2(hi.x.max(p.x), hi.y.max(p.y));
+            }
+            (poly, lo, hi)
+        })
+        .collect();
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    for &p in polys.iter().flatten() {
-        lo = lo.min(p.y);
-        hi = hi.max(p.y);
+    for (_, a, b) in &polys {
+        lo = lo.min(a.y);
+        hi = hi.max(b.y);
     }
     let clearance = |q: Vec2| {
         let mut best = f64::INFINITY;
-        for poly in &polys {
+        for (poly, a, b) in &polys {
+            let dx = (a.x - q.x).max(q.x - b.x).max(0.0);
+            let dy = (a.y - q.y).max(q.y - b.y).max(0.0);
+            if dx.hypot(dy) >= best {
+                continue;
+            }
             for i in 0..poly.len() {
-                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-                let d = b - a;
+                let (p0, p1) = (poly[i], poly[(i + 1) % poly.len()]);
+                let d = p1 - p0;
                 let len2 = d.dot(d);
-                let t = if len2 > 0.0 { ((q - a).dot(d) / len2).clamp(0.0, 1.0) } else { 0.0 };
-                best = best.min(q.dist(a + d * t));
+                let t = if len2 > 0.0 { ((q - p0).dot(d) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                best = best.min(q.dist(p0 + d * t));
             }
         }
         best
@@ -273,20 +294,28 @@ pub fn interior_points(
         // The offset keeps scan lines off vertices and symmetry planes.
         let y = lo + (hi - lo) * ((k as f64 + 0.5) / scans as f64) + (hi - lo) * 1.37e-5;
         let mut xs = Vec::new();
-        for poly in &polys {
+        for (poly, a, b) in &polys {
+            if y < a.y || y > b.y {
+                continue;
+            }
             for i in 0..poly.len() {
-                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-                if (a.y > y) != (b.y > y) {
-                    xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+                let (p0, p1) = (poly[i], poly[(i + 1) % poly.len()]);
+                if (p0.y > y) != (p1.y > y) {
+                    xs.push(p0.x + (y - p0.y) / (p1.y - p0.y) * (p1.x - p0.x));
                 }
             }
         }
         xs.sort_by(f64::total_cmp);
-        for pair in xs.as_chunks::<2>().0 {
+        // Only the widest few spans on each scan line: a plate with hundreds of holes
+        // has hundreds of spans per line, and the point only needs room around it.
+        let mut spans: Vec<(f64, f64)> = xs.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+        spans.sort_by(|p, q| (q.1 - q.0).total_cmp(&(p.1 - p.0)));
+        spans.truncate(3);
+        for (x0, x1) in spans {
             // Not only span middles: a dangling contact edge can run right along a
             // line of symmetry, where every middle would land on it.
             for along in [0.5, 0.381966, 0.618034, 0.271, 0.729] {
-                let q = v2(pair[0] + (pair[1] - pair[0]) * along, y);
+                let q = v2(x0 + (x1 - x0) * along, y);
                 candidates.push((clearance(q), q));
             }
         }
