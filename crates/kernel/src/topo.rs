@@ -86,6 +86,9 @@ pub struct Body {
     pub edges: Vec<Edge>,
     pub faces: Vec<Face>,
     pub shells: Vec<Vec<usize>>,
+    /// How far this body's edges may be from their faces. Zero, which means the kernel's own tolerance, unless it came
+    /// from a file whose surfaces don't quite meet, where this is the widest gap it was read with.
+    pub tolerance: f64,
 }
 
 impl Edge {
@@ -264,7 +267,7 @@ impl Body {
     /// The body's reflection across a plane. A reflection turns loops the other way round, so each
     /// face's loops are reversed to keep material on the same side of them.
     pub fn mirrored(&self, m: &crate::math::Mirror) -> Body {
-        let mut out = Body { vertices: self.vertices.iter().map(|p| m.of_point(*p)).collect(), ..Body::default() };
+        let mut out = Body { vertices: self.vertices.iter().map(|p| m.of_point(*p)).collect(), tolerance: self.tolerance, ..Body::default() };
         out.edges = self
             .edges
             .iter()

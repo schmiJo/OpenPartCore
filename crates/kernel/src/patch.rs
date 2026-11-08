@@ -635,8 +635,11 @@ pub struct Patch {
     weights: Vec<f64>,
     cells: Vec<BezierCell>,
     breaks: (Vec<f64>, Vec<f64>),
-    /// The boundary, as `v = v0`, `u = u1`, `v = v1` and `u = u0`, with their bounding boxes.
-    sides: Vec<(Spline, Vec3, Vec3)>,
+    /// The boundary, as `v = v0`, `u = u1`, `v = v1` and `u = u0`, with their bounding boxes. A side that has shrunk to
+    /// a point is a pole, and has no curve.
+    sides: Vec<Option<(Spline, Vec3, Vec3)>>,
+    /// The poles, as points.
+    poles: Vec<Vec3>,
     /// Chart units per unit of `u` and `v`. Large enough that 3D distance never exceeds chart distance.
     scale: (f64, f64),
     lo: Vec3,
@@ -698,7 +701,7 @@ fn raise_knot(degree: usize, knots: &mut Vec<f64>, x: f64, lines: &mut [Vec<Hom>
 }
 
 /// Knots and which control points make up the part of the lines between two parameters.
-fn cut_lines(degree: usize, knots: &[f64], (a, b): (f64, f64), lines: &mut [Vec<Hom>]) -> (Vec<f64>, (usize, usize)) {
+pub(crate) fn cut_lines(degree: usize, knots: &[f64], (a, b): (f64, f64), lines: &mut [Vec<Hom>]) -> (Vec<f64>, (usize, usize)) {
     let mut working = knots.to_vec();
     let (first, last) = (knots[0], knots[knots.len() - 1]);
     if a > first {
@@ -734,24 +737,30 @@ impl Patch {
         let column = |i: usize| -> (Vec<Vec3>, Vec<f64>) { (points[i * nv..(i + 1) * nv].to_vec(), weights[i * nv..(i + 1) * nv].to_vec()) };
         let along_u = |(c, w): (Vec<Vec3>, Vec<f64>)| Spline::new(p, knots.0.clone(), c, w);
         let along_v = |(c, w): (Vec<Vec3>, Vec<f64>)| Spline::new(q, knots.1.clone(), c, w);
-        // An edge that has shrunk to a point is a pole, which is what these refuse.
-        let list = (|| Ok::<_, Error>([along_u(row(0))?, along_v(column(nu - 1))?, along_u(row(nv - 1))?, along_v(column(0))?]))();
-        let list = match list {
-            Ok(l) => l,
-            Err(e) => return bad(format!("{e}. A side shrunk to a point, which is a pole, isn't supported yet")),
-        };
-        let sides = list
-            .into_iter()
-            .map(|s| {
-                let pts = s.points();
-                let (mut lo, mut hi) = (pts[0], pts[0]);
-                for c in pts {
-                    lo = lo.min(*c);
-                    hi = hi.max(*c);
-                }
-                (s, lo, hi)
-            })
-            .collect();
+        // A side that has shrunk to a point is a pole, and has no curve to search.
+        let raw = [(row(0), true), (column(nu - 1), false), (row(nv - 1), true), (column(0), false)];
+        let size = points.iter().fold(0.0f64, |m, c| m.max(c.dist(points[0])));
+        let mut sides = Vec::with_capacity(4);
+        let mut poles = Vec::new();
+        for ((c, w), is_u) in raw {
+            if c.iter().all(|q| q.dist(c[0]) <= 1e-9 * size.max(1.0)) {
+                poles.push(c[0]);
+                sides.push(None);
+                continue;
+            }
+            let s = if is_u { along_u((c, w)) } else { along_v((c, w)) };
+            let s = match s {
+                Ok(s) => s,
+                Err(e) => return bad(e.to_string()),
+            };
+            let pts = s.points();
+            let (mut lo, mut hi) = (pts[0], pts[0]);
+            for q in pts {
+                lo = lo.min(*q);
+                hi = hi.max(*q);
+            }
+            sides.push(Some((s, lo, hi)));
+        }
 
         // Bezier pieces: along u, then along v.
         let mut along: Vec<Vec<Hom>> = (0..nv).map(|j| (0..nu).map(|i| Hom::of(points[i * nv + j], weights[i * nv + j])).collect()).collect();
@@ -788,6 +797,7 @@ impl Patch {
         // with the tightest curve, which sets how fine a trace over this surface has to be.
         let mut min_radius = f64::INFINITY;
         const SAMPLES: usize = 12;
+        let near_pole = |q: Vec3| poles.iter().any(|p: &Vec3| p.dist(q) <= 1e-6 * size.max(1.0));
         for c in &cells {
             // A fold is narrow and the normal doesn't have to come near zero at any sample, but it does turn over
             // between two close ones, which no smooth surface does at this spacing.
@@ -798,6 +808,10 @@ impl Patch {
                     let n = q.ds.cross(q.dt);
                     let (e, f, g) = (q.ds.dot(q.ds), q.ds.dot(q.dt), q.dt.dot(q.dt));
                     let area2 = e * g - f * f;
+                    // A pole has no normal, and that's all right: it's a point, and what's around it has one.
+                    if near_pole(q.p) {
+                        continue;
+                    }
                     if !(area2 > 1e-14 * e * g) || !(e > 0.0) || !(g > 0.0) {
                         let (u, v) = (c.u.0 + (c.u.1 - c.u.0) * a as f64 / SAMPLES as f64, c.v.0 + (c.v.1 - c.v.0) * b as f64 / SAMPLES as f64);
                         return bad(format!("it has no normal near u = {u:.6}, v = {v:.6}, which means a pole or a fold, and those aren't supported yet"));
@@ -829,6 +843,7 @@ impl Patch {
             cells,
             breaks: (breaks_u, breaks_v),
             sides,
+            poles,
             scale,
             lo,
             hi,
@@ -895,9 +910,21 @@ impl Patch {
         (self.lo, self.hi)
     }
 
-    /// The boundary curves: `v = v0`, `u = u1`, `v = v1` and `u = u0`.
-    pub fn side(&self, k: usize) -> &Spline {
-        &self.sides[k].0
+    /// Whether a point is at one of this surface's poles, where a whole side has shrunk to a point.
+    pub fn at_pole(&self, p: Vec3) -> bool {
+        self.poles.iter().any(|q| q.dist(p) <= 1e-7)
+    }
+
+    /// The normal at these parameters. At a pole there isn't one, so it's the limit from a little way in.
+    fn normal_at(&self, u: f64, v: f64) -> Vec3 {
+        let (_, du, dv) = self.derivs(u, v);
+        let n = du.cross(dv);
+        if n.norm() > 1e-12 * du.norm().max(dv.norm()).max(1e-300) * du.norm().max(dv.norm()) && !self.at_pole(self.eval(u, v)) {
+            return n.normalized();
+        }
+        let ((u0, u1), (v0, v1)) = self.domain();
+        let (_, a, b) = self.derivs(u + (0.5 * (u0 + u1) - u) * 1e-3, v + (0.5 * (v0 + v1) - v) * 1e-3);
+        a.cross(b).normalized()
     }
 
     /// The same surface reflected in local y, with `v` running the other way, which makes its normal the
@@ -920,7 +947,10 @@ impl Patch {
 
     /// Whether its two `u` sides, or `v` sides, are the same curve in space, so that it closes up.
     pub fn closes_up(&self, along_v: bool) -> bool {
-        let (a, b) = if along_v { (&self.sides[0].0, &self.sides[2].0) } else { (&self.sides[3].0, &self.sides[1].0) };
+        let (a, b) = if along_v { (&self.sides[0], &self.sides[2]) } else { (&self.sides[3], &self.sides[1]) };
+        let (Some((a, ..)), Some((b, ..))) = (a, b) else {
+            return false;
+        };
         let (t0, t1) = a.domain();
         let size = self.lo.dist(self.hi);
         (0..=16).all(|k| {
@@ -1037,8 +1067,8 @@ impl Patch {
         // that close aren't something this kernel can have. This is how every point on the surface goes, such as
         // those along a face's own edges, and it's most queries while building something.
         if root.is_some() && best.0 < TOL {
-            let (at, du, dv) = self.derivs(best.1, best.2);
-            return PatchFoot { u: best.1, v: best.2, at, normal: du.cross(dv).normalized(), distance: best.0, boundary: false };
+            let (at, _, _) = self.derivs(best.1, best.2);
+            return PatchFoot { u: best.1, v: best.2, at, normal: self.normal_at(best.1, best.2), distance: best.0, boundary: false };
         }
         // A boundary point closer than the best so far is in a leaf on that side whose box is closer too.
         let ((u0, u1), (v0, v1)) = self.domain();
@@ -1057,7 +1087,8 @@ impl Patch {
                 }
             }
         }
-        for (k, (side, lo, hi)) in self.sides.iter().enumerate() {
+        for (k, entry) in self.sides.iter().enumerate() {
+            let Some((side, lo, hi)) = entry else { continue };
             if near_side[k] && box_distance(p, *lo, *hi) < best.0 {
                 let (a, b) = side.domain();
                 let (t, d) = side.closest(p, a, b);
@@ -1073,8 +1104,8 @@ impl Patch {
                 }
             }
         }
-        let (at, du, dv) = self.derivs(best.1, best.2);
-        let normal = du.cross(dv).normalized();
+        let (at, _, _) = self.derivs(best.1, best.2);
+        let normal = self.normal_at(best.1, best.2);
         // Where the surface is stationary, the offset is along the normal. Anything else is a boundary point,
         // whichever way it was reached, and there the height above the tangent plane is what's used.
         let r = p - at;
@@ -1692,18 +1723,49 @@ mod tests {
         assert!(error.contains("fold"), "{error}");
     }
 
+    /// A piece of a true cone with its apex as a pole: a quarter turn, as a rational patch.
+    fn cone_piece(radius: f64, height: f64) -> Patch {
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        let around = [(1.0, 0.0, 1.0), (1.0, 1.0, w), (0.0, 1.0, 1.0)];
+        let (mut points, mut weights) = (Vec::new(), Vec::new());
+        // u around the axis and v from the rim up to the apex, where every control point is one point.
+        for &(x, y, wa) in &around {
+            points.push(v3(x * radius, y * radius, 0.0));
+            weights.push(wa);
+            points.push(v3(0.0, 0.0, height));
+            weights.push(wa);
+        }
+        Patch::new((2, 1), (vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]), (3, 2), points, weights).unwrap()
+    }
+
     #[test]
-    fn a_pole_is_refused_by_name() {
-        // All of one side's control points in one place.
-        let mut points = Vec::new();
-        for i in 0..3 {
-            for j in 0..3 {
-                points.push(if i == 0 { v3(0.0, 0.0, 5.0) } else { v3(i as f64 * 3.0, j as f64 * 3.0 - 3.0, 0.0) });
+    fn a_pole_is_a_point_with_a_surface_around_it() {
+        let (r, h) = (8.0f64, 6.0f64);
+        let p = cone_piece(r, h);
+        let apex = v3(0.0, 0.0, h);
+        assert!(p.at_pole(apex));
+        assert!(!p.at_pole(v3(1.0, 1.0, h - 1.0)));
+        // Points on it, right up to the pole, are at no distance from it.
+        for v in [0.0, 0.3, 0.9, 0.999, 1.0] {
+            for u in [0.1, 0.5, 0.9] {
+                let q = p.eval(u, v);
+                assert!(p.foot(q).distance < 1e-8, "{u} {v}");
             }
         }
-        let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        let error = Patch::new((2, 2), (knots.clone(), knots), (3, 3), points, vec![1.0; 9]).err().expect("refused").to_string();
-        assert!(error.contains("pole"), "{error}");
+        // Off it, the distance is the true cone's, and the side it's on is right.
+        let cone = crate::surface::Surface::Cone { frame: Frame { origin: apex, x: -Vec3::X, y: Vec3::Y, z: -Vec3::Z }, radius: 0.0, half_angle: (r / h).atan() };
+        let _ = cone;
+        let slant = r.hypot(h);
+        let outward = v3(h / slant * std::f64::consts::FRAC_1_SQRT_2, h / slant * std::f64::consts::FRAC_1_SQRT_2, r / slant);
+        for t in [0.2, 0.5, 0.8] {
+            let on = p.eval(0.5, t);
+            let q = on + outward * 0.05;
+            assert!((p.foot(q).distance - 0.05).abs() < 1e-6, "{t}: {}", p.foot(q).distance);
+            assert!(p.normal(q).dist(outward) < 1e-6 || p.normal(q).dist(-outward) < 1e-6);
+        }
+        // Right at the pole it still has a normal to give.
+        assert!(p.normal(apex).is_finite() && (p.normal(apex).norm() - 1.0).abs() < 1e-9);
+        assert!(!p.closes_up(false) && !p.closes_up(true));
     }
 
     #[test]

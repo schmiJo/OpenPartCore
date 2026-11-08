@@ -138,6 +138,7 @@ fn merge_faces(body: Body) -> Result<Body> {
         edges: body.edges.clone(),
         faces: Vec::with_capacity(groups.len()),
         shells: Vec::new(),
+        tolerance: body.tolerance,
     };
     for root in roots {
         let group = &groups[&root];

@@ -180,6 +180,8 @@ fn check_euler(body: &Body, errors: &mut Vec<String>) -> Vec<usize> {
 }
 
 fn check_geometry(body: &Body, errors: &mut Vec<String>) {
+    // A body read from a file with gaps in it is held to the gaps it came with.
+    let allowed = GEOM_TOL.max(1.5 * body.tolerance);
     for (i, e) in body.edges.iter().enumerate() {
         if !body.vertices[e.v0].is_finite() || !body.vertices[e.v1].is_finite() {
             errors.push(format!("edge {i} has a non-finite vertex"));
@@ -187,7 +189,7 @@ fn check_geometry(body: &Body, errors: &mut Vec<String>) {
         }
         let d0 = e.curve.eval(e.t0).dist(body.vertices[e.v0]);
         let d1 = e.curve.eval(e.t1).dist(body.vertices[e.v1]);
-        if d0 > GEOM_TOL || d1 > GEOM_TOL {
+        if d0 > allowed || d1 > allowed {
             errors.push(format!("edge {i} ends are off its vertices by {d0:e} and {d1:e}"));
         }
         if body.vertices[e.v0].dist(body.vertices[e.v1]) < TOL && (e.t1 - e.t0) * e.curve.speed_bound() < 2.0 * TOL {
@@ -200,7 +202,7 @@ fn check_geometry(body: &Body, errors: &mut Vec<String>) {
                 for k in 0..=4 {
                     let p = body.coedge_point(c, k as f64 / 4.0);
                     let d = face.surface.sdf(p).abs();
-                    if d > GEOM_TOL {
+                    if d > allowed {
                         errors.push(format!("edge {} is {d:e} off the {} of face {f}", c.edge, face.surface.name()));
                         break;
                     }

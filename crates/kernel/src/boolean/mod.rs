@@ -891,7 +891,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
         }
     }
 
-    let mut body = Body::default();
+    let mut body = Body { tolerance: bodies[0].tolerance.max(bodies[1].tolerance), ..Body::default() };
     // Build edges. Normally one per arrangement edge. Where several faces meet at
     // an edge, pair them around it so each wedge of material gets its own copy.
     let mut assign: HashMap<(usize, usize, usize), usize> = HashMap::default();

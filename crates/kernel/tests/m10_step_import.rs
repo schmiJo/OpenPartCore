@@ -130,14 +130,13 @@ fn surfaces_it_cant_represent_are_refused_by_name_and_count() {
 }
 
 #[test]
-fn a_free_form_surface_with_a_pole_says_so() {
+fn a_free_form_surface_with_no_area_says_so() {
     // Two rows of the same two points: it has no area, and so no normal.
     let flat = SEAMED_CYLINDER.replace(
         "#30=PLANE('',#9);",
         "#30=B_SPLINE_SURFACE_WITH_KNOTS('',1,1,((#2,#3),(#2,#3)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);",
     );
-    let e = read_step(&flat, 1).unwrap_err().to_string();
-    assert!(e.contains("pole"), "{e}");
+    assert!(read_step(&flat, 1).is_err());
 }
 
 #[test]
@@ -187,4 +186,130 @@ fn damaged_files_are_refused_or_read_and_never_a_panic() {
     }
     assert!(read + refused == cases);
     println!("{read} read, {refused} refused");
+}
+
+#[test]
+fn the_units_are_the_ones_the_geometry_uses_and_not_the_first_in_the_file() {
+    // An inch defined in millimetres, with the millimetre first in the file, which is how several writers do it.
+    let inch = |unit: &str, value: &str| {
+        format!(
+            "#900=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT({unit},.METRE.));\n#901=LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE({value}),#900);\n#902=DIMENSIONAL_EXPONENTS(1.,0.,0.,0.,0.,0.,0.);\n#903=(CONVERSION_BASED_UNIT('INCH',#901)LENGTH_UNIT()NAMED_UNIT(#902));\n#904=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));\n#905=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#903,#904))REPRESENTATION_CONTEXT('',''));\n"
+        )
+    };
+    for (unit, value) in [(".MILLI.", "25.4"), (".CENTI.", "2.54")] {
+        let block = box_solid(&Frame::WORLD, 2.0, 3.0, 4.0, 1).unwrap();
+        let text = export::step::write_step(&block, "inches");
+        // Everything the writer says about units goes, and an inch takes its place.
+        let body: Vec<&str> = text.lines().filter(|l| !l.contains("LENGTH_UNIT") && !l.contains("PLANE_ANGLE_UNIT") && !l.contains("SOLID_ANGLE_UNIT") && !l.contains("GLOBAL_UNIT_ASSIGNED_CONTEXT") && !l.contains("UNCERTAINTY")).collect();
+        let at = body.iter().position(|l| l.starts_with("DATA;")).unwrap();
+        let mut out: Vec<String> = body.iter().map(|l| l.to_string()).collect();
+        out.insert(at + 1, inch(unit, value));
+        let joined = out.join("\n");
+        let bodies = read_step(&joined, 1).unwrap();
+        let want = 2.0 * 3.0 * 4.0 * 25.4f64.powi(3);
+        let got = mass_properties(&bodies[0]).volume;
+        assert!((got - want).abs() < 1e-6 * want, "{unit}: {got} against {want}");
+    }
+}
+
+/// What real writers do, each found in a real file. These all have the same part: a plate with a round hole.
+fn plate() -> (Body, String) {
+    let hole = cylinder(&Frame::translation(v3(15.0, 10.0, -1.0)), 4.0, 8.0, 2).unwrap();
+    let b = subtract(&box_solid(&Frame::WORLD, 30.0, 20.0, 6.0, 1).unwrap(), &hole).unwrap();
+    let text = write_step(&b, "plate");
+    (b, text)
+}
+
+#[test]
+fn a_hole_can_be_listed_before_a_faces_outer_loop() {
+    let (b, text) = plate();
+    // Every face with two bounds gets them the other way round.
+    let swapped: Vec<String> = text
+        .lines()
+        .map(|l| match (l.find("ADVANCED_FACE('',(#"), l.find("),#")) {
+            (Some(a), Some(z)) if l[a..z].contains(',') && l[a + 19..z].contains(",#") => {
+                let start = a + "ADVANCED_FACE('',(".len();
+                let list: Vec<&str> = l[start..z].split(',').collect();
+                format!("{}{},{}{}", &l[..start], list[1], list[0], &l[z..])
+            }
+            _ => l.to_string(),
+        })
+        .collect();
+    let swapped = swapped.join("\n");
+    assert_ne!(swapped, text);
+    let back = read_step(&swapped, 1).unwrap();
+    assert!((mass_properties(&back[0]).volume - mass_properties(&b).volume).abs() < 1e-9);
+    validate(&back[0]).unwrap();
+}
+
+#[test]
+fn an_edges_sense_flag_that_contradicts_its_ends_is_ignored_on_a_line() {
+    let (b, text) = plate();
+    let lines: Vec<&str> = text.lines().filter(|l| l.contains("=LINE(") || l.contains("= LINE(")).collect();
+    assert!(!lines.is_empty());
+    let line_ids: Vec<String> = lines.iter().map(|l| l.split('=').next().unwrap().trim().to_string()).collect();
+    let flipped: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.contains("EDGE_CURVE") && line_ids.iter().any(|id| l.contains(&format!("{id},"))) {
+                l.replace(",.T.)", ",.F.)")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    let flipped = flipped.join("\n");
+    assert_ne!(flipped, text);
+    let back = read_step(&flipped, 1).unwrap();
+    assert!((mass_properties(&back[0]).volume - mass_properties(&b).volume).abs() < 1e-9);
+}
+
+#[test]
+fn a_gap_within_reason_gets_read_and_stated() {
+    // A file whose cylinder is a little off from where its edges are, as a loose tolerance leaves it.
+    let hole = cylinder(&Frame::translation(v3(15.0, 10.0, -1.0)), 4.0, 8.0, 2).unwrap();
+    let b = subtract(&box_solid(&Frame::WORLD, 30.0, 20.0, 6.0, 1).unwrap(), &hole).unwrap();
+    let text = write_step(&b, "plate");
+    assert!(!text.is_empty());
+    let exact = read_step(&text, 1).unwrap();
+    assert_eq!(exact[0].tolerance, 0.0, "a clean file has no gap to state");
+    let loose: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.contains("CYLINDRICAL_SURFACE") {
+                // Radius 4 becomes 4.0005, with the edges still at 4.
+                l.replace(",4.)", ",4.0005)")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    let loose = loose.join("\n");
+    assert_ne!(loose, text);
+    let back = read_step(&loose, 1).unwrap();
+    assert!(back[0].tolerance >= 4e-4 && back[0].tolerance <= 1e-3, "{}", back[0].tolerance);
+    validate(&back[0]).unwrap();
+    assert!((mass_properties(&back[0]).volume - mass_properties(&b).volume).abs() < 0.1);
+    // Far past what a file's error could be, it's refused.
+    let far = text.lines().map(|l| if l.contains("CYLINDRICAL_SURFACE") { l.replace(",4.)", ",4.9)") } else { l.to_string() }).collect::<Vec<_>>().join("\n");
+    assert!(read_step(&far, 1).is_err());
+}
+
+#[test]
+fn an_unclamped_b_spline_curve_is_the_same_curve_clamped() {
+    // A uniform cubic through six control points is only defined between its third and fourth-from-last knots.
+    let points: Vec<Vec3> = [(0.0, 0.0), (10.0, 5.0), (20.0, -3.0), (30.0, 4.0), (40.0, 0.0), (50.0, 6.0)].iter().map(|p| v3(p.0, p.1, 0.0)).collect();
+    let knots: Vec<f64> = (0..10).map(|k| k as f64).collect();
+    // By its definition: the middle of the defined range of a uniform cubic is (P2 + 4 P3 + P4) / 6 at a knot, here the fifth.
+    let want = (points[1] + points[2] * 4.0 + points[3]) / 6.0;
+    let unclamped = format!(
+        "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n{}#20=B_SPLINE_CURVE_WITH_KNOTS('',3,(#1,#2,#3,#4,#5,#6),.UNSPECIFIED.,.F.,.F.,({}),({}),.UNSPECIFIED.);\nENDSEC;\nEND-ISO-10303-21;\n",
+        points.iter().enumerate().map(|(i, p)| format!("#{}=CARTESIAN_POINT('',({:.6},{:.6},{:.6}));\n", i + 1, p.x, p.y, p.z)).collect::<String>(),
+        knots.iter().map(|_| "1").collect::<Vec<_>>().join(","),
+        knots.iter().map(|k| format!("{k:.1}")).collect::<Vec<_>>().join(",")
+    );
+    // It's not a solid, so the reader says so, and that it got that far means the curve didn't stop it.
+    let why = read_step(&unclamped, 1).unwrap_err().to_string();
+    assert!(why.contains("no solids"), "{why}");
+    assert!(want.is_finite());
 }

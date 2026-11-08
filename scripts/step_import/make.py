@@ -57,4 +57,11 @@ save("loft_rect_circle", Part.makeLoft([rect(20, 20, 0), Part.Wire(Part.makeCirc
 # A hole cut through free-form walls, so that the file holds traced curves on these faces.
 blend = Part.makeLoft([Part.Wire(Part.makeCircle(9)), Part.Wire(Part.makeCircle(13, V(0, 0, 15))), Part.Wire(Part.makeCircle(7, V(0, 0, 30)))], True)
 save("loft_drilled", blend.cut(Part.makeCylinder(3, 60, V(-30, 0, 15), V(1, 0, 0))))
+# Everything as B-spline surfaces, which is how some systems write all their geometry, with seams and poles.
+save("nurbs_cylinder", Part.makeCylinder(8, 20).toNurbs())
+save("nurbs_cone", Part.makeCone(9, 0, 15).toNurbs())
+save("nurbs_frustum", Part.makeCone(9, 4, 15).toNurbs())
+save("nurbs_sphere", Part.makeSphere(10).toNurbs())
+save("nurbs_torus", Part.makeTorus(12, 3).toNurbs())
+save("nurbs_drilled", Part.makeBox(30, 30, 10).cut(Part.makeCylinder(5, 10, V(15, 15, 0))).toNurbs())
 report.close()

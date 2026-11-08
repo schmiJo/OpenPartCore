@@ -49,6 +49,7 @@ oracle, through a neighbouring FreeCAD build, read-only.
 | M13 | STEP import of analytic surfaces and swept curves | Done, checked on OpenCASCADE's files only |
 | M14 | Free-form surfaces and lofts, read from and written to STEP (phase 3 of `NURBS_DESIGN.md`) | Done, with the limits in `KNOWN_LIMITS.md` |
 | M15 | Fitted fillets and chamfers on traced, elliptical, spline and free-form edges | Done, with the limits in `KNOWN_LIMITS.md` |
+| M16 | Tolerant STEP import, surfaces with poles, checked on NIST's test files | Done: 30 of 33 read, with the limits in `KNOWN_LIMITS.md` |
 
 ## For code building on this repository
 
@@ -62,6 +63,7 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| Tolerant import | `coreshape::topo::Body` gained `tolerance` | Reading is unaffected, and zero means the kernel's own. Code building a `Body` by hand without `..Body::default()` has to set it |
 | Free-form surfaces | `Surface` gained `Free`, and `coreshape_document::Op` gained `Loft`. `Surface::name` gives `free-form surface`. `spline::MAX_DEGREE` went from 7 to 16 in the kernel, and stays 7 in the sketch solver | An exhaustive `match` needs the new arms. Nothing else changes for code that doesn't use them |
 | Face keys | `coreshape::topo::Face` gained `origin`, and `EdgeSelect` gained `OnFaceKey` and `BetweenKeys`. Names, tags, slots, `FaceRef` and files are unchanged | Reading is unaffected. Code building a `Face` by hand has to set `origin`, and an exhaustive `match` on `EdgeSelect` needs the new arms |
 | STEP import | `coreshape_document::Op` gained `ImportStep` | An exhaustive `match` needs the new arm |

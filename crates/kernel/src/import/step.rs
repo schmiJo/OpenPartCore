@@ -18,11 +18,10 @@ use crate::boolean::trace::{trace_faces, FaceChart};
 use crate::curve::Curve;
 use crate::error::{Error, Result};
 use crate::math::*;
-use crate::patch::Patch;
-use crate::spline::{PlaneCurve, Spline};
+use crate::patch::{cut_lines, Patch};
+use crate::spline::{Hom, PlaneCurve, Spline};
 use crate::surface::Surface;
 use crate::topo::{Body, Coedge, Edge, FaceTag};
-use crate::tweak::point_on_surfaces;
 use crate::validate::validate;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -317,7 +316,15 @@ impl File {
             Ok(a) => File::numbers(a.first())?,
             Err(_) => vec![1.0; points.len()],
         };
-        Spline::new(degree as usize, knots, points, weights)
+        let degree = degree as usize;
+        if knots.len() == points.len() + degree + 1 && (knots[0] != knots[degree] || knots[knots.len() - 1] != knots[knots.len() - 1 - degree]) {
+            // Not clamped, as some writers leave a curve: the part that's defined is the same curve, clamped.
+            let mut line = vec![points.iter().zip(&weights).map(|(p, w)| Hom::of(*p, *w)).collect::<Vec<Hom>>()];
+            let (clamped, (first, last)) = cut_lines(degree, &knots, (knots[degree], knots[knots.len() - 1 - degree]), &mut line);
+            let kept = &line[0][first..=last];
+            return Spline::new(degree, clamped, kept.iter().map(|q| q.point()).collect(), kept.iter().map(|q| q.w).collect());
+        }
+        Spline::new(degree, knots, points, weights)
     }
 }
 
@@ -362,7 +369,24 @@ impl File {
             }
             Err(_) => vec![1.0; points.len()],
         };
-        Patch::new((du as usize, dv as usize), (knots_u, knots_v), (nu, nv), points, weights)
+        let (du, dv) = (du as usize, dv as usize);
+        let clamped = |d: usize, k: &[f64]| k.len() > 2 * d + 1 && k[0] == k[d] && k[k.len() - 1] == k[k.len() - 1 - d];
+        if knots_u.len() == nu + du + 1 && knots_v.len() == nv + dv + 1 && !(clamped(du, &knots_u) && clamped(dv, &knots_v)) {
+            // As for a curve: the part that's defined, clamped, one direction at a time.
+            let mut along_u: Vec<Vec<Hom>> = (0..nv).map(|j| (0..nu).map(|i| Hom::of(points[i * nv + j], weights[i * nv + j])).collect()).collect();
+            let (ku, (u0, u1)) = cut_lines(du, &knots_u, (knots_u[du], knots_u[knots_u.len() - 1 - du]), &mut along_u);
+            let mut along_v: Vec<Vec<Hom>> = (u0..=u1).map(|i| along_u.iter().map(|l| l[i]).collect()).collect();
+            let (kv, (v0, v1)) = cut_lines(dv, &knots_v, (knots_v[dv], knots_v[knots_v.len() - 1 - dv]), &mut along_v);
+            let (mut p, mut w) = (Vec::new(), Vec::new());
+            for line in &along_v {
+                for q in &line[v0..=v1] {
+                    p.push(q.point());
+                    w.push(q.w);
+                }
+            }
+            return Patch::new((du, dv), (ku, kv), (along_v.len(), v1 - v0 + 1), p, w);
+        }
+        Patch::new((du, dv), (knots_u, knots_v), (nu, nv), points, weights)
     }
 
     /// The curve a swept surface is swept from, as a spline: a conic is exactly one.
@@ -385,7 +409,70 @@ impl File {
     }
 }
 
+/// What one unit is worth: millimetres for a length, radians for an angle. A conversion-based unit says it in terms of
+/// another unit, which may itself be anything: an inch can be 25.4 millimetres or 2.54 centimetres.
+fn unit_value(items: &BTreeMap<usize, Instance>, id: usize, depth: u32) -> Option<f64> {
+    let instance = items.get(&id)?;
+    let part = |n: &str| instance.iter().find(|(m, _)| m == n).map(|(_, a)| a);
+    if depth > 8 {
+        return None;
+    }
+    if let Some(a) = part("SI_UNIT") {
+        let prefix = match a.first() {
+            Some(Val::Enum(p)) => p.as_str(),
+            _ => "",
+        };
+        let factor = match prefix {
+            "" => 1.0,
+            "MILLI" => 1e-3,
+            "CENTI" => 1e-2,
+            "DECI" => 0.1,
+            "KILO" => 1e3,
+            "MICRO" => 1e-6,
+            "NANO" => 1e-9,
+            _ => return None,
+        };
+        return Some(if part("LENGTH_UNIT").is_some() { factor * 1000.0 } else { factor });
+    }
+    let a = part("CONVERSION_BASED_UNIT")?;
+    let Some(Val::Ref(measure)) = a.get(1) else { return None };
+    let (_, m) = items.get(measure)?.iter().find(|(n, _)| n.ends_with("_MEASURE_WITH_UNIT"))?;
+    let value = File::number(m.first()).ok()?;
+    let Some(Val::Ref(unit)) = m.get(1) else { return None };
+    Some(value * unit_value(items, *unit, depth + 1)?)
+}
+
+/// The units of the geometry: the ones its own representation's context assigns. A file also mentions others, such as
+/// the millimetre an inch is defined in, or a metre for a mass property, so the first one in the file proves nothing.
+fn assigned_units(items: &BTreeMap<usize, Instance>) -> Option<(Option<f64>, Option<f64>)> {
+    let context_of = |i: &Instance| -> Option<usize> {
+        let (_, a) = i.iter().find(|(n, _)| n == "ADVANCED_BREP_SHAPE_REPRESENTATION")?;
+        match a.get(2) {
+            Some(Val::Ref(c)) => Some(*c),
+            _ => None,
+        }
+    };
+    let assigned = |i: &Instance| i.iter().find(|(n, _)| n == "GLOBAL_UNIT_ASSIGNED_CONTEXT").map(|(_, a)| a.clone());
+    let list = items.values().find_map(context_of).and_then(|c| items.get(&c)).and_then(assigned).or_else(|| items.values().find_map(assigned))?;
+    let Some(Val::List(units)) = list.first() else { return None };
+    let (mut length, mut angle) = (None, None);
+    for u in units {
+        let Val::Ref(id) = u else { continue };
+        let instance = items.get(id)?;
+        let has = |n: &str| instance.iter().any(|(m, _)| m == n);
+        if has("LENGTH_UNIT") {
+            length = unit_value(items, *id, 0);
+        } else if has("PLANE_ANGLE_UNIT") {
+            angle = unit_value(items, *id, 0);
+        }
+    }
+    Some((length, angle))
+}
+
 fn units(items: &BTreeMap<usize, Instance>) -> Result<(f64, f64)> {
+    if let Some((Some(length), angle)) = assigned_units(items) {
+        return Ok((length, angle.unwrap_or(1.0)));
+    }
     let (mut length, mut angle) = (None, None);
     for i in items.values() {
         let has = |n: &str| i.iter().any(|(m, _)| m == n);
@@ -453,8 +540,8 @@ enum Family {
 
 /// Whether a point has no phase, being on the axis: an apex or a pole.
 fn on_axis(surface: &Surface, family: Family, p: Vec3) -> bool {
-    if matches!(surface, Surface::Free { .. }) {
-        return false;
+    if let Surface::Free { frame, patch } = surface {
+        return patch.at_pole(frame.to_local(p));
     }
     let l = surface.frame().to_local(p);
     family == Family::AroundAxis && l.x.hypot(l.y) <= 1e-7
@@ -557,6 +644,8 @@ fn crossings(curve: &Curve, t0: f64, t1: f64, surface: &Surface, family: Family,
 struct Builder {
     vertices: Vec<Vec3>,
     edges: Vec<Edge>,
+    /// The widest gap between an edge and its faces, once everything has been brought as close as it will go.
+    gap: f64,
 }
 
 impl Builder {
@@ -772,6 +861,9 @@ fn keep_own_part_of_closed_patch(b: &Builder, face: &mut RawFace) -> Result<()> 
         if lo < -PI - 1e-6 || hi > PI + 1e-6 {
             return Err(Error::Unsupported("a free-form face that runs across its surface's seam".into()));
         }
+        if hi - lo < 1e-9 {
+            return Err(Error::Unsupported("a free-form surface closed all the way round with no edges of its own to cut it by".into()));
+        }
         Ok((free_parameter(patch, family, lo), free_parameter(patch, family, hi)))
     };
     let (u, v) = (range(Family::AroundAxis)?, range(Family::AroundTube)?);
@@ -815,6 +907,14 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
     for &e in &seam_edges {
         poles.extend([b.edges[e].v0, b.edges[e].v1]);
     }
+    // So does any corner of the face that's on the axis, as a wedge of a sphere has at its point.
+    for c in face.loops.iter().flatten() {
+        for v in [b.edges[c.edge].v0, b.edges[c.edge].v1] {
+            if on_axis(surface, family, b.vertices[v]) && !poles.contains(&v) {
+                poles.push(v);
+            }
+        }
+    }
     for c in face.loops.iter().flatten() {
         if seam_edges.contains(&c.edge) {
             continue;
@@ -840,8 +940,10 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
                 if wrap_pi(phase(surface, family, p) - wall).abs() > 1e-6 {
                     continue;
                 }
+                // Its phase already says it's on this wall. All this can see is how far a file's edge is off its surface,
+                // which gets settled later, and has a limit of its own there.
                 let (t, off) = curve.closest(p, lo, hi);
-                if off > 8.0 * TOL {
+                if off > 0.2 {
                     continue;
                 }
                 // The direction of travel through this point, along the loop.
@@ -1375,8 +1477,10 @@ impl Reader<'_> {
             other => return Err(Error::Unsupported(format!("an edge uses {other}"))),
         };
         let periodic = matches!(curve, Curve::Circle { .. } | Curve::Ellipse { .. });
-        // Kernel edges run with their parameter increasing.
-        let (t0, t1, v0, v1, flip) = if same { (ta, tb, start, end, false) } else { (tb, ta, end, start, true) };
+        // Kernel edges run with their parameter increasing. On a curve that doesn't wrap around, the two ends settle
+        // which way that is, and some writers' flag here contradicts them. On one that does, only the flag can say.
+        let forward = if periodic { same } else { ta <= tb };
+        let (t0, t1, v0, v1, flip) = if forward { (ta, tb, start, end, false) } else { (tb, ta, end, start, true) };
         let mut t1 = t1;
         if periodic {
             while t1 <= t0 + 1e-12 {
@@ -1465,8 +1569,48 @@ fn unsupported_surfaces(file: &File, shells: &[usize]) -> Vec<(String, usize)> {
     counts.into_iter().collect()
 }
 
-/// Moves each vertex onto the surfaces around it, which a file's rounding can leave it a little off. Straight
-/// edges then get rebuilt between their vertices, and B-spline edges go onto both surfaces.
+/// As close as a vertex will go to all the surfaces around it. Surfaces that are tangent there have nearly the same
+/// normal, and two equations that say nearly the same thing can only send a point flying, so a normal that adds
+/// nothing is left out, and whatever gap remains between tangent surfaces gets stated and not solved.
+fn nearest_to_all(surfaces: &[Surface], start: Vec3, limit: f64) -> Vec3 {
+    let mut p = start;
+    for _ in 0..40 {
+        let mut basis: Vec<(Vec3, f64)> = Vec::with_capacity(3);
+        let mut largest = 0.0f64;
+        for s in surfaces {
+            let f = s.sdf(p);
+            largest = largest.max(f.abs());
+            let (mut n, mut rhs) = (s.normal(p), -f);
+            for (b, r) in &basis {
+                let c = n.dot(*b);
+                n = n - *b * c;
+                rhs -= c * r;
+            }
+            let len = n.norm();
+            if len > 2e-3 {
+                basis.push((n * (1.0 / len), rhs / len));
+            }
+        }
+        if largest < 1e-12 {
+            break;
+        }
+        let step = basis.iter().fold(Vec3::ZERO, |sum, (b, r)| sum + *b * *r);
+        // Nothing here should go far, and if it wants to, that's for the caller to report.
+        if step.norm() > 4.0 * limit {
+            return p + step;
+        }
+        p = p + step;
+        if step.norm() < 1e-13 {
+            break;
+        }
+    }
+    p
+}
+
+/// Moves each vertex onto the surfaces around it, which a file's rounding or its tolerance can leave it off. Straight
+/// edges then get rebuilt between their vertices, and B-spline edges go onto both surfaces where those cross. Where
+/// they're tangent, as around a fillet, nothing can bring them together, so the file's curve stays. Whatever gap is
+/// left over is measured, and the body is held to that.
 fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
     let mut around: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut beside: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -1491,15 +1635,27 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
             }
         }
     }
+    // How far a vertex may move: a thousandth of the part, which is more than most files' error, up to a quarter of a
+    // millimetre, which the sloppiest real file that reads correctly here needs.
+    let used: Vec<usize> = around.keys().copied().collect();
+    let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
+    for &v in &used {
+        lo = lo.min(b.vertices[v]);
+        hi = hi.max(b.vertices[v]);
+    }
+    let limit = (lo.dist(hi) * 1e-3).clamp(1e-3, 0.25);
     for (&v, list) in &around {
         let surfaces: Vec<Surface> = list.iter().map(|&f| faces[f].surface.clone()).collect();
         let start = b.vertices[v];
-        let moved = point_on_surfaces(&surfaces, start).ok_or_else(|| {
-            Error::NearDegenerate(format!("the vertex at ({:.5}, {:.5}, {:.5}) can't be put on all the surfaces around it", start.x, start.y, start.z))
-        })?;
-        if moved.dist(start) > 1e-3 {
+        let mut moved = nearest_to_all(&surfaces, start, limit);
+        // Surfaces close to tangent can send it a long way for little gain. If the file's own place is close enough to
+        // all of them, that's a better answer.
+        if moved.dist(start) > limit && surfaces.iter().all(|s| s.sdf(start).abs() <= limit) {
+            moved = start;
+        }
+        if moved.dist(start) > limit {
             return Err(Error::NearDegenerate(format!(
-                "the vertex at ({:.5}, {:.5}, {:.5}) is {:.2e} mm off the surfaces around it, which is too far to be rounding",
+                "the vertex at ({:.5}, {:.5}, {:.5}) is {:.2e} mm off the surfaces around it, past the {limit:.2e} mm this part can be healed by",
                 start.x,
                 start.y,
                 start.z,
@@ -1520,7 +1676,7 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
             Curve::Spline(s) if list.len() == 2 => {
                 let (t0, t1) = (b.edges[e].t0, b.edges[e].t1);
                 let (sa, sb) = (&faces[list[0]].surface, &faces[list[1]].surface);
-                // An exact spline stays one. Anything else lies only near its surfaces, and goes onto both.
+                // An exact spline stays one. Anything else lies only near its surfaces, and goes onto both if they cross.
                 let samples: Vec<Vec3> = (0..=32).map(|i| s.eval(t0 + (t1 - t0) * i as f64 / 32.0)).collect();
                 if samples.iter().all(|&p| sa.sdf(p).abs() <= TOL && sb.sdf(p).abs() <= TOL) {
                     continue;
@@ -1529,17 +1685,24 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
                 breaks.extend(s.breaks_between(t0, t1));
                 breaks.push(t1);
                 let mut points = Vec::new();
-                for w in breaks.windows(2) {
+                let mut crossing = true;
+                'walk: for w in breaks.windows(2) {
                     for i in 0..12 {
-                        let p = s.eval(w[0] + (w[1] - w[0]) * i as f64 / 12.0);
-                        points.push(crate::surface::refine_on_two(sa, sb, p).ok_or_else(|| {
-                            Error::NearDegenerate(format!("a {} and a {} are tangent along an edge between them near ({:.4}, {:.4}, {:.4})", sa.name(), sb.name(), p.x, p.y, p.z))
-                        })?);
+                        match crate::surface::refine_on_two(sa, sb, s.eval(w[0] + (w[1] - w[0]) * i as f64 / 12.0)) {
+                            Some(p) => points.push(p),
+                            None => {
+                                crossing = false;
+                                break 'walk;
+                            }
+                        }
                     }
+                }
+                if !crossing {
+                    continue;
                 }
                 points[0] = a;
                 points.push(c);
-                let traced = sampled_from_points(points, sa, sb)?;
+                let Ok(traced) = sampled_from_points(points, sa, sb) else { continue };
                 let last = match &traced {
                     Curve::Sampled(t) => (t.points.len() - 1) as f64,
                     _ => 1.0,
@@ -1549,12 +1712,30 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
             _ => {}
         }
     }
+    // What's left: every edge against its vertices and its faces.
+    let mut gap = 0.0f64;
+    for (&e, list) in &beside {
+        let edge = &b.edges[e];
+        gap = gap.max(edge.curve.eval(edge.t0).dist(b.vertices[edge.v0])).max(edge.curve.eval(edge.t1).dist(b.vertices[edge.v1]));
+        for k in 0..=8 {
+            let p = edge.curve.eval(edge.t0 + (edge.t1 - edge.t0) * k as f64 / 8.0);
+            for &f in list {
+                gap = gap.max(faces[f].surface.sdf(p).abs());
+            }
+        }
+    }
+    if gap > limit {
+        return Err(Error::NearDegenerate(format!("this part's edges are up to {gap:.2e} mm off its faces, past the {limit:.2e} mm it can be healed by")));
+    }
+    // Inside the kernel's own tolerance, there's nothing to state.
+    b.gap = if gap > TOL { gap } else { 0.0 };
     Ok(())
 }
 
 /// Makes a shell's loops agree: every edge used once each way. A writer's flags aren't enough to go on here. A file can
 /// say a loop is reversed when it isn't, and other readers repair that by looking at the shape, so this does too. It keeps
-/// the first loop as the file has it, follows the others from there, then checks one simple face against its surface.
+/// the first loop as the file has it, follows the others from there, then lets the simple faces decide which way round
+/// that whole group goes.
 fn orient_shell(b: &Builder, faces: &mut [RawFace]) {
     let mut loops: Vec<(usize, usize)> = Vec::new();
     for (f, face) in faces.iter().enumerate() {
@@ -1591,37 +1772,48 @@ fn orient_shell(b: &Builder, faces: &mut [RawFace]) {
                 }
             }
         }
-        // A loop on a face simple enough to have one chart says which way this whole group should go.
-        let verdict = component.iter().find_map(|&i| {
+        // Which way this whole group should go is for the faces in it to say, each one simple enough to have one chart:
+        // its largest loop is its outer one, whatever order the file lists them in, and the others are holes, which run
+        // the other way. They vote by area, so a tiny face with an awkward shape can't decide for a big one.
+        let mut votes = 0.0f64;
+        for &i in &component {
             let (f, l) = loops[i];
             let face = &faces[f];
-            if l != 0 || !seams_of(face).is_empty() || !matches!(face.surface, Surface::Plane(_)) {
-                return None;
+            if !seams_of(face).is_empty() {
+                continue;
             }
-            // Plane faces only: their outer loop's direction is plain. Sample it in the plane's own coordinates.
-            let frame = face.surface.frame();
-            let mut points = Vec::new();
-            for c in &face.loops[l] {
-                let e = &b.edges[c.edge];
-                for k in 0..16 {
-                    let u = if c.reversed { 1.0 - k as f64 / 16.0 } else { k as f64 / 16.0 };
-                    let q = frame.to_local(e.curve.eval(e.t0 + (e.t1 - e.t0) * u));
-                    points.push((q.x, q.y));
+            let everything = b.boundary_points(face);
+            if !within_half_turn(&face.surface, &everything) || matches!(face.surface, Surface::Sphere { .. }) {
+                continue;
+            }
+            let chart = face.surface.fit_chart(&everything);
+            let area_of = |lp: &Vec<Coedge>| -> f64 {
+                let mut points = Vec::new();
+                for c in lp {
+                    let e = &b.edges[c.edge];
+                    for k in 0..16 {
+                        let u = if c.reversed { 1.0 - k as f64 / 16.0 } else { k as f64 / 16.0 };
+                        points.push(face.surface.to_chart(&chart, e.curve.eval(e.t0 + (e.t1 - e.t0) * u)));
+                    }
                 }
-            }
-            let mut area = 0.0;
-            for k in 0..points.len() {
-                let (p, q) = (points[k], points[(k + 1) % points.len()]);
-                area += p.0 * q.1 - p.1 * q.0;
-            }
+                let mut area = 0.0;
+                for k in 0..points.len() {
+                    let (p, q) = (points[k], points[(k + 1) % points.len()]);
+                    area += p.x * q.y - p.y * q.x;
+                }
+                area
+            };
+            let area = area_of(&face.loops[l]);
             if area == 0.0 {
-                return None;
+                continue;
             }
-            // With its own turning applied, the outer loop of an unflipped face runs counter-clockwise, and
-            // of a flipped one clockwise.
+            let is_outer = face.loops.iter().all(|other| area_of(other).abs() <= area.abs() * (1.0 + 1e-9));
+            // With its own turning applied, the outer loop of an unflipped face runs counter-clockwise, and of a
+            // flipped one clockwise, and a hole the other way from that.
             let runs_ccw = (area > 0.0) != turned[i].unwrap_or(false);
-            Some(runs_ccw != face.flipped)
-        });
+            votes += if (runs_ccw != face.flipped) == is_outer { area.abs() } else { -area.abs() };
+        }
+        let verdict = if votes == 0.0 { None } else { Some(votes > 0.0) };
         if verdict == Some(false) {
             for &i in &component {
                 turned[i] = turned[i].map(|t| !t);
@@ -1641,7 +1833,7 @@ fn orient_shell(b: &Builder, faces: &mut [RawFace]) {
 
 /// One solid: its outer shell, and any voids.
 fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Result<Body> {
-    let mut b = Builder { vertices: Vec::new(), edges: Vec::new() };
+    let mut b = Builder { vertices: Vec::new(), edges: Vec::new(), gap: 0.0 };
     let (mut vertices, mut edges) = (BTreeMap::new(), BTreeMap::new());
     let mut faces: Vec<RawFace> = Vec::new();
     let mut reader = Reader { file, next_slot: 0, feature };
@@ -1716,8 +1908,36 @@ fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Re
 
     settle(&mut b, &faces)?;
 
+    // A face's outer loop comes first here, and a file can list a hole first. It's the largest one in the face's chart.
+    for face in &mut faces {
+        if face.loops.len() < 2 {
+            continue;
+        }
+        let everything = b.boundary_points(face);
+        let chart = face.surface.fit_chart(&everything);
+        let area_of = |lp: &Vec<Coedge>| -> f64 {
+            let mut points = Vec::new();
+            for c in lp {
+                let e = &b.edges[c.edge];
+                for k in 0..16 {
+                    let u = if c.reversed { 1.0 - k as f64 / 16.0 } else { k as f64 / 16.0 };
+                    points.push(face.surface.to_chart(&chart, e.curve.eval(e.t0 + (e.t1 - e.t0) * u)));
+                }
+            }
+            let mut area = 0.0;
+            for k in 0..points.len() {
+                let (p, q) = (points[k], points[(k + 1) % points.len()]);
+                area += p.x * q.y - p.y * q.x;
+            }
+            area.abs()
+        };
+        let areas: Vec<f64> = face.loops.iter().map(area_of).collect();
+        let largest = (0..areas.len()).max_by(|&a, &c| areas[a].total_cmp(&areas[c])).unwrap_or(0);
+        face.loops.swap(0, largest);
+    }
+
     // Only what the faces use goes into the body, renumbered.
-    let mut body = Body::default();
+    let mut body = Body { tolerance: b.gap, ..Body::default() };
     let (mut new_vertex, mut new_edge) = (BTreeMap::new(), BTreeMap::new());
     for face in &faces {
         let mut loops = Vec::with_capacity(face.loops.len());
