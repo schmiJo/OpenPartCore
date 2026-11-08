@@ -78,6 +78,59 @@ fn xy() -> Placement {
     Placement::xy(0.0)
 }
 
+/// A spline revolved into a vase, with a second spline cut out of it to hollow it.
+fn vase(doc: &mut Document, _: usize) {
+    let outside = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::Path {
+            start: point("foot", 0.0),
+            moves: vec![
+                Move::Spline { through: vec![point("belly", "height * 0.35"), point("waist", "height * 0.72"), point("lip", "height")] },
+                Move::Line { to: point(0.0, "height") },
+                Move::Line { to: point(0.0, 0.0) },
+            ],
+        })],
+    ));
+    doc.with(Op::Revolve { sketch: outside, degrees: 360.0.into(), mode: Mode::Add });
+    let inside = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::Path {
+            start: point("foot - wall", "wall"),
+            // Through the same heights as the outside, so that the two curves stay about a wall apart. It
+            // ends level with the top, and the cut's flat end lying on the top is what opens the mouth.
+            moves: vec![
+                Move::Spline { through: vec![point("belly - wall", "height * 0.35"), point("waist - wall", "height * 0.72"), point("lip - wall", "height")] },
+                Move::Line { to: point(0.0, "height") },
+                Move::Line { to: point(0.0, "wall") },
+            ],
+        })],
+    ));
+    doc.with(Op::Revolve { sketch: inside, degrees: 360.0.into(), mode: Mode::Remove });
+}
+
+/// A cam from one spline around, with a bore and an elliptical window. A hole drilled across it has to
+/// follow the curved wall, which is the traced case.
+fn cam(doc: &mut Document, _: usize) {
+    let lobe = |angle: f64, r: &str| point(format!("({r}) * {}", angle.to_radians().cos()).as_str(), format!("({r}) * {}", angle.to_radians().sin()).as_str());
+    let s = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::Path {
+            start: lobe(0.0, "lift"),
+            moves: vec![Move::Spline {
+                through: vec![lobe(50.0, "base + (lift - base) * 0.45"), lobe(120.0, "base"), lobe(180.0, "base"), lobe(240.0, "base"), lobe(310.0, "base + (lift - base) * 0.45"), lobe(360.0, "lift")],
+            }],
+        })
+        .hole(Shape::circle(0.0, 0.0, "bore / 2"))
+        .hole(Shape::Ellipse { cx: "lift * 0.55".into(), cy: 0.0.into(), rx: "slot".into(), ry: "slot * 0.45".into(), degrees: "tilt".into() })],
+    ));
+    doc.with(Op::extrude(s, 0.0, "thick", Mode::Add));
+    let across = doc.with(Op::sketch(
+        Placement::new(point3(0.0, 0.0, "thick / 2"), point3(1.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)),
+        vec![Region::new(Shape::circle(0.0, 0.0, "pin / 2"))],
+    ));
+    doc.with(Op::extrude(across, 0.0, "lift + 5", Mode::Remove));
+}
+
 fn bracket(doc: &mut Document, _: usize) {
     // Sketched on XZ, with the extrusion running from y = width back toward y = 0.
     let plane = Placement::new(point3(0.0, "width", 0.0), point3(0.0, -1.0, 0.0), point3(1.0, 0.0, 0.0));
@@ -295,6 +348,23 @@ fn stress(doc: &mut Document, case: usize) {
 }
 
 pub fn catalog() -> &'static [ModelDef] {
+    static VASE: [ParamDef; 6] = [
+        mm("height", "Height", 60.0, 160.0, 110.0),
+        mm("foot", "Foot radius", 18.0, 36.0, 26.0),
+        mm("belly", "Belly radius", 30.0, 60.0, 44.0),
+        mm("waist", "Waist radius", 14.0, 30.0, 18.0),
+        mm("lip", "Lip radius", 18.0, 40.0, 26.0),
+        mm("wall", "Wall thickness", 1.5, 6.0, 3.0),
+    ];
+    static CAM: [ParamDef; 7] = [
+        mm("lift", "Lobe radius", 40.0, 70.0, 55.0),
+        mm("base", "Base radius", 24.0, 36.0, 30.0),
+        mm("bore", "Bore diameter", 8.0, 24.0, 16.0),
+        mm("thick", "Thickness", 6.0, 24.0, 14.0),
+        mm("slot", "Window length", 4.0, 9.0, 7.0),
+        ParamDef { key: "tilt", label: "Window angle", unit: "deg", min: 0.0, max: 180.0, step: 1.0, default: 30.0, choices: &[] },
+        mm("pin", "Cross hole", 2.0, 6.0, 4.0),
+    ];
     static BRACKET: [ParamDef; 9] = [
         mm("width", "Width", 40.0, 120.0, 70.0),
         mm("base", "Base length", 30.0, 100.0, 60.0),
@@ -366,7 +436,7 @@ pub fn catalog() -> &'static [ModelDef] {
         default: 0.0,
         choices: &STRESS_NAMES,
     }];
-    static MODELS: [ModelDef; 9] = [
+    static MODELS: [ModelDef; 11] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -415,6 +485,20 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "The contacts Booleans find hardest: coplanar faces, edges and corners that only touch, and tangent surfaces. The last case is a known limit, where the kernel refuses rather than guess.",
             params: &STRESS,
             build: stress,
+        },
+        ModelDef {
+            id: "vase",
+            name: "Spline vase",
+            blurb: "A sketched spline revolved, with a second spline cut out to hollow it. The curve stays an exact spline all the way to the STEP file.",
+            params: &VASE,
+            build: vase,
+        },
+        ModelDef {
+            id: "cam",
+            name: "Spline cam",
+            blurb: "One spline around the outline, with a bore, an elliptical window and a cross hole. Slicing a spline surface by a plane gives an exact spline back, and the cross hole has to follow the curve.",
+            params: &CAM,
+            build: cam,
         },
         ModelDef {
             id: "knob",

@@ -67,6 +67,15 @@ fn quadrature_breaks(curve: &Curve, t0: f64, t1: f64) -> Vec<f64> {
 fn for_each_boundary_node(body: &Body, c: Coedge, rule: &[(f64, f64)], mut f: impl FnMut(Vec3, Vec3)) {
     let e = &body.edges[c.edge];
     let sign = if c.reversed { -1.0 } else { 1.0 };
+    // Both faces beside an edge use the same nodes. On a traced curve each one costs many surface distances,
+    // so it's worth keeping them for the second face. One edge is kept per thread, since faces rarely share more.
+    if matches!(e.curve, Curve::Sampled(_)) {
+        let nodes = traced_nodes(body, c.edge, e, rule);
+        for &(p, d) in nodes.iter() {
+            f(p, d * sign);
+        }
+        return;
+    }
     for w in quadrature_breaks(&e.curve, e.t0, e.t1).windows(2) {
         let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
         for &(x, weight) in rule {
@@ -74,6 +83,37 @@ fn for_each_boundary_node(body: &Body, c: Coedge, rule: &[(f64, f64)], mut f: im
             f(e.curve.eval(t), e.curve.derivative(t) * (weight * half * sign));
         }
     }
+}
+
+type TracedNodes = std::sync::Arc<Vec<(Vec3, Vec3)>>;
+
+thread_local! {
+    /// Nodes of traced edges for the body being measured, by the edge's address and the rule's length.
+    static TRACED: std::cell::RefCell<crate::hash::HashMap<(usize, usize, usize), TracedNodes>> = std::cell::RefCell::new(Default::default());
+}
+
+fn traced_nodes(body: &Body, edge: usize, e: &crate::topo::Edge, rule: &[(f64, f64)]) -> TracedNodes {
+    let key = (body as *const Body as usize, edge, rule.len());
+    if let Some(found) = TRACED.with(|t| t.borrow().get(&key).cloned()) {
+        return found;
+    }
+    let mut nodes = Vec::new();
+    for w in quadrature_breaks(&e.curve, e.t0, e.t1).windows(2) {
+        let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
+        for &(x, weight) in rule {
+            let t = mid + half * x;
+            nodes.push((e.curve.eval(t), e.curve.derivative(t) * (weight * half)));
+        }
+    }
+    let nodes = std::sync::Arc::new(nodes);
+    TRACED.with(|t| {
+        t.borrow_mut().insert(key, nodes.clone());
+    });
+    nodes
+}
+
+fn forget_traced_nodes() {
+    TRACED.with(|t| t.borrow_mut().clear());
 }
 
 fn face_integrals(body: &Body, face: &Face, reference: Vec3) -> (f64, f64) {
@@ -291,6 +331,8 @@ fn body_chart_range(body: &Body, face: &Face) -> (f64, f64) {
 
 /// Volume and surface area of a body.
 pub fn mass_properties(body: &Body) -> MassProps {
+    // A body at this address before may have been a different body.
+    forget_traced_nodes();
     let reference = body.aabb().center();
     let mut out = MassProps::default();
     for face in &body.faces {
@@ -305,6 +347,7 @@ pub fn mass_properties(body: &Body) -> MassProps {
         // What's left at the coarser rule, plus what rounding can leave behind in a sum of this size.
         out.volume_error = (coarse - out.volume).abs() + 1e-13 * out.volume.abs();
     }
+    forget_traced_nodes();
     out
 }
 
@@ -320,11 +363,17 @@ pub fn loop_closure_error(body: &Body, lp: &[Coedge]) -> f64 {
 
 /// Flux contribution to the volume, and area, of each face, about a reference point.
 pub fn per_face(body: &Body, reference: Vec3) -> Vec<(f64, f64)> {
-    body.faces.iter().map(|f| face_integrals(body, f, reference)).collect()
+    forget_traced_nodes();
+    let out = body.faces.iter().map(|f| face_integrals(body, f, reference)).collect();
+    forget_traced_nodes();
+    out
 }
 
 /// Signed volume of one shell. Positive encloses material, negative is a void.
 pub fn shell_volume(body: &Body, shell: usize) -> f64 {
+    forget_traced_nodes();
     let reference = body.aabb().center();
-    body.shells[shell].iter().map(|&f| face_integrals(body, &body.faces[f], reference).0).sum()
+    let out = body.shells[shell].iter().map(|&f| face_integrals(body, &body.faces[f], reference).0).sum();
+    forget_traced_nodes();
+    out
 }

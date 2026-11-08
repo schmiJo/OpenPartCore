@@ -110,7 +110,8 @@ with `near` or `in_box`. A pattern of features applies each one's solids as it d
 | `rounded_rect` | `cx cy` (default 0), `w h r` |
 | `circle` | `cx cy` (default 0), `r` |
 | `polygon` | `points`: a list of `[x, y]` |
-| `path` | `start`, `moves`: `{"line_to": [x, y]}` or `{"arc_to": [x, y], "center": [x, y], "ccw": true}`. Closes itself with a line if needed. |
+| `path` | `start`, `moves`: `{"line_to": [x, y]}`, `{"arc_to": [x, y], "center": [x, y], "ccw": true}`, or `{"spline_through": [[x, y], ...]}`, a smooth curve on from where the path is. Closes itself with a line if needed. |
+| `ellipse` | `cx cy` (default 0), `rx ry`, `degrees` (default 0) to turn it |
 
 Repeats make copies, each of which counts as its own region:
 

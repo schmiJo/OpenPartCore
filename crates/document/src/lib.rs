@@ -225,6 +225,8 @@ impl Placement {
 pub enum Move {
     Line { to: Point2 },
     Arc { to: Point2, center: Point2, ccw: bool },
+    /// A smooth curve from where the path is, through these points, ending on the last.
+    Spline { through: Vec<Point2> },
 }
 
 /// A closed curve in a sketch. Segments are numbered in order, starting at 0. Rectangles
@@ -236,6 +238,8 @@ pub enum Shape {
     Circle { cx: Expr, cy: Expr, r: Expr },
     Polygon { points: Vec<Point2> },
     Path { start: Point2, moves: Vec<Move> },
+    /// An ellipse with radii along the sketch's axes, turned counter-clockwise by `degrees`.
+    Ellipse { cx: Expr, cy: Expr, rx: Expr, ry: Expr, degrees: Expr },
 }
 
 impl Shape {
@@ -286,9 +290,25 @@ impl Shape {
                     path = match m {
                         Move::Line { to } => path.line_to(at(to)?),
                         Move::Arc { to, center, ccw } => path.arc_to(at(to)?, at(center)?, *ccw),
+                        Move::Spline { through } => {
+                            let here = path.cursor();
+                            let mut points = vec![v3(here.x, here.y, 0.0)];
+                            for p in through {
+                                let q = at(p)?;
+                                points.push(v3(q.x, q.y, 0.0));
+                            }
+                            path.spline_to(Spline::through(&points)?)
+                        }
                     };
                 }
                 path.close()
+            }
+            Shape::Ellipse { cx, cy, rx, ry, degrees } => {
+                let turn = num(degrees, env)?.to_radians();
+                let (x, y) = (v3(turn.cos(), turn.sin(), 0.0), v3(-turn.sin(), turn.cos(), 0.0));
+                let center = v3(num(cx, env)?, num(cy, env)?, 0.0);
+                let spline = Spline::ellipse_arc(center, x, y, num(rx, env)?, num(ry, env)?, 0.0, TAU)?;
+                Wire { segs: vec![Seg { geom: SegGeom::Spline(Arc::new(spline)), id: 0 }] }
             }
         })
     }
@@ -663,9 +683,11 @@ impl Op {
                                 out.extend(to.iter());
                                 out.extend(center.iter());
                             }
+                            Move::Spline { through } => out.extend(through.iter().flatten()),
                         }
                     }
                 }
+                Shape::Ellipse { cx, cy, rx, ry, degrees } => out.extend([cx, cy, rx, ry, degrees]),
             }
         }
         match self {
@@ -1735,10 +1757,19 @@ fn shape_value(s: &Shape) -> Value {
                                 ("center", point2_value(center)),
                                 ("ccw", Value::Bool(*ccw)),
                             ]),
+                            Move::Spline { through } => Value::obj(vec![("spline_through", Value::Arr(through.iter().map(point2_value).collect()))]),
                         })
                         .collect(),
                 ),
             ),
+        ]),
+        Shape::Ellipse { cx, cy, rx, ry, degrees } => Value::obj(vec![
+            ("type", Value::str("ellipse")),
+            ("cx", expr_value(cx)),
+            ("cy", expr_value(cy)),
+            ("rx", expr_value(rx)),
+            ("ry", expr_value(ry)),
+            ("degrees", expr_value(degrees)),
         ]),
     }
 }
@@ -1771,6 +1802,16 @@ fn read_shape(v: &Value) -> Result<Shape> {
             known_keys(v, &["type", "cx", "cy", "r"])?;
             Ok(Shape::Circle { cx: at_origin("cx")?, cy: at_origin("cy")?, r: expr_field(v, "r", &what)? })
         }
+        "ellipse" => {
+            known_keys(v, &["type", "cx", "cy", "rx", "ry", "degrees"])?;
+            Ok(Shape::Ellipse {
+                cx: at_origin("cx")?,
+                cy: at_origin("cy")?,
+                rx: expr_field(v, "rx", &what)?,
+                ry: expr_field(v, "ry", &what)?,
+                degrees: at_origin("degrees")?,
+            })
+        }
         "polygon" => {
             known_keys(v, &["type", "points"])?;
             let points = field(v, "points", &what)?
@@ -1795,8 +1836,17 @@ fn read_shape(v: &Value) -> Result<Shape> {
                         center: read_point2(field(m, "center", "an arc")?)?,
                         ccw: field(m, "ccw", "an arc")?.as_bool().ok_or_else(|| Error::InvalidInput("\"ccw\" must be true or false".into()))?,
                     });
+                } else if let Some(through) = m.get("spline_through") {
+                    known_keys(m, &["spline_through"])?;
+                    let through = through
+                        .as_array()
+                        .ok_or_else(|| Error::InvalidInput("\"spline_through\" must be a list of points".into()))?
+                        .iter()
+                        .map(read_point2)
+                        .collect::<Result<Vec<Point2>>>()?;
+                    moves.push(Move::Spline { through });
                 } else {
-                    return Err(Error::InvalidInput("a path move is {\"line_to\": ...} or {\"arc_to\": ..., \"center\": ..., \"ccw\": ...}".into()));
+                    return Err(Error::InvalidInput("a path move is {\"line_to\": ...}, {\"spline_through\": ...} or {\"arc_to\": ..., \"center\": ..., \"ccw\": ...}".into()));
                 }
             }
             Ok(Shape::Path { start: read_point2(field(v, "start", &what)?)?, moves })

@@ -40,6 +40,35 @@ saddle point gives a curve that crosses itself there. A few of these report as i
 ("two edges claim the same continuation", "the result does not close") rather than naming the
 tangency, because the curve touches a face boundary tangentially at a vertex.
 
+**Spline shapes,** in the same three checks, against a primitive or another of their kind. Run with `SPLINES=1`:
+
+| Category | Cases | Refused | Wrong |
+|---|---|---|---|
+| Free-form splines and ellipses, extruded | 1,000 | 1 (0.1%) | 0 |
+| Spline profiles, revolved | 600 | 1 (0.17%) | 0 |
+
+The refusals are "extrusion and torus meet in a loop too small to trace" and "plane and torus are tangent at a point on their
+intersection". An earlier run reported one wrong result, a mesh that wouldn't close on a seed-96 extrusion. The profile really did cross
+itself, within the last sample before a corner, and outlines are now checked more closely toward corners, so that one is now refused.
+
+**In OpenCASCADE,** 13 spline parts read back valid. Volumes agree to 3e-7 or better on 11. On `spline_outline` and `spline_drilled`, OpenCASCADE's
+reported volume is 1.8e-4 and 1.6e-4 above this kernel's. Its own numbers settle this in the kernel's favour: for `spline_outline`, a polygon through 20,001 points
+of OpenCASCADE's own edges gives a cap area of 812.6155, and this kernel's is 812.6155, while its `Area` for that face says 812.9296. A mesh of the solid made by OpenCASCADE
+has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
+
+## Spline surfaces
+
+Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.md).
+
+- **Refused by name:** fillets, chamfers, offset, shell and draft on these faces, because the true result isn't a spline. Their neighbours can still be filleted if the edge
+  doesn't touch a spline face.
+- **Two different splines sharing part of their length** are refused when their faces overlap there. Identical curves are fine, so two extrusions from one profile work.
+- **A spline can touch a revolve axis only at its ends.**
+- **An outline that crosses itself is found by sampling,** 16 pieces per knot interval and closer toward its ends, so a crossing much smaller than that could get through to the mesher, which
+  refuses it there.
+- **Volumes are integrated,** so `MassProps::volume_error` reports an estimate from comparing two rules, typically about 1e-12 relative. It isn't a proof, but tests hold it against known answers: an ellipse's prism, a torus, a sphere, a spheroid and a slanted cut.
+- **Speed.** Each distance on one of these surfaces costs a search of about a microsecond, where an analytic one costs nanoseconds. The spline demos take about 130 ms a rebuild, 230 ms for a full mesh of the vase, and 510 ms for the cam's mass properties, since its cross hole makes traced curves on spline faces. A slider's draft mesh skips mass properties.
+
 ## Cases OpenCASCADE handles and this kernel refuses
 
 Found by an independent review harness and still open:

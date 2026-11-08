@@ -366,6 +366,11 @@ impl PathBuilder {
         self
     }
 
+    /// Where the path has got to.
+    pub fn cursor(&self) -> Vec2 {
+        self.cursor
+    }
+
     /// A spline from the cursor. It has to start there, and the cursor moves to its end.
     pub fn spline_to(mut self, spline: Spline) -> PathBuilder {
         let end = spline.end();

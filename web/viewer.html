@@ -22,6 +22,7 @@
   --s-cone: #d59a2b;
   --s-sphere: #cf5f7c;
   --s-torus: #7f6bd1;
+  --s-spline: #2f9e5b;
   --ui: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
   --num: "IBM Plex Mono", ui-monospace, Menlo, monospace;
 }
@@ -29,14 +30,14 @@
   :root:not([data-theme="light"]) {
     --paper: #0d2a46; --paper-grid: #16395a; --panel: #0a2138; --ink: #e4eef6; --ink-soft: #93adc4;
     --rule: #24486b; --accent: #7cc4ff; --good: #62d6a0; --bad: #ff8d84; --bad-bg: #40201f;
-    --s-plane: #93a9bc; --s-cylinder: #48c2b6; --s-cone: #eab54a; --s-sphere: #ec7f9b; --s-torus: #a392ec;
+    --s-plane: #93a9bc; --s-cylinder: #48c2b6; --s-cone: #eab54a; --s-sphere: #ec7f9b; --s-torus: #a392ec; --s-spline: #5fd18a;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --paper: #0d2a46; --paper-grid: #16395a; --panel: #0a2138; --ink: #e4eef6; --ink-soft: #93adc4;
   --rule: #24486b; --accent: #7cc4ff; --good: #62d6a0; --bad: #ff8d84; --bad-bg: #40201f;
-  --s-plane: #93a9bc; --s-cylinder: #48c2b6; --s-cone: #eab54a; --s-sphere: #ec7f9b; --s-torus: #a392ec;
+  --s-plane: #93a9bc; --s-cylinder: #48c2b6; --s-cone: #eab54a; --s-sphere: #ec7f9b; --s-torus: #a392ec; --s-spline: #5fd18a;
   color-scheme: dark;
 }
 html, body { height: 100%; }
@@ -235,7 +236,7 @@ const WASM_BASE64 = "__WASM_BASE64__";
 const HOST = "__HOST__"; // "standalone" or "artifact"
 
 const $ = (id) => document.getElementById(id);
-const KINDS = ["plane", "cylinder", "cone", "sphere", "torus"];
+const KINDS = ["plane", "cylinder", "cone", "sphere", "torus", "spline"];
 
 function hexToRgb(hex) {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex.trim());
@@ -275,7 +276,7 @@ const MESH_FS = `#version 300 es
 precision highp float;
 in vec3 vNormal; in vec3 vPos; flat in int vKind;
 uniform vec3 uEye; uniform vec3 uRight; uniform vec3 uUp;
-uniform vec3 uKinds[5]; uniform bool uByKind; uniform vec3 uSteel;
+uniform vec3 uKinds[6]; uniform bool uByKind; uniform vec3 uSteel;
 out vec4 color;
 void main() {
   vec3 n = normalize(vNormal);

@@ -57,6 +57,7 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| Document shapes | `coreshape_document::Shape` gained `Ellipse` and `Move` gained `Spline` | An exhaustive `match` needs the new arms |
 | Sketch splines | `Geometry`, `SegKind` and `coreshape_sketch::Seg` are no longer `Copy`. `Geometry` gained `Spline`, `SegKind` gained `Spline`, and `Part` gained `Control` | Clone them, or match on a reference. An exhaustive `match` needs the new arms. Existing sketch JSON is unchanged |
 | Ellipses | `Geometry` gained `Ellipse` and `EllipticalArc`, `SegKind` gained `Ellipse`, `Part` gained `Major`, and `Rule` gained `MajorRadius` and `MinorRadius` | An exhaustive `match` needs the new arms. Existing sketch JSON is unchanged. A region's loop can now hold an ellipse, which `profiles_from_regions` handles |
 | Spline surfaces | `Surface` is no longer `Copy`, and gained `Extruded` and `Revolved` | Use `face.surface.clone()` or borrow it. An exhaustive `match` needs the new arms. `Surface::name` gives `extrusion` and `revolution` |

@@ -232,7 +232,7 @@ fn fill(out: &mut Output, outcome: &Outcome, draft: bool) {
         let m = mass_properties(&body);
         (m.volume.to_string(), m.area.to_string())
     };
-    let mut kinds = [0usize; 5];
+    let mut kinds = [0usize; 6];
     for f in &body.faces {
         kinds[surface_kind(&f.surface) as usize] += 1;
     }
