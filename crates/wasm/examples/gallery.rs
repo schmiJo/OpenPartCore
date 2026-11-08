@@ -74,7 +74,41 @@ fn extras() -> Vec<(&'static str, Result<Body>)> {
         });
         fillet(&f, &side, 2.0, 3)
     };
+    let many_holes = {
+        let plate = box_solid(&Frame::WORLD, 100.0, 60.0, 6.0, 1).unwrap();
+        let tools: Vec<Body> = (0..40)
+            .map(|i| cylinder(&Frame::translation(v3(6.0 + (i % 8) as f64 * 12.0, 6.0 + (i / 8) as f64 * 12.0, -1.0)), 3.0, 8.0, 2).unwrap())
+            .collect();
+        boolean_many(&plate, &tools, BoolOp::Subtract)
+    };
+    let mirrored_part = {
+        let part = union(
+            &box_solid(&Frame::translation(v3(2.0, 0.0, 0.0)), 20.0, 10.0, 8.0, 1).unwrap(),
+            &cylinder(&Frame::translation(v3(12.0, 5.0, 8.0)), 4.0, 6.0, 2).unwrap(),
+        )
+        .unwrap();
+        Ok(part.mirrored(&Mirror::new(v3(1.0, 2.0, 3.0), v3(1.0, 0.5, 0.25))))
+    };
+    let mirror_of_curves = {
+        let a = cylinder(&Frame::translation(v3(0.0, 0.0, -20.0)), 8.0, 40.0, 1).unwrap();
+        let b = cylinder(&Frame::new(v3(-20.0, 1.5, 0.0), Vec3::X, Vec3::Y), 5.0, 40.0, 2).unwrap();
+        Ok(union(&a, &b).unwrap().mirrored(&Mirror::new(v3(30.0, 0.0, 0.0), v3(1.0, 0.0, 0.0))))
+    };
+    let pipe = {
+        let section = Profile::new(Wire::circle(v2(0.0, 0.0), 4.0)).with_hole(Wire::circle(v2(0.0, 0.0), 3.0));
+        let path = [
+            PathStep::Line { length: 20.0 },
+            PathStep::Arc { radius: 15.0, angle: PI / 2.0, toward: 0.3 },
+            PathStep::Line { length: 25.0 },
+            PathStep::Arc { radius: 10.0, angle: 2.0, toward: 2.0 },
+        ];
+        sweep(&section, &Frame::WORLD, &path, 1)
+    };
     vec![
+        ("many_holes", many_holes),
+        ("mirrored_part", mirrored_part),
+        ("mirror_of_curves", mirror_of_curves),
+        ("swept_pipe", pipe),
         ("rim_r_equals_corner", rim(8.0, 12.0, 8.0)),
         ("rim_r_above_corner", rim(8.0, 20.0, 9.0)),
         ("propagated_chain", chain),

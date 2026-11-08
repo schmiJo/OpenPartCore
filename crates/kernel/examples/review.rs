@@ -868,6 +868,20 @@ fn main() {
         "extra" => extra(),
         "chain" => chain(&a[2], a[3].parse().unwrap(), a[4].parse().unwrap()),
         // One perf case at a time, for profiling.
+        "holes-together" => {
+            let n: usize = a[2].parse().unwrap();
+            let t = Instant::now();
+            let plate = box_solid(&Frame::WORLD, 400.0, 400.0, 10.0, 1).unwrap();
+            let s = 380.0 / n as f64;
+            let tools: Vec<Body> = (0..n * n)
+                .map(|k| {
+                    let (i, j) = (k / n, k % n);
+                    cylinder(&Frame::translation(v3(10.0 + s * (i as f64 + 0.5), 10.0 + s * (j as f64 + 0.5), -1.0)), s * 0.3, 12.0, 2 + k as u32).unwrap()
+                })
+                .collect();
+            let b = boolean_many(&plate, &tools, BoolOp::Subtract).unwrap();
+            println!("{} holes at once: {:.3} s, volume {}", n * n, t.elapsed().as_secs_f64(), mass_properties(&b).volume);
+        }
         "holes" => {
             let n: usize = a[2].parse().unwrap();
             let t = Instant::now();

@@ -350,6 +350,18 @@ impl Surface {
     }
 
     /// Rigidly transforms the surface.
+    /// The image under a reflection. A surface's normal is set by its shape and its z axis, so the
+    /// image's normal is the reflection of the original's.
+    pub fn mirrored(&self, m: &Mirror) -> Surface {
+        match *self {
+            Surface::Plane(f) => Surface::Plane(m.of_surface_frame(&f)),
+            Surface::Cylinder { frame, radius } => Surface::Cylinder { frame: m.of_surface_frame(&frame), radius },
+            Surface::Cone { frame, radius, half_angle } => Surface::Cone { frame: m.of_surface_frame(&frame), radius, half_angle },
+            Surface::Sphere { frame, radius } => Surface::Sphere { frame: m.of_surface_frame(&frame), radius },
+            Surface::Torus { frame, major, minor } => Surface::Torus { frame: m.of_surface_frame(&frame), major, minor },
+        }
+    }
+
     pub fn transformed(&self, t: &Frame) -> Surface {
         match *self {
             Surface::Plane(f) => Surface::Plane(t.compose(&f)),

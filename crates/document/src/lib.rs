@@ -15,6 +15,7 @@
 
 use coreshape::blend::{chamfer, fillet_with, BlendOptions};
 use coreshape::boolean::{boolean_with, BoolOp, Checks};
+use coreshape::multi::{boolean_many, merged_tools, sweep, PathStep};
 use coreshape::build::{
     box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus, SLOT_END_CAP, SLOT_SEG_BASE, SLOT_START_CAP,
 };
@@ -519,6 +520,33 @@ pub enum Op {
     Solid { primitive: Primitive, at: Placement, mode: Mode },
     Fillet { edges: EdgeSelect, radius: Expr, propagate: bool },
     Chamfer { edges: EdgeSelect, distance: Expr },
+    /// Sweeps a sketch along a smooth path of lines and arcs, starting at the sketch plane and
+    /// heading along its normal.
+    Sweep { sketch: FeatureId, path: Vec<SweepStep>, mode: Mode },
+    /// Repeats earlier features, or the whole body if `of` is empty. A copy keeps the names of what
+    /// it copied, so a face's name covers the original and all its copies.
+    Pattern { of: Vec<FeatureId>, along: PatternPath },
+    /// Reflects earlier features, or the whole body if `of` is empty, across a plane, adding them to
+    /// the originals. A reflection keeps names too.
+    Mirror { of: Vec<FeatureId>, point: Point3, normal: Point3 },
+}
+
+/// One step along a sweep's path. See `coreshape::PathStep`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SweepStep {
+    Line { length: Expr },
+    /// Bends through `degrees` around a center `radius` away from the path, in the direction
+    /// `toward_degrees` counter-clockwise from the sketch's x axis.
+    Arc { radius: Expr, degrees: Expr, toward_degrees: Expr },
+}
+
+/// Where a pattern's copies go. `count` includes the original.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternPath {
+    Linear { direction: Point3, count: Expr, spacing: Expr },
+    /// Around an axis. Copies are evenly spaced over `degrees`. A full turn has no copy at the end, as
+    /// that would be the original; anything less goes from the original to the end of the angle.
+    Circular { center: Point3, axis: Point3, count: Expr, degrees: Expr },
 }
 
 impl Op {
@@ -556,6 +584,9 @@ impl Op {
             Op::Solid { .. } => "solid",
             Op::Fillet { .. } => "fillet",
             Op::Chamfer { .. } => "chamfer",
+            Op::Sweep { .. } => "sweep",
+            Op::Pattern { .. } => "pattern",
+            Op::Mirror { .. } => "mirror",
         }
     }
 
@@ -572,6 +603,9 @@ impl Op {
             Op::Solid { .. } => "Solid",
             Op::Fillet { .. } => "Fillet",
             Op::Chamfer { .. } => "Chamfer",
+            Op::Sweep { .. } => "Sweep",
+            Op::Pattern { .. } => "Pattern",
+            Op::Mirror { .. } => "Mirror",
         }
     }
 
@@ -579,8 +613,9 @@ impl Op {
     pub fn references(&self) -> Vec<FeatureId> {
         let mut out = Vec::new();
         match self {
-            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } => out.push(*sketch),
+            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } => out.push(*sketch),
             Op::Fillet { edges, .. } | Op::Chamfer { edges, .. } => edges.references(&mut out),
+            Op::Pattern { of, .. } | Op::Mirror { of, .. } => out.extend_from_slice(of),
             _ => {}
         }
         out.sort();
@@ -645,6 +680,29 @@ impl Op {
                     Primitive::Sphere { radius } => out.push(radius),
                     Primitive::Torus { major, minor } => out.extend([major, minor]),
                 }
+            }
+            Op::Sweep { path, .. } => {
+                for step in path {
+                    match step {
+                        SweepStep::Line { length } => out.push(length),
+                        SweepStep::Arc { radius, degrees, toward_degrees } => out.extend([radius, degrees, toward_degrees]),
+                    }
+                }
+            }
+            Op::Pattern { along, .. } => match along {
+                PatternPath::Linear { direction, count, spacing } => {
+                    out.extend(direction.iter());
+                    out.extend([count, spacing]);
+                }
+                PatternPath::Circular { center, axis, count, degrees } => {
+                    out.extend(center.iter());
+                    out.extend(axis.iter());
+                    out.extend([count, degrees]);
+                }
+            },
+            Op::Mirror { point, normal, .. } => {
+                out.extend(point.iter());
+                out.extend(normal.iter());
             }
             Op::Fillet { edges, radius, .. } => {
                 edges.collect_exprs(&mut out);
@@ -730,6 +788,21 @@ struct Cached {
     body: Option<Arc<Body>>,
     /// A sketch's output, kept separately because a sketch doesn't touch the body.
     sketch: Option<SketchOutput>,
+    /// The solids this feature applied, and how, for a pattern or mirror to use again.
+    tools: Option<(Arc<Vec<Body>>, Mode)>,
+}
+
+/// What running one feature produced.
+struct RunResult {
+    body: Option<Arc<Body>>,
+    sketch: Option<SketchOutput>,
+    tools: Option<(Arc<Vec<Body>>, Mode)>,
+}
+
+impl RunResult {
+    fn wrap(self) -> Result<RunResult> {
+        Ok(self)
+    }
 }
 
 /// What a sketch hands to the features that use it.
@@ -899,7 +972,7 @@ impl Document {
     }
 
     fn check_sketch_refs(op: &Op, before: &[Feature]) -> Result<()> {
-        if let Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } = op {
+        if let Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } = op {
             if let Some(f) = before.iter().find(|f| f.id == *sketch) {
                 if !f.op.is_sketch() {
                     return Err(Error::InvalidInput(format!("f{} is a {}, not a sketch", sketch.0, f.op.kind())));
@@ -1037,7 +1110,7 @@ impl Document {
             // body so far, and on its sketch when it has one.
             let key = match &feature.op {
                 Op::Sketch { .. } | Op::ConstrainedSketch { .. } => hash_text(1, &own),
-                Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } => {
+                Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } => {
                     let sketch_key = sketch_keys.get(sketch).copied().unwrap_or(0);
                     hash_text(body_key ^ sketch_key.rotate_left(17), &own)
                 }
@@ -1055,14 +1128,14 @@ impl Document {
                 continue;
             }
             match self.run(&feature, &env, body.clone()) {
-                Ok((new_body, sketch)) => {
-                    if sketch.is_some() {
+                Ok(result) => {
+                    if result.sketch.is_some() {
                         sketch_keys.insert(feature.id, key);
                     } else {
-                        body = new_body.clone();
+                        body = result.body.clone();
                         body_key = key;
                     }
-                    self.cache.insert(feature.id, Cached { key, body: new_body, sketch });
+                    self.cache.insert(feature.id, Cached { key, body: result.body, sketch: result.sketch, tools: result.tools });
                     steps.push(step(StepState::Rebuilt));
                 }
                 // The previous result stays cached under its own key, so going back to the
@@ -1087,8 +1160,14 @@ impl Document {
         Ok(text)
     }
 
-    fn run(&self, feature: &Feature, env: &Env, body: Option<Arc<Body>>) -> Result<(Option<Arc<Body>>, Option<SketchOutput>)> {
+    fn run(&self, feature: &Feature, env: &Env, body: Option<Arc<Body>>) -> Result<RunResult> {
         let tag = feature.id.0;
+        let solid = |body: Body| RunResult { body: Some(Arc::new(body)), sketch: None, tools: None };
+        let sketched = |output: SketchOutput| RunResult { body: None, sketch: Some(output), tools: None };
+        let applied = |current: Option<&Body>, tools: Vec<Body>, mode: Mode| -> Result<RunResult> {
+            let result = combine(current, &tools, mode)?;
+            Ok(RunResult { body: Some(Arc::new(result)), sketch: None, tools: Some((Arc::new(tools), mode)) })
+        };
         let sketch_output = |id: &FeatureId| -> Result<SketchOutput> {
             if self.feature(*id).is_some_and(|f| f.suppressed) {
                 return Err(Error::InvalidInput(format!("its sketch f{} is suppressed", id.0)));
@@ -1107,7 +1186,7 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok((None, Some(SketchOutput { frame: plane.resolve(env)?, profiles: Arc::new(list), by_entity: false })))
+                Ok(sketched(SketchOutput { frame: plane.resolve(env)?, profiles: Arc::new(list), by_entity: false }))
             }
             Op::ConstrainedSketch { plane, sketch } => {
                 let solved = sketch.solve_with(env).map_err(|e| Error::InvalidProfile(e.message))?;
@@ -1116,7 +1195,7 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok((None, Some(SketchOutput { frame: plane.resolve(env)?, profiles: Arc::new(list), by_entity: true })))
+                Ok(sketched(SketchOutput { frame: plane.resolve(env)?, profiles: Arc::new(list), by_entity: true }))
             }
             Op::Extrude { sketch, start, length, mode } => {
                 let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
@@ -1127,7 +1206,7 @@ impl Document {
                     .enumerate()
                     .map(|(k, p)| Ok(with_region(extrude(p, &shifted, h, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
-                Ok((Some(Arc::new(combine(body.as_deref(), tools, *mode)?)), None))
+                applied(body.as_deref(), tools, *mode)
             }
             Op::Revolve { sketch, degrees, mode } => {
                 let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
@@ -1137,31 +1216,88 @@ impl Document {
                     .enumerate()
                     .map(|(k, p)| Ok(with_region(revolve(p, &frame, a, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
-                Ok((Some(Arc::new(combine(body.as_deref(), tools, *mode)?)), None))
+                applied(body.as_deref(), tools, *mode)
+            }
+            Op::Sweep { sketch, path, mode } => {
+                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
+                let steps = path
+                    .iter()
+                    .map(|step| {
+                        Ok(match step {
+                            SweepStep::Line { length } => PathStep::Line { length: num(length, env)? },
+                            SweepStep::Arc { radius, degrees, toward_degrees } => PathStep::Arc {
+                                radius: num(radius, env)?,
+                                angle: num(degrees, env)?.to_radians(),
+                                toward: num(toward_degrees, env)?.to_radians(),
+                            },
+                        })
+                    })
+                    .collect::<Result<Vec<PathStep>>>()?;
+                let tools = list
+                    .iter()
+                    .enumerate()
+                    .map(|(k, p)| Ok(with_region(sweep(p, &frame, &steps, tag)?, if by_entity { 0 } else { k as u32 })))
+                    .collect::<Result<Vec<Body>>>()?;
+                applied(body.as_deref(), tools, *mode)
+            }
+            Op::Pattern { of, along } => {
+                let moves = pattern_moves(along, env)?;
+                solid(self.copied(body.as_deref(), of, |b| moves.iter().map(|m| b.transformed(m)).collect())?).wrap()
+            }
+            Op::Mirror { of, point, normal } => {
+                let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
+                let n = at(normal)?;
+                if !(n.norm() >= 1e-12 && n.norm() <= 1e150) {
+                    return Err(Error::InvalidInput("a mirror's normal must have a sensible, non-zero length".into()));
+                }
+                let m = Mirror::new(at(point)?, n);
+                solid(self.copied(body.as_deref(), of, |b| vec![b.mirrored(&m)])?).wrap()
             }
             Op::Solid { primitive, at, mode } => {
                 let frame = at.resolve(env)?;
-                let solid = match primitive {
+                let made = match primitive {
                     Primitive::Box { dx, dy, dz } => box_solid(&frame, num(dx, env)?, num(dy, env)?, num(dz, env)?, tag)?,
                     Primitive::Cylinder { radius, height } => cylinder(&frame, num(radius, env)?, num(height, env)?, tag)?,
                     Primitive::Cone { r0, r1, height } => cone_frustum(&frame, num(r0, env)?, num(r1, env)?, num(height, env)?, tag)?,
                     Primitive::Sphere { radius } => sphere(&frame, num(radius, env)?, tag)?,
                     Primitive::Torus { major, minor } => torus(&frame, num(major, env)?, num(minor, env)?, tag)?,
                 };
-                Ok((Some(Arc::new(combine(body.as_deref(), vec![solid], *mode)?)), None))
+                applied(body.as_deref(), vec![made], *mode)
             }
             Op::Fillet { edges, radius, propagate } => {
                 let current = body.ok_or_else(|| Error::InvalidInput("a fillet needs a body to work on".into()))?;
                 let list = select_edges(edges, &current, env)?;
                 let options = BlendOptions { propagate: *propagate };
-                Ok((Some(Arc::new(fillet_with(&current, &list, num(radius, env)?, options, tag)?)), None))
+                Ok(solid(fillet_with(&current, &list, num(radius, env)?, options, tag)?))
             }
             Op::Chamfer { edges, distance } => {
                 let current = body.ok_or_else(|| Error::InvalidInput("a chamfer needs a body to work on".into()))?;
                 let list = select_edges(edges, &current, env)?;
-                Ok((Some(Arc::new(chamfer(&current, &list, num(distance, env)?, tag)?)), None))
+                Ok(solid(chamfer(&current, &list, num(distance, env)?, tag)?))
             }
         }
+    }
+
+    /// The body with copies added: of listed features' solids, applied as they were, or of the
+    /// whole body if none are listed. `copies` makes the images of one solid.
+    fn copied(&self, body: Option<&Body>, of: &[FeatureId], copies: impl Fn(&Body) -> Vec<Body>) -> Result<Body> {
+        let mut current = body.ok_or_else(|| Error::InvalidInput("there is no body yet to copy".into()))?.clone();
+        if of.is_empty() {
+            return boolean_many(&current, &copies(&current), BoolOp::Union);
+        }
+        for id in of {
+            if self.feature(*id).is_some_and(|f| f.suppressed) {
+                return Err(Error::InvalidInput(format!("f{} is suppressed, so it can't be copied", id.0)));
+            }
+            let (tools, mode) = self
+                .cache
+                .get(id)
+                .and_then(|c| c.tools.clone())
+                .ok_or_else(|| Error::InvalidInput(format!("f{} makes no solid to copy: it must be an extrude, revolve, sweep or solid", id.0)))?;
+            let made: Vec<Body> = tools.iter().flat_map(&copies).collect();
+            current = combine(Some(&current), &made, mode)?;
+        }
+        Ok(current)
     }
 
     // ----- Saving and loading -----
@@ -1314,43 +1450,53 @@ fn with_region(mut body: Body, region: u32) -> Body {
     body
 }
 
-fn combine(body: Option<&Body>, tools: Vec<Body>, mode: Mode) -> Result<Body> {
-    let mut tools = tools.into_iter();
-    let mut current = match body {
-        Some(b) => b.clone(),
-        None => {
-            if mode != Mode::Add {
-                return Err(Error::InvalidInput("there is no body yet to work on".into()));
-            }
-            tools.next().ok_or_else(|| Error::InvalidInput("the sketch has no closed regions".into()))?
+fn combine(body: Option<&Body>, tools: &[Body], mode: Mode) -> Result<Body> {
+    if tools.is_empty() {
+        return Err(Error::InvalidInput("the sketch has no closed regions".into()));
+    }
+    let Some(current) = body else {
+        if mode != Mode::Add {
+            return Err(Error::InvalidInput("there is no body yet to work on".into()));
+        }
+        return merged_tools(tools);
+    };
+    let op = match mode {
+        Mode::Add => BoolOp::Union,
+        Mode::Remove => BoolOp::Subtract,
+        // A sketch with several regions means what lies inside any of them.
+        Mode::Intersect => BoolOp::Intersect,
+    };
+    boolean_many(current, tools, op)
+}
+
+/// The rigid moves that take the original to each of a pattern's copies.
+fn pattern_moves(along: &PatternPath, env: &Env) -> Result<Vec<Frame>> {
+    let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
+    let unit = |p: &Point3, what: &str| -> Result<Vec3> {
+        let d = at(p)?;
+        if d.norm() >= 1e-12 && d.norm() <= 1e150 {
+            Ok(d.normalized())
+        } else {
+            Err(Error::InvalidInput(format!("a pattern's {what} must have a sensible, non-zero length")))
         }
     };
-    match mode {
-        // Several regions apply one by one. Only the last result needs the full checks.
-        Mode::Add | Mode::Remove => {
-            let op = if mode == Mode::Add { BoolOp::Union } else { BoolOp::Subtract };
-            let total = tools.len();
-            for (i, t) in tools.enumerate() {
-                let checks = if i + 1 == total { Checks::Full } else { Checks::Interim };
-                current = boolean_with(&current, &t, op, checks)?;
-            }
+    Ok(match along {
+        PatternPath::Linear { direction, count, spacing } => {
+            let (d, n, step) = (unit(direction, "direction")?, count_of(count, env, "a pattern's count")?, num(spacing, env)?);
+            (1..n).map(|k| Frame::translation(d * (step * k as f64))).collect()
         }
-        Mode::Intersect => {
-            // One tool at a time would keep only what is common to all of them. A sketch
-            // with several regions means their union.
-            let mut tool: Option<Body> = None;
-            for t in tools {
-                tool = Some(match tool {
-                    None => t,
-                    Some(existing) => boolean_with(&existing, &t, BoolOp::Union, Checks::Interim)?,
-                });
+        PatternPath::Circular { center, axis, count, degrees } => {
+            let (c, a, n) = (at(center)?, unit(axis, "axis")?, count_of(count, env, "a pattern's count")?);
+            let total = num(degrees, env)?;
+            let full = (total.abs() - 360.0).abs() < 1e-9;
+            if !full && total.abs() > 360.0 {
+                return Err(Error::InvalidInput(format!("a pattern's angle of {total} is over a full turn")));
             }
-            if let Some(t) = tool {
-                current = boolean_with(&current, &t, BoolOp::Intersect, Checks::Full)?;
-            }
+            let gaps = if full { n } else { n.saturating_sub(1).max(1) };
+            let step = total.to_radians() / gaps as f64;
+            (1..n).map(|k| Frame::rotation(c, a, step * k as f64)).collect()
         }
-    }
-    Ok(current)
+    })
 }
 
 /// The edges of a body a selection picks out.
@@ -1789,6 +1935,49 @@ pub fn op_value(op: &Op) -> Value {
             items.push(("mode", mode_value(*mode)));
             Value::obj(items)
         }
+        Op::Sweep { sketch, path, mode } => Value::obj(vec![
+            ("type", Value::str("sweep")),
+            ("sketch", Value::Num(sketch.0 as f64)),
+            (
+                "path",
+                Value::Arr(
+                    path.iter()
+                        .map(|step| match step {
+                            SweepStep::Line { length } => Value::obj(vec![("line", expr_value(length))]),
+                            SweepStep::Arc { radius, degrees, toward_degrees } => Value::obj(vec![
+                                ("arc_radius", expr_value(radius)),
+                                ("degrees", expr_value(degrees)),
+                                ("toward_degrees", expr_value(toward_degrees)),
+                            ]),
+                        })
+                        .collect(),
+                ),
+            ),
+            ("mode", mode_value(*mode)),
+        ]),
+        Op::Pattern { of, along } => {
+            let mut items = vec![("type", Value::str("pattern")), ("of", ids_value(of))];
+            match along {
+                PatternPath::Linear { direction, count, spacing } => {
+                    items.push(("direction", point3_value(direction)));
+                    items.push(("count", expr_value(count)));
+                    items.push(("spacing", expr_value(spacing)));
+                }
+                PatternPath::Circular { center, axis, count, degrees } => {
+                    items.push(("center", point3_value(center)));
+                    items.push(("axis", point3_value(axis)));
+                    items.push(("count", expr_value(count)));
+                    items.push(("degrees", expr_value(degrees)));
+                }
+            }
+            Value::obj(items)
+        }
+        Op::Mirror { of, point, normal } => Value::obj(vec![
+            ("type", Value::str("mirror")),
+            ("of", ids_value(of)),
+            ("point", point3_value(point)),
+            ("normal", point3_value(normal)),
+        ]),
         Op::Fillet { edges, radius, propagate } => Value::obj(vec![
             ("type", Value::str("fillet")),
             ("edges", edge_select_value(edges)),
@@ -1800,6 +1989,23 @@ pub fn op_value(op: &Op) -> Value {
             ("edges", edge_select_value(edges)),
             ("distance", expr_value(distance)),
         ]),
+    }
+}
+
+fn ids_value(ids: &[FeatureId]) -> Value {
+    Value::Arr(ids.iter().map(|f| Value::Num(f.0 as f64)).collect())
+}
+
+fn read_ids(v: &Value) -> Result<Vec<FeatureId>> {
+    let bad = || Error::InvalidInput("\"of\" must be a list of feature ids; leave it out to copy the whole body".to_string());
+    match v.get("of") {
+        None => Ok(Vec::new()),
+        Some(list) => list
+            .as_array()
+            .ok_or_else(bad)?
+            .iter()
+            .map(|n| n.as_f64().filter(|x| x.fract() == 0.0 && *x >= 1.0 && *x < 4e9).map(|x| FeatureId(x as u32)).ok_or_else(bad))
+            .collect(),
     }
 }
 
@@ -1893,6 +2099,54 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             };
             Ok(Op::Solid { primitive, at, mode: read_mode(v)? })
         }
+        "sweep" => {
+            with(&["type", "sketch", "path", "mode"])?;
+            let mut path = Vec::new();
+            for step in field(v, "path", "a sweep")?.as_array().ok_or_else(|| Error::InvalidInput("a sweep's path must be a list".into()))? {
+                if let Some(length) = step.get("line") {
+                    known_keys(step, &["line"])?;
+                    path.push(SweepStep::Line { length: read_expr(length)? });
+                } else if step.get("arc_radius").is_some() {
+                    known_keys(step, &["arc_radius", "degrees", "toward_degrees"])?;
+                    path.push(SweepStep::Arc {
+                        radius: expr_field(step, "arc_radius", "a bend")?,
+                        degrees: expr_field(step, "degrees", "a bend")?,
+                        toward_degrees: step.get("toward_degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(0.0)),
+                    });
+                } else {
+                    return Err(Error::InvalidInput("a sweep step is {\"line\": length} or {\"arc_radius\": r, \"degrees\": a, \"toward_degrees\": d}".into()));
+                }
+            }
+            Ok(Op::Sweep { sketch: read_sketch_id(v)?, path, mode: read_mode(v)? })
+        }
+        "pattern" => {
+            let of = read_ids(v)?;
+            let along = if v.get("direction").is_some() {
+                with(&["type", "of", "direction", "count", "spacing"])?;
+                PatternPath::Linear {
+                    direction: read_point3(field(v, "direction", "a linear pattern")?)?,
+                    count: expr_field(v, "count", "a pattern")?,
+                    spacing: expr_field(v, "spacing", "a linear pattern")?,
+                }
+            } else {
+                with(&["type", "of", "center", "axis", "count", "degrees"])?;
+                PatternPath::Circular {
+                    center: v.get("center").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
+                    axis: v.get("axis").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 1.0)),
+                    count: expr_field(v, "count", "a pattern")?,
+                    degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)),
+                }
+            };
+            Ok(Op::Pattern { of, along })
+        }
+        "mirror" => {
+            with(&["type", "of", "point", "normal"])?;
+            Ok(Op::Mirror {
+                of: read_ids(v)?,
+                point: v.get("point").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
+                normal: read_point3(field(v, "normal", "a mirror")?)?,
+            })
+        }
         "fillet" => {
             with(&["type", "edges", "radius", "propagate"])?;
             Ok(Op::Fillet {
@@ -1909,7 +2163,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::Chamfer { edges: read_edge_select(field(v, "edges", "a chamfer")?)?, distance: expr_field(v, "distance", "a chamfer")? })
         }
         other => Err(Error::InvalidInput(format!(
-            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, solid, fillet or chamfer"
+            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, sweep, solid, pattern, mirror, fillet or chamfer"
         ))),
     }
 }

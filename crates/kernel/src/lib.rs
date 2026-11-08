@@ -18,6 +18,7 @@ pub mod fuzz;
 pub mod hash;
 pub mod mass;
 pub mod math;
+pub mod multi;
 pub mod profile;
 pub mod surface;
 pub mod tess;
@@ -30,8 +31,9 @@ pub use build::{box_solid, cone_frustum, cylinder, extrude, revolve, sphere, tor
 pub use curve::Curve;
 pub use error::{Error, Result};
 pub use mass::{mass_properties, MassProps};
-pub use math::{v2, v3, Aabb, Frame, Rng, Vec2, Vec3, MAX_COORD, MIN_FEATURE, PI, TAU, TOL};
+pub use math::{v2, v3, Aabb, Frame, Mirror, Rng, Vec2, Vec3, MAX_COORD, MIN_FEATURE, PI, TAU, TOL};
 pub use profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
+pub use multi::{boolean_many, compound, merged_tools, sweep, PathStep};
 pub use surface::{Chart, Surface};
 pub use tess::{tessellate, Mesh, TessParams};
 pub use topo::{Body, Coedge, Edge, Face, FaceTag};

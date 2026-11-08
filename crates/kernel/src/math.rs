@@ -127,6 +127,43 @@ pub struct Frame {
     pub z: Vec3,
 }
 
+/// A reflection across a plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mirror {
+    pub point: Vec3,
+    /// Unit normal of the plane.
+    pub normal: Vec3,
+}
+
+impl Mirror {
+    pub fn new(point: Vec3, normal: Vec3) -> Mirror {
+        Mirror { point, normal: normal.normalized() }
+    }
+
+    pub fn of_point(&self, p: Vec3) -> Vec3 {
+        p - self.normal * (2.0 * (p - self.point).dot(self.normal))
+    }
+
+    pub fn of_dir(&self, d: Vec3) -> Vec3 {
+        d - self.normal * (2.0 * d.dot(self.normal))
+    }
+
+    /// The image of a surface's frame. Its z axis reflects, so an axis and the normal a surface
+    /// defines by it land where they should. A reflection turns right hand into left, so y is
+    /// worked out again.
+    pub fn of_surface_frame(&self, f: &Frame) -> Frame {
+        let (x, z) = (self.of_dir(f.x), self.of_dir(f.z));
+        Frame { origin: self.of_point(f.origin), x, y: z.cross(x), z }
+    }
+
+    /// The image of a curve's frame. Its x and y axes reflect, so a parameter still means the same
+    /// point. Here z is what's worked out again.
+    pub fn of_curve_frame(&self, f: &Frame) -> Frame {
+        let (x, y) = (self.of_dir(f.x), self.of_dir(f.y));
+        Frame { origin: self.of_point(f.origin), x, y, z: x.cross(y) }
+    }
+}
+
 impl Frame {
     pub const WORLD: Frame = Frame { origin: Vec3::ZERO, x: Vec3::X, y: Vec3::Y, z: Vec3::Z };
 

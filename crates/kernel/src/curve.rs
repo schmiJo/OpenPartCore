@@ -191,6 +191,20 @@ impl Curve {
     }
 
     /// Rigidly transforms the curve.
+    /// The image under a reflection. A parameter still means the same point.
+    pub fn mirrored(&self, m: &Mirror) -> Curve {
+        match self {
+            Curve::Line { origin, dir } => Curve::Line { origin: m.of_point(*origin), dir: m.of_dir(*dir) },
+            Curve::Circle { frame, radius } => Curve::Circle { frame: m.of_curve_frame(frame), radius: *radius },
+            Curve::Ellipse { frame, major, minor } => Curve::Ellipse { frame: m.of_curve_frame(frame), major: *major, minor: *minor },
+            Curve::Sampled(c) => Curve::Sampled(Arc::new(SampledCurve {
+                points: c.points.iter().map(|p| m.of_point(*p)).collect(),
+                tangents: c.tangents.iter().map(|d| m.of_dir(*d)).collect(),
+                surfaces: (c.surfaces.0.mirrored(m), c.surfaces.1.mirrored(m)),
+            })),
+        }
+    }
+
     pub fn transformed(&self, t: &Frame) -> Curve {
         match self {
             Curve::Line { origin, dir } => Curve::Line { origin: t.to_world(*origin), dir: t.dir_to_world(*dir) },

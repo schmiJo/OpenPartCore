@@ -315,8 +315,9 @@ impl Session {
                 let mut notes = Vec::new();
                 for s in &o.steps {
                     let built = matches!(s.state, StepState::Rebuilt | StepState::Reused);
-                    let is_sketch = s.kind == "sketch" || s.kind == "constrained_sketch";
-                    if built && !is_sketch && !body.faces.iter().any(|f| f.tag.feature == s.id.0) {
+                    // Copies keep the names of what they copied, so these have no faces of their own.
+                    let names_none = matches!(s.kind, "sketch" | "constrained_sketch" | "pattern" | "mirror");
+                    if built && !names_none && !body.faces.iter().any(|f| f.tag.feature == s.id.0) {
                         notes.push(Value::str(format!("f{} ({}) left no faces on the solid, so it may not have touched it", s.id.0, s.name)));
                     }
                 }

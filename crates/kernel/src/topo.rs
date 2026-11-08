@@ -241,6 +241,27 @@ impl Body {
         seen.values().filter(|&&n| n > 1).count()
     }
 
+    /// The body's reflection across a plane. A reflection turns loops the other way round, so each
+    /// face's loops are reversed to keep material on the same side of them.
+    pub fn mirrored(&self, m: &crate::math::Mirror) -> Body {
+        let mut out = Body { vertices: self.vertices.iter().map(|p| m.of_point(*p)).collect(), ..Body::default() };
+        out.edges = self
+            .edges
+            .iter()
+            .map(|e| Edge { curve: e.curve.mirrored(m), t0: e.t0, t1: e.t1, v0: e.v0, v1: e.v1 })
+            .collect();
+        for f in &self.faces {
+            let loops: Vec<Vec<Coedge>> = f
+                .loops
+                .iter()
+                .map(|lp| lp.iter().rev().map(|c| Coedge { edge: c.edge, reversed: !c.reversed }).collect())
+                .collect();
+            out.add_face(f.surface.mirrored(m), f.flipped, loops, f.tag);
+        }
+        out.shells = self.shells.clone();
+        out
+    }
+
     /// Rigidly transforms the body.
     pub fn transformed(&self, t: &Frame) -> Body {
         let mut out = self.clone();

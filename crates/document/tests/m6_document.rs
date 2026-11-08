@@ -749,3 +749,174 @@ fn damaged_files_never_panic() {
     assert!(loaded > 20, "only {loaded} damaged files loaded, so this tested little");
     assert!(built > 10, "only {built} damaged files built a body");
 }
+
+// ----- Sweeps, patterns and mirrors -----
+
+fn plate_with_hole() -> (Document, FeatureId, FeatureId) {
+    let mut doc = Document::new();
+    let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 100.0, 40.0))]));
+    let e = doc.with(Op::extrude(s, 0.0, 5.0, Mode::Add));
+    let hole = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(10.0, 20.0, 3.0))]));
+    let drill = doc.with(Op::extrude(hole, -1.0, 7.0, Mode::Remove));
+    (doc, e, drill)
+}
+
+#[test]
+fn a_linear_pattern_of_a_cut_makes_a_row_of_holes() {
+    let (mut doc, _, drill) = plate_with_hole();
+    doc.set_parameter("n", 5.0).unwrap();
+    doc.with(Op::Pattern {
+        of: vec![drill],
+        along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: "n".into(), spacing: 20.0.into() },
+    });
+    for n in [5.0, 2.0, 4.0] {
+        doc.set_parameter("n", n).unwrap();
+        let o = doc.rebuild(None);
+        assert!(o.failed.is_none(), "{:?}", o.steps);
+        assert!((vol(&o) - (20000.0 - n * PI * 9.0 * 5.0)).abs() < 1e-7, "{n}: {}", vol(&o));
+        assert_eq!(validate(o.body.as_ref().unwrap()).unwrap().genus, vec![n as usize]);
+    }
+}
+
+#[test]
+fn a_circular_pattern_goes_around() {
+    let mut doc = Document::new();
+    let d = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, 30.0))]));
+    doc.with(Op::extrude(d, 0.0, 4.0, Mode::Add));
+    let h = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(20.0, 0.0, 2.0))]));
+    let drill = doc.with(Op::extrude(h, -1.0, 6.0, Mode::Remove));
+    doc.with(Op::Pattern {
+        of: vec![drill],
+        along: PatternPath::Circular { center: point3(0.0, 0.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: 8.0.into(), degrees: 360.0.into() },
+    });
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - (PI * 900.0 * 4.0 - 8.0 * PI * 4.0 * 4.0)).abs() < 1e-6, "{}", vol(&o));
+    assert_eq!(validate(o.body.as_ref().unwrap()).unwrap().genus, vec![8]);
+}
+
+#[test]
+fn a_partial_circular_pattern_ends_at_its_angle() {
+    let mut doc = Document::new();
+    let d = doc.with(Op::solid(Primitive::Box { dx: 2.0.into(), dy: 2.0.into(), dz: 2.0.into() }, Placement::at(point3(20.0, -1.0, 0.0)), Mode::Add));
+    doc.with(Op::Pattern {
+        of: vec![d],
+        along: PatternPath::Circular { center: point3(0.0, 0.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: 3.0.into(), degrees: 90.0.into() },
+    });
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - 24.0).abs() < 1e-9);
+    // The last copy is a quarter turn round, so it reaches along +y.
+    let b = o.body.unwrap().aabb();
+    assert!((b.max.y - 22.0).abs() < 1e-6, "{b:?}");
+}
+
+#[test]
+fn a_whole_body_can_be_patterned_and_copies_keep_their_names() {
+    let (mut doc, e, _) = plate_with_hole();
+    doc.with(Op::fillet(EdgeSelect::Between(e.end_cap(), e.side(0)), 1.0));
+    let corner = 1.0 - PI / 4.0;
+    let one = 20000.0 - PI * 9.0 * 5.0 - corner * 100.0;
+    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: point3(0.0, 1.0, 0.0), count: 3.0.into(), spacing: 50.0.into() } });
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - 3.0 * one).abs() < 1e-6, "{}", vol(&o));
+    let body = o.body.unwrap();
+    assert_eq!(validate(&body).unwrap().shells, 3);
+    // One name covers the side in all three copies, so a selection by name reaches them all.
+    let named = body.faces.iter().filter(|f| f.tag == e.end_cap().tag()).count();
+    assert_eq!(named, 3);
+    let env = doc.environment().unwrap();
+    let edges = select_edges(&EdgeSelect::Between(e.end_cap(), e.side(1)), &body, &env).unwrap();
+    assert_eq!(edges.len(), 3);
+}
+
+#[test]
+fn a_mirror_doubles_a_half_and_a_listed_feature_alone() {
+    // A half plate mirrored whole: the shared face goes, leaving one solid.
+    let (mut doc, _, _) = plate_with_hole();
+    doc.with(Op::Mirror { of: vec![], point: point3(0.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - 2.0 * (20000.0 - PI * 9.0 * 5.0)).abs() < 1e-6, "{}", vol(&o));
+    let body = o.body.unwrap();
+    assert_eq!(validate(&body).unwrap().shells, 1);
+    assert_eq!(validate(&body).unwrap().genus, vec![2]);
+    // Only the hole, mirrored about the plate's middle.
+    let (mut doc, _, drill) = plate_with_hole();
+    doc.with(Op::Mirror { of: vec![drill], point: point3(50.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - (20000.0 - 2.0 * PI * 9.0 * 5.0)).abs() < 1e-7, "{}", vol(&o));
+}
+
+#[test]
+fn a_sweep_feature_follows_its_path_and_saves() {
+    let mut doc = Document::new();
+    doc.set_parameter("bend", 12.0).unwrap();
+    let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, 3.0).clone()).hole(Shape::circle(0.0, 0.0, 2.0))]));
+    let sw = doc.with(Op::Sweep {
+        sketch: s,
+        path: vec![
+            SweepStep::Line { length: 10.0.into() },
+            SweepStep::Arc { radius: "bend".into(), degrees: 90.0.into(), toward_degrees: 0.0.into() },
+            SweepStep::Line { length: 10.0.into() },
+        ],
+        mode: Mode::Add,
+    });
+    let want = |bend: f64| PI * 5.0 * (20.0 + bend * PI / 2.0);
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - want(12.0)).abs() < 1e-6, "{}", vol(&o));
+    let names = face_names(o.body.as_ref().unwrap());
+    assert!(names.contains(&sw.side(0).name()) && names.contains(&sw.start_cap().name()) && names.contains(&sw.end_cap().name()), "{names:?}");
+    doc.set_parameter("bend", 20.0).unwrap();
+    let o = doc.rebuild(None);
+    assert!((vol(&o) - want(20.0)).abs() < 1e-6, "{}", vol(&o));
+    let text = doc.save_text();
+    let mut back = Document::load_text(&text).unwrap();
+    assert_eq!(back.features(), doc.features());
+    assert_eq!(back.save_text(), text);
+    assert_eq!(vol(&back.rebuild(None)).to_bits(), vol(&doc.rebuild(None)).to_bits());
+}
+
+#[test]
+fn patterns_and_mirrors_save_and_refuse_with_reasons() {
+    let (mut doc, e, drill) = plate_with_hole();
+    doc.with(Op::Pattern { of: vec![drill], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 2.0.into(), spacing: 20.0.into() } });
+    doc.with(Op::Pattern { of: vec![drill], along: PatternPath::Circular { center: point3(50.0, 20.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: 2.0.into(), degrees: 360.0.into() } });
+    doc.with(Op::Mirror { of: vec![], point: point3(0.0, 0.0, 5.0), normal: point3(0.0, 0.0, 1.0) });
+    let text = doc.save_text();
+    let mut back = Document::load_text(&text).unwrap();
+    assert_eq!(back.features(), doc.features());
+    assert_eq!(back.save_text(), text);
+    let o = back.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!(back.delete(drill).is_err(), "a pattern refers to it");
+    // A copied feature has to make a solid, come first and be switched on.
+    let mut d = Document::new();
+    let s = d.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 5.0, 5.0))]));
+    let x = d.with(Op::extrude(s, 0.0, 1.0, Mode::Add));
+    let f = d.with(Op::fillet(EdgeSelect::OnFace(x.end_cap()), 0.2));
+    let p = d.with(Op::Pattern { of: vec![f], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 2.0.into(), spacing: 9.0.into() } });
+    let o = d.rebuild(None);
+    match &o.steps[3].state {
+        StepState::Failed(why) => assert!(why.contains("no solid to copy"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: point3(0.0, 0.0, 0.0), count: 2.0.into(), spacing: 9.0.into() } }).unwrap();
+    match &d.rebuild(None).steps[3].state {
+        StepState::Failed(why) => assert!(why.contains("non-zero"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 0.0.into(), spacing: 9.0.into() } }).unwrap();
+    assert!(matches!(d.rebuild(None).steps[3].state, StepState::Failed(_)));
+    d.suppress(x, true).unwrap();
+    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 2.0.into(), spacing: 9.0.into() } }).unwrap();
+    assert!(d.rebuild(None).failed.is_some());
+    let mut late = Document::new();
+    assert!(late.add(Op::Mirror { of: vec![FeatureId(5)], point: point3(0.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) }).is_err());
+    let m = late.with(Op::Mirror { of: vec![], point: point3(0.0, 0.0, 0.0), normal: point3(0.0, 0.0, 0.0) });
+    let _ = m;
+    assert!(late.rebuild(None).failed.is_some());
+}

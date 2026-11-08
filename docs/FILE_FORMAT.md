@@ -57,7 +57,10 @@ Common fields: `id`, `name`, and `suppressed` (default false).
 | `sketch` | `plane` (default XY), `regions` |
 | `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`) |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`. Profile x is the distance from the sketch's Z axis, and profile y the height along it. |
+| `sweep` | `sketch`, `path`, `mode`: see below |
 | `solid` | `shape`, its dimensions, `at` (default XY), `mode` |
+| `pattern` | `of` (feature ids; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. |
+| `mirror` | `of` (as above), `point` (default origin), `normal` |
 | `fillet` | `edges`, `radius`, `propagate` (default true: follow tangent neighbours) |
 | `chamfer` | `edges`, `distance` |
 
@@ -66,6 +69,15 @@ where each part has a default: the origin, world Z, and world X (world Y if z ru
 
 Solids: `box` (`dx dy dz`), `cylinder` (`radius height`), `cone` (`r0 r1 height`), `sphere` (`radius`),
 `torus` (`major minor`).
+
+**Sweep paths** start at the sketch plane heading along its normal, and each step carries on from the direction
+the last ended in, so a path is always smooth. A step is `{"line": length}`, or `{"arc_radius": r, "degrees": a,
+"toward_degrees": d}`, a bend around a center `r` away in the direction `d` degrees counter-clockwise from the
+sketch's x axis. Bends must stay wider than the profile, or the profile would cross the center.
+
+**Copies keep names.** A face in a pattern's or mirror's copy has the name of the face it came from, so `f2:end` covers
+the original and every copy, and a fillet between two named faces applies to them all. To pick one, combine the name
+with `near` or `in_box`. A pattern of features applies each one's solids as it did, adding or removing.
 
 ## Sketch regions
 
