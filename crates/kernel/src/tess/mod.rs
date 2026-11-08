@@ -26,8 +26,8 @@ impl TessParams {
     /// Sensible display settings for a model of the given size.
     pub fn for_size(size: f64) -> TessParams {
         TessParams {
-            chord: (size * 2e-4).max(1e-4),
-            angle: 15f64.to_radians(),
+            chord: (size * 4e-4).max(1e-4),
+            angle: 18f64.to_radians(),
         }
     }
 }
@@ -294,9 +294,10 @@ fn refine(
                 if m == ga || m == gb {
                     continue;
                 }
-                let on_surface = surface.from_chart(chart, frame.from_grid(m));
-                let chord_mid = (world[a] + world[b]) * 0.5;
-                let sag = on_surface.dist(chord_mid);
+                // Distance from the chord to the surface. This is the mesh error;
+                // comparing against the chart midpoint would also count sliding
+                // along the surface, which is not an error at all.
+                let sag = surface.sdf((world[a] + world[b]) * 0.5).abs();
                 let turn = surface.normal(world[a]).dot(surface.normal(world[b])).clamp(-1.0, 1.0).acos();
                 let score = (sag / params.chord).max(turn / params.angle);
                 if score > 1.0 && score > worst {
@@ -310,9 +311,8 @@ fn refine(
                 (grid[0][1] + grid[1][1] + grid[2][1]) / 3,
             ];
             if c != grid[0] && c != grid[1] && c != grid[2] {
-                let on_surface = surface.from_chart(chart, frame.from_grid(c));
                 let flat = (world[0] + world[1] + world[2]) / 3.0;
-                let score = on_surface.dist(flat) / params.chord;
+                let score = surface.sdf(flat).abs() / params.chord;
                 if score > 1.0 && score > worst {
                     candidate = Some(c);
                 }

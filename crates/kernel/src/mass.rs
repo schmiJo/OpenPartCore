@@ -21,9 +21,9 @@ pub struct MassProps {
 /// Number of quadrature pieces for an edge.
 fn pieces_for(curve: &Curve, t0: f64, t1: f64) -> usize {
     match curve {
-        Curve::Line { .. } => 8,
-        Curve::Circle { .. } | Curve::Ellipse { .. } => (((t1 - t0) / (PI / 16.0)).ceil() as usize).max(1),
-        Curve::Sampled(_) => (((t1 - t0).ceil() as usize) * 2).max(1),
+        Curve::Line { .. } => 2,
+        Curve::Circle { .. } | Curve::Ellipse { .. } => (((t1 - t0) / (PI / 6.0)).ceil() as usize).max(1),
+        Curve::Sampled(_) => ((t1 - t0).ceil() as usize).max(1),
     }
 }
 

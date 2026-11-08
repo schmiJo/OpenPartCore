@@ -1,0 +1,662 @@
+<title>CoreShape Viewer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a drawing sheet. The model sits on graph paper; the panel is the sheet's
+   title block, and each slider is drawn as a dimension line. */
+:root {
+  --paper: #e6ebee;
+  --paper-grid: #d3dbe1;
+  --panel: #f3f6f7;
+  --ink: #14283c;
+  --ink-soft: #52687c;
+  --rule: #c3ced6;
+  --accent: #0b5fbf;
+  --good: #1a7a4c;
+  --bad: #b3322a;
+  --bad-bg: #fbe9e7;
+  --s-plane: #8da3b5;
+  --s-cylinder: #2f9e94;
+  --s-cone: #d59a2b;
+  --s-sphere: #cf5f7c;
+  --s-torus: #7f6bd1;
+  --ui: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --num: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0d2a46; --paper-grid: #16395a; --panel: #0a2138; --ink: #e4eef6; --ink-soft: #93adc4;
+    --rule: #24486b; --accent: #7cc4ff; --good: #62d6a0; --bad: #ff8d84; --bad-bg: #40201f;
+    --s-plane: #93a9bc; --s-cylinder: #48c2b6; --s-cone: #eab54a; --s-sphere: #ec7f9b; --s-torus: #a392ec;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0d2a46; --paper-grid: #16395a; --panel: #0a2138; --ink: #e4eef6; --ink-soft: #93adc4;
+  --rule: #24486b; --accent: #7cc4ff; --good: #62d6a0; --bad: #ff8d84; --bad-bg: #40201f;
+  --s-plane: #93a9bc; --s-cylinder: #48c2b6; --s-cone: #eab54a; --s-sphere: #ec7f9b; --s-torus: #a392ec;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { margin: 0; background: var(--panel); color: var(--ink); font: 400 15px/1.4 var(--ui); overflow: hidden; }
+* { box-sizing: border-box; }
+button { font: inherit; color: inherit; }
+#app { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; }
+
+header {
+  display: flex; align-items: center; gap: 14px;
+  padding-block: 8px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  border-bottom: 1px solid var(--rule); background: var(--panel); min-width: 0;
+}
+.word { font-weight: 600; font-size: 18px; letter-spacing: .01em; white-space: nowrap; }
+#models { display: flex; gap: 4px; overflow-x: auto; min-width: 0; scrollbar-width: none; flex: 1; }
+#models::-webkit-scrollbar { display: none; }
+#models button {
+  border: 1px solid transparent; background: none; border-radius: 3px; padding: 5px 10px;
+  white-space: nowrap; cursor: pointer; color: var(--ink-soft); font-weight: 500;
+}
+#models button[aria-current="true"] { color: var(--ink); border-color: var(--ink); }
+
+main { display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 44%); min-height: 0; }
+#stage {
+  position: relative; min-height: 0; overflow: hidden; background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--paper-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--paper-grid) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+canvas#view { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; cursor: grab; outline: none; }
+canvas#view:active { cursor: grabbing; }
+canvas#triad { position: absolute; left: max(8px, env(safe-area-inset-left, 0px)); bottom: 8px; width: 72px; height: 72px; pointer-events: none; }
+#tools { position: absolute; top: 10px; right: max(10px, env(safe-area-inset-right, 0px)); display: flex; gap: 6px; }
+#tools button {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; padding: 6px 11px;
+  font-weight: 500; min-height: 34px; cursor: pointer;
+}
+#tools button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+#failure {
+  position: absolute; left: 10px; right: 10px; bottom: 10px; background: var(--bad-bg); color: var(--bad);
+  border: 1px solid var(--bad); border-radius: 3px; padding: 8px 10px; font-size: 14px; margin-left: 76px;
+}
+
+#panel { overflow-y: auto; border-top: 1px solid var(--rule); background: var(--panel); -webkit-overflow-scrolling: touch; }
+#panel > .inner {
+  display: grid; gap: 18px;
+  padding-block: 14px 22px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1 { font-size: 21px; font-weight: 600; margin: 0 0 2px; text-wrap: balance; }
+#blurb { margin: 0; color: var(--ink-soft); max-width: 62ch; }
+h2 {
+  font-size: 12px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-soft);
+  margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--rule);
+}
+
+/* A slider is a dimension line: extension ticks at both ends, value above it. */
+.dim { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; align-items: baseline; }
+.dim + .dim { margin-top: 12px; }
+.dim label { font-weight: 500; }
+.dim output { font: 500 14px var(--num); font-variant-numeric: tabular-nums; }
+.dim .track { grid-column: 1 / -1; position: relative; height: 30px; display: flex; align-items: center; }
+.dim .track::before, .dim .track::after {
+  content: ""; position: absolute; top: 7px; bottom: 7px; width: 1px; background: var(--ink-soft);
+}
+.dim .track::before { left: 0; }
+.dim .track::after { right: 0; }
+input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 30px; background: none; margin: 0; cursor: pointer; touch-action: pan-y; }
+input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input[type="range"]::-webkit-slider-runnable-track { height: 1px; background: var(--ink-soft); }
+input[type="range"]::-moz-range-track { height: 1px; background: var(--ink-soft); }
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 22px; height: 22px; margin-top: -11px; border-radius: 50%;
+  background: var(--accent); border: 6px solid var(--panel); box-shadow: 0 0 0 1px var(--accent);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: 50%; background: var(--accent);
+  border: 5px solid var(--panel); box-shadow: 0 0 0 1px var(--accent);
+}
+
+.chip { display: inline-block; font-weight: 600; font-size: 13px; padding: 1px 7px; border-radius: 3px; border: 1px solid currentColor; }
+.chip.good { color: var(--good); }
+.chip.bad { color: var(--bad); }
+dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; margin: 0; }
+dt { color: var(--ink-soft); }
+dd { margin: 0; text-align: right; font: 400 13.5px/1.6 var(--num); font-variant-numeric: tabular-nums; }
+#legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 4px 10px; margin-top: 10px; }
+#legend span { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+#legend i { width: 11px; height: 11px; border-radius: 2px; display: inline-block; flex: none; }
+#legend b { font: 400 13px var(--num); margin-left: auto; }
+.faint { opacity: .4; }
+#actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#actions button { background: none; border: 1px solid var(--ink); border-radius: 3px; padding: 7px 14px; font-weight: 500; min-height: 36px; cursor: pointer; }
+#actions button:focus-visible, #tools button:focus-visible, #models button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#fatal { padding: 16px; color: var(--bad); }
+
+@media (min-width: 860px), (orientation: landscape) and (max-height: 520px) {
+  main { grid-template-rows: none; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); }
+  #panel { order: -1; border-top: 0; border-right: 1px solid var(--rule); }
+}
+</style>
+
+<div id="app">
+  <header>
+    <div class="word">CoreShape</div>
+    <nav id="models" aria-label="Models"></nav>
+  </header>
+  <main>
+    <div id="stage">
+      <canvas id="view" tabindex="0" aria-label="3D model view. Drag to orbit, pinch or scroll to zoom."></canvas>
+      <canvas id="triad" width="144" height="144" aria-hidden="true"></canvas>
+      <div id="tools">
+        <button id="tFit" type="button">Fit</button>
+        <button id="tEdges" type="button" aria-pressed="true">Edges</button>
+        <button id="tKinds" type="button" aria-pressed="false">Surfaces</button>
+      </div>
+      <div id="failure" role="status" hidden></div>
+    </div>
+    <aside id="panel">
+      <div class="inner">
+        <section>
+          <h1 id="mName"></h1>
+          <p id="blurb"></p>
+        </section>
+        <section>
+          <h2>Dimensions</h2>
+          <div id="dims"></div>
+        </section>
+        <section>
+          <h2>Kernel readout</h2>
+          <dl>
+            <dt>Solid</dt><dd id="rValid"></dd>
+            <dt>Volume</dt><dd id="rVolume"></dd>
+            <dt>Surface area</dt><dd id="rArea"></dd>
+            <dt>Faces, edges, vertices</dt><dd id="rTopo"></dd>
+            <dt>Shells, genus</dt><dd id="rShells"></dd>
+            <dt>Triangles</dt><dd id="rTris"></dd>
+            <dt>Open mesh edges</dt><dd id="rOpen"></dd>
+            <dt>Rebuild time</dt><dd id="rTime"></dd>
+          </dl>
+          <div id="legend"></div>
+        </section>
+        <section id="actions"></section>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script>
+"use strict";
+const WASM_BASE64 = "__WASM_BASE64__";
+const HOST = "__HOST__"; // "standalone" or "artifact"
+
+const $ = (id) => document.getElementById(id);
+const KINDS = ["plane", "cylinder", "cone", "sphere", "torus"];
+
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex.trim());
+  return m ? [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255] : [0.5, 0.5, 0.5];
+}
+function token(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+// ----- Small matrix helpers. Matrices are column-major. -----
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2);
+  return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
+}
+function normalize(v) { const n = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / n, v[1] / n, v[2] / n]; }
+function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function lookAt(eye, target, up) {
+  const z = normalize([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
+  const x = normalize(cross(up, z));
+  const y = cross(z, x);
+  return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
+}
+function mul(a, b) {
+  const o = new Array(16).fill(0);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k];
+  return o;
+}
+
+// ----- Renderer -----
+const MESH_VS = `#version 300 es
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in float aKind;
+uniform mat4 uViewProj;
+out vec3 vNormal; out vec3 vPos; flat out int vKind;
+void main() { vNormal = aNormal; vPos = aPos; vKind = int(aKind + 0.5); gl_Position = uViewProj * vec4(aPos, 1.0); }`;
+const MESH_FS = `#version 300 es
+precision highp float;
+in vec3 vNormal; in vec3 vPos; flat in int vKind;
+uniform vec3 uEye; uniform vec3 uRight; uniform vec3 uUp;
+uniform vec3 uKinds[5]; uniform bool uByKind; uniform vec3 uSteel;
+out vec4 color;
+void main() {
+  vec3 n = normalize(vNormal);
+  vec3 v = normalize(uEye - vPos);
+  if (dot(n, v) < 0.0) n = -n;
+  vec3 base = uByKind ? uKinds[vKind] : uSteel;
+  vec3 key = normalize(v + uRight * 0.5 + uUp * 0.7);
+  float diff = max(dot(n, key), 0.0);
+  float sky = 0.5 + 0.5 * n.z;
+  vec3 h = normalize(key + v);
+  float spec = pow(max(dot(n, h), 0.0), 40.0);
+  float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+  vec3 c = base * (0.34 + 0.16 * sky + 0.62 * diff) + vec3(0.16) * spec + vec3(0.06) * rim;
+  color = vec4(c, 1.0);
+}`;
+// Edges are screen-space ribbons so they stay crisp on high-density phone screens.
+const LINE_VS = `#version 300 es
+layout(location=0) in vec3 aA;
+layout(location=1) in vec3 aB;
+uniform mat4 uViewProj; uniform vec2 uViewport; uniform float uWidth;
+void main() {
+  float end = float(gl_VertexID & 1);
+  float side = (gl_VertexID & 2) == 0 ? -1.0 : 1.0;
+  vec4 a = uViewProj * vec4(aA, 1.0);
+  vec4 b = uViewProj * vec4(aB, 1.0);
+  vec2 sa = a.xy / a.w * uViewport;
+  vec2 sb = b.xy / b.w * uViewport;
+  vec2 d = sb - sa;
+  float len = length(d);
+  d = len > 1e-4 ? d / len : vec2(1.0, 0.0);
+  vec2 off = vec2(-d.y, d.x) * side * uWidth / uViewport;
+  vec4 p = mix(a, b, end);
+  p.xy += off * p.w;
+  p.z -= 0.00035 * p.w;
+  gl_Position = p;
+}`;
+const LINE_FS = `#version 300 es
+precision highp float;
+uniform vec3 uColor;
+out vec4 color;
+void main() { color = vec4(uColor, 1.0); }`;
+
+function program(gl, vs, fs) {
+  const compile = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+class Viewer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    const gl = canvas.getContext("webgl2", { antialias: true, alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: false });
+    if (!gl) throw new Error("This browser does not offer WebGL 2, which the viewer needs.");
+    this.gl = gl;
+    this.meshProgram = program(gl, MESH_VS, MESH_FS);
+    this.lineProgram = program(gl, LINE_VS, LINE_FS);
+    this.meshVao = gl.createVertexArray();
+    this.lineVao = gl.createVertexArray();
+    this.buffers = { pos: gl.createBuffer(), nrm: gl.createBuffer(), kind: gl.createBuffer(), idx: gl.createBuffer(), seg: gl.createBuffer() };
+    gl.bindVertexArray(this.meshVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.pos);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.nrm);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.kind);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.idx);
+    gl.bindVertexArray(this.lineVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.seg);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0); gl.vertexAttribDivisor(0, 1);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12); gl.vertexAttribDivisor(1, 1);
+    gl.bindVertexArray(null);
+    this.indexCount = 0;
+    this.segmentCount = 0;
+    this.az = -0.95; this.el = 0.45; this.dist = 200; this.target = [0, 0, 0];
+    this.showEdges = true; this.byKind = false;
+    this.pending = false;
+    this.theme();
+  }
+  theme() {
+    this.ink = hexToRgb(token("--ink"));
+    this.kinds = KINDS.map((k) => hexToRgb(token("--s-" + k)));
+    this.steel = hexToRgb(token("--s-plane"));
+    this.requestRender();
+  }
+  setMesh(pos, nrm, kind, idx, seg) {
+    const gl = this.gl;
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.pos); gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.nrm); gl.bufferData(gl.ARRAY_BUFFER, nrm, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.kind); gl.bufferData(gl.ARRAY_BUFFER, kind, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.seg); gl.bufferData(gl.ARRAY_BUFFER, seg, gl.DYNAMIC_DRAW);
+    gl.bindVertexArray(this.meshVao);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.idx); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.DYNAMIC_DRAW);
+    gl.bindVertexArray(null);
+    this.indexCount = idx.length;
+    this.segmentCount = seg.length / 6;
+    this.requestRender();
+  }
+  fit(bounds) {
+    const c = [(bounds[0] + bounds[3]) / 2, (bounds[1] + bounds[4]) / 2, (bounds[2] + bounds[5]) / 2];
+    const r = Math.hypot(bounds[3] - bounds[0], bounds[4] - bounds[1], bounds[5] - bounds[2]) / 2 || 1;
+    const aspect = this.canvas.clientWidth / Math.max(this.canvas.clientHeight, 1);
+    const fov = 0.5;
+    this.target = c;
+    this.dist = r / Math.sin(fov / 2) / Math.min(1, aspect) * 1.08;
+    this.radius = r;
+    this.requestRender();
+  }
+  requestRender() {
+    if (this.pending) return;
+    this.pending = true;
+    requestAnimationFrame(() => { this.pending = false; this.render(); });
+  }
+  eye() {
+    const ce = Math.cos(this.el), se = Math.sin(this.el);
+    return [this.target[0] + this.dist * ce * Math.cos(this.az), this.target[1] + this.dist * ce * Math.sin(this.az), this.target[2] + this.dist * se];
+  }
+  basis() {
+    const eye = this.eye();
+    const f = normalize([this.target[0] - eye[0], this.target[1] - eye[1], this.target[2] - eye[2]]);
+    const right = normalize(cross(f, [0, 0, 1]));
+    return { eye, right, up: cross(right, f) };
+  }
+  render() {
+    const gl = this.gl, c = this.canvas;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const w = Math.max(1, Math.round(c.clientWidth * dpr)), h = Math.max(1, Math.round(c.clientHeight * dpr));
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clearDepth(1);
+    gl.enable(gl.DEPTH_TEST);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const { eye, right, up } = this.basis();
+    const r = this.radius || 100;
+    const near = Math.max(this.dist - r * 2, this.dist * 0.02), far = this.dist + r * 3;
+    const vp = mul(perspective(0.5, w / h, near, far), lookAt(eye, this.target, [0, 0, 1]));
+    if (this.indexCount) {
+      gl.useProgram(this.meshProgram);
+      const u = (n) => gl.getUniformLocation(this.meshProgram, n);
+      gl.uniformMatrix4fv(u("uViewProj"), false, vp);
+      gl.uniform3fv(u("uEye"), eye); gl.uniform3fv(u("uRight"), right); gl.uniform3fv(u("uUp"), up);
+      gl.uniform3fv(u("uKinds"), this.kinds.flat());
+      gl.uniform1i(u("uByKind"), this.byKind ? 1 : 0);
+      gl.uniform3fv(u("uSteel"), this.steel);
+      gl.bindVertexArray(this.meshVao);
+      gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_INT, 0);
+    }
+    if (this.showEdges && this.segmentCount) {
+      gl.useProgram(this.lineProgram);
+      const u = (n) => gl.getUniformLocation(this.lineProgram, n);
+      gl.uniformMatrix4fv(u("uViewProj"), false, vp);
+      gl.uniform2f(u("uViewport"), w, h);
+      gl.uniform1f(u("uWidth"), 1.25 * dpr);
+      gl.uniform3fv(u("uColor"), this.ink);
+      gl.bindVertexArray(this.lineVao);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.segmentCount);
+    }
+    gl.bindVertexArray(null);
+    this.drawTriad(right, up);
+  }
+  drawTriad(right, up) {
+    const t = $("triad"), g = t.getContext("2d");
+    g.clearRect(0, 0, 144, 144);
+    const axes = [["X", [1, 0, 0], "#d6453d"], ["Y", [0, 1, 0], "#2e9e5b"], ["Z", [0, 0, 1], "#2f7ad6"]];
+    const f = cross(up, right);
+    axes.sort((a, b) => dot(a[1], f) - dot(b[1], f));
+    g.lineWidth = 4; g.lineCap = "round"; g.font = "600 24px " + token("--ui"); g.textAlign = "center"; g.textBaseline = "middle";
+    for (const [name, v, col] of axes) {
+      const x = 72 + dot(v, right) * 46, y = 72 - dot(v, up) * 46;
+      g.strokeStyle = col; g.fillStyle = col;
+      g.beginPath(); g.moveTo(72, 72); g.lineTo(x, y); g.stroke();
+      g.fillText(name, 72 + dot(v, right) * 62, 72 - dot(v, up) * 62);
+    }
+  }
+}
+
+// ----- Pointer and touch navigation. Same mapping as OpenShape on a mouse
+// (right-drag orbits, middle-drag pans, wheel zooms); left-drag also orbits. -----
+function attachNavigation(view, canvas, onDoubleTap) {
+  const pts = new Map();
+  let lastTap = 0, pinchDist = 0, pinchMid = null;
+  const orbit = (dx, dy) => {
+    view.az -= dx * 0.008;
+    view.el = Math.max(-1.55, Math.min(1.55, view.el + dy * 0.008));
+    view.requestRender();
+  };
+  const pan = (dx, dy) => {
+    const { right, up } = view.basis();
+    const scale = view.dist * Math.tan(0.25) * 2 / Math.max(canvas.clientHeight, 1);
+    for (let i = 0; i < 3; i++) view.target[i] += (-right[i] * dx + up[i] * dy) * scale;
+    view.requestRender();
+  };
+  const zoom = (k) => { view.dist = Math.max(view.dist * k, 1e-3); view.requestRender(); };
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button, shift: e.shiftKey });
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      pinchMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    }
+    if (pts.size === 1 && e.pointerType === "touch") {
+      const now = performance.now();
+      if (now - lastTap < 300) onDoubleTap();
+      lastTap = now;
+    }
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    const p = pts.get(e.pointerId);
+    if (!p) return;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+    if (pts.size === 1) {
+      if (p.button === 1 || p.shift) pan(dx, dy); else orbit(dx, dy);
+    } else if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      if (pinchDist > 0 && d > 0) zoom(pinchDist / d);
+      pan(mid.x - pinchMid.x, mid.y - pinchMid.y);
+      pinchDist = d; pinchMid = mid;
+    }
+  });
+  const end = (e) => { pts.delete(e.pointerId); };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  canvas.addEventListener("wheel", (e) => { e.preventDefault(); zoom(Math.exp(e.deltaY * 0.0012)); }, { passive: false });
+  canvas.addEventListener("dblclick", onDoubleTap);
+}
+
+// ----- Kernel bridge -----
+class Kernel {
+  constructor(exports) {
+    this.x = exports;
+    this.decoder = new TextDecoder();
+  }
+  str(ptr, len) { return this.decoder.decode(new Uint8Array(this.x.memory.buffer, ptr, len)); }
+  catalog() {
+    const p = this.x.cs_catalog();
+    return JSON.parse(this.str(p, this.x.cs_catalog_len()));
+  }
+  build(model, values) {
+    const n = values.length;
+    const ptr = this.x.cs_alloc_f64(n);
+    new Float64Array(this.x.memory.buffer, ptr, n).set(values);
+    const t = this.x.cs_build(model, ptr, n);
+    this.x.cs_free_f64(ptr, n);
+    const table = new Uint32Array(this.x.memory.buffer, t, 12);
+    const m = this.x.memory.buffer;
+    return {
+      positions: new Float32Array(m, table[0], table[1]),
+      normals: new Float32Array(m, table[2], table[3]),
+      kinds: new Uint8Array(m, table[4], table[5]),
+      indices: new Uint32Array(m, table[6], table[7]),
+      segments: new Float32Array(m, table[8], table[9]),
+      info: JSON.parse(this.str(table[10], table[11])),
+    };
+  }
+  exportStl() {
+    const p = this.x.cs_export_stl();
+    return p ? new Uint8Array(this.x.memory.buffer, p, this.x.cs_export_len()).slice() : null;
+  }
+}
+
+// ----- App -----
+const fmt3 = new Intl.NumberFormat("en-US", { maximumFractionDigits: 3 });
+const fmt0 = new Intl.NumberFormat("en-US");
+function fmtSig(x) { return new Intl.NumberFormat("en-US", { maximumSignificantDigits: 9 }).format(x); }
+
+async function start() {
+  const bytes = Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0));
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  const kernel = new Kernel(instance.exports);
+  const catalog = kernel.catalog();
+  const view = new Viewer($("view"));
+  let current = 0, lastBounds = null, queued = false;
+
+  const updateReadout = (info, ms) => {
+    $("failure").hidden = info.ok;
+    if (!info.ok) {
+      $("failure").textContent = "No valid solid at these dimensions. Showing the last valid model. " + info.error;
+      $("rValid").innerHTML = '<span class="chip bad">Rejected</span>';
+      $("rTime").textContent = ms.toFixed(1) + " ms";
+      return;
+    }
+    $("rValid").innerHTML = '<span class="chip good">Valid</span>';
+    $("rVolume").textContent = fmtSig(info.volume) + " mm³";
+    $("rArea").textContent = fmtSig(info.area) + " mm²";
+    $("rTopo").textContent = `${info.faces}, ${info.edges}, ${info.vertices}`;
+    $("rShells").textContent = `${info.shells}, ${info.genus.join(" ")}`;
+    $("rTris").textContent = fmt0.format(info.triangles);
+    $("rOpen").textContent = String(info.openEdges);
+    $("rTime").textContent = ms.toFixed(1) + " ms";
+    const legend = $("legend");
+    legend.textContent = "";
+    KINDS.forEach((k, i) => {
+      const s = document.createElement("span");
+      if (!info.kinds[i]) s.className = "faint";
+      s.innerHTML = `<i style="background:var(--s-${k})"></i>${k}<b>${info.kinds[i]}</b>`;
+      legend.append(s);
+    });
+  };
+
+  const rebuild = (fit) => {
+    const m = catalog[current];
+    const t0 = performance.now();
+    const r = kernel.build(current, m.params.map((p) => p.value));
+    if (r.info.ok) {
+      view.setMesh(r.positions, r.normals, r.kinds, r.indices, r.segments);
+      lastBounds = r.info.bounds;
+    }
+    const ms = performance.now() - t0;
+    updateReadout(r.info, ms);
+    if (fit && lastBounds) view.fit(lastBounds);
+    window.__lastBuild = { info: r.info, ms };
+  };
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; rebuild(false); });
+  };
+
+  const selectModel = (i) => {
+    current = i;
+    const m = catalog[i];
+    document.querySelectorAll("#models button").forEach((b, k) => b.setAttribute("aria-current", String(k === i)));
+    $("mName").textContent = m.name;
+    $("blurb").textContent = m.blurb;
+    const dims = $("dims");
+    dims.textContent = "";
+    for (const p of m.params) {
+      const row = document.createElement("div");
+      row.className = "dim";
+      const id = `p-${m.id}-${p.key}`;
+      row.innerHTML = `<label for="${id}">${p.label}</label><output for="${id}"></output><div class="track"><input type="range" id="${id}" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.value}"></div>`;
+      const input = row.querySelector("input"), out = row.querySelector("output");
+      const show = () => { out.textContent = `${Number(p.value).toFixed(p.step < 1 ? 1 : 0)} ${p.unit}`; };
+      show();
+      input.addEventListener("input", () => { p.value = Number(input.value); show(); schedule(); });
+      dims.append(row);
+    }
+    rebuild(true);
+  };
+
+  catalog.forEach((m, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = m.name;
+    b.addEventListener("click", () => { selectModel(i); try { location.hash = m.id; } catch (_) {} });
+    $("models").append(b);
+  });
+
+  attachNavigation(view, $("view"), () => { if (lastBounds) view.fit(lastBounds); });
+  $("tFit").addEventListener("click", () => { if (lastBounds) view.fit(lastBounds); });
+  $("tEdges").addEventListener("click", (e) => {
+    view.showEdges = !view.showEdges;
+    e.currentTarget.setAttribute("aria-pressed", String(view.showEdges));
+    view.requestRender();
+  });
+  $("tKinds").addEventListener("click", (e) => {
+    view.byKind = !view.byKind;
+    e.currentTarget.setAttribute("aria-pressed", String(view.byKind));
+    view.requestRender();
+  });
+  new ResizeObserver(() => view.requestRender()).observe($("stage"));
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => view.theme());
+  new MutationObserver(() => view.theme()).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  if (HOST === "standalone") {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = "Download STL";
+    b.addEventListener("click", () => {
+      const data = kernel.exportStl();
+      if (!data) return;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([data], { type: "model/stl" }));
+      a.download = catalog[current].id + ".stl";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    });
+    $("actions").append(b);
+  }
+
+  // Query options exist for reproducible screenshots of a stand-alone build:
+  // ?kinds=1&az=-0.9&el=0.4&p=26,10,3.5,9 sets the view and the dimensions.
+  const query = new URLSearchParams(location.search);
+  const fromHash = catalog.findIndex((m) => "#" + m.id === location.hash);
+  const first = fromHash >= 0 ? fromHash : 0;
+  if (query.get("p")) query.get("p").split(",").forEach((v, i) => { if (catalog[first].params[i]) catalog[first].params[i].value = Number(v); });
+  if (query.get("az")) view.az = Number(query.get("az"));
+  if (query.get("el")) view.el = Number(query.get("el"));
+  if (query.get("kinds")) { view.byKind = true; $("tKinds").setAttribute("aria-pressed", "true"); }
+  selectModel(first);
+  window.addEventListener("hashchange", () => {
+    const i = catalog.findIndex((m) => "#" + m.id === location.hash);
+    if (i >= 0 && i !== current) selectModel(i);
+  });
+  window.__viewer = { view, kernel, catalog, selectModel, rebuild };
+}
+
+start().catch((e) => {
+  const app = $("app");
+  app.textContent = "";
+  const d = document.createElement("div");
+  d.id = "fatal";
+  d.textContent = "The viewer could not start: " + (e && e.message ? e.message : e);
+  app.append(d);
+  window.__fatal = String(e);
+});
+</script>
