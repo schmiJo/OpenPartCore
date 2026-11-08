@@ -148,6 +148,36 @@ impl Writer {
     }
 }
 
+/// The faces of a shell in depth-first order across shared edges.
+///
+/// A file's face order carries no meaning in STEP, but OpenCASCADE's shell checker
+/// depends on it: a shell that touches itself along a line (a hole tangent to a wall)
+/// can flip between valid and "Unorientable" when only the order changes. Depth-first
+/// order passed on every start face tried, against about half of random orders. That is
+/// an observed property of that checker, not a rule from the standard.
+fn connected_order(body: &Body, shell: &[usize], uses: &[Vec<(usize, usize, usize, bool)>]) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    let mut order = Vec::with_capacity(shell.len());
+    for &start in shell {
+        let mut stack = vec![start];
+        while let Some(f) = stack.pop() {
+            if !seen.insert(f) {
+                continue;
+            }
+            order.push(f);
+            let edges: Vec<usize> = body.faces[f].loops.iter().flatten().map(|c| c.edge).collect();
+            for &e in edges.iter().rev() {
+                for u in &uses[e] {
+                    if !seen.contains(&u.0) {
+                        stack.push(u.0);
+                    }
+                }
+            }
+        }
+    }
+    order
+}
+
 /// Writes a body as a STEP file. Dimensions are in millimetres.
 pub fn write_step(body: &Body, name: &str) -> String {
     let mut w = Writer { out: String::new(), next: 1 };
@@ -198,9 +228,10 @@ pub fn write_step(body: &Body, name: &str) -> String {
     // wants them written as an ordinary closed shell around the void, turned inside out.
     let is_void: Vec<bool> = (0..body.shells.len()).map(|s| shell_volume(body, s) < 0.0).collect();
 
+    let uses = body.edge_uses();
     let write_shell = |w: &mut Writer, shell: usize, invert: bool| -> usize {
         let mut faces = Vec::with_capacity(body.shells[shell].len());
-        for &f in &body.shells[shell] {
+        for f in connected_order(body, &body.shells[shell], &uses) {
             let face = &body.faces[f];
             let surface = w.surface(&face.surface);
             let mut bounds = Vec::with_capacity(face.loops.len());
