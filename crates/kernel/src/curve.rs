@@ -32,33 +32,41 @@ pub struct SampledCurve {
 }
 
 impl SampledCurve {
-    fn hermite(&self, t: f64) -> (Vec3, Vec3) {
-        let n = self.points.len();
-        let t = t.clamp(0.0, (n - 1) as f64);
-        let i = (t.floor() as usize).min(n - 2);
-        let s = t - i as f64;
+    /// Cubic Hermite through segment `i`, at local coordinate `s`. It is evaluated
+    /// without clamping, so it can be used a little past its ends.
+    fn hermite_local(&self, i: usize, s: f64) -> Vec3 {
         let (a, b) = (self.points[i], self.points[i + 1]);
         let chord = a.dist(b);
         let (ta, tb) = (self.tangents[i] * chord, self.tangents[i + 1] * chord);
         let (s2, s3) = (s * s, s * s * s);
-        let p = a * (2.0 * s3 - 3.0 * s2 + 1.0)
-            + ta * (s3 - 2.0 * s2 + s)
-            + b * (-2.0 * s3 + 3.0 * s2)
-            + tb * (s3 - s2);
-        let d = a * (6.0 * s2 - 6.0 * s)
-            + ta * (3.0 * s2 - 4.0 * s + 1.0)
-            + b * (-6.0 * s2 + 6.0 * s)
-            + tb * (3.0 * s2 - 2.0 * s);
-        (p, d)
+        a * (2.0 * s3 - 3.0 * s2 + 1.0) + ta * (s3 - 2.0 * s2 + s) + b * (-2.0 * s3 + 3.0 * s2) + tb * (s3 - s2)
     }
 
-    pub fn eval(&self, t: f64) -> Vec3 {
-        let (p, _) = self.hermite(t);
+    fn segment(&self, t: f64) -> (usize, f64) {
+        let n = self.points.len();
+        let t = t.clamp(0.0, (n - 1) as f64);
+        let i = (t.floor() as usize).min(n - 2);
+        (i, t - i as f64)
+    }
+
+    fn snapped(&self, i: usize, s: f64) -> Vec3 {
+        let p = self.hermite_local(i, s);
         refine_on_two(&self.surfaces.0, &self.surfaces.1, p).unwrap_or(p)
     }
 
+    pub fn eval(&self, t: f64) -> Vec3 {
+        let (i, s) = self.segment(t);
+        self.snapped(i, s)
+    }
+
+    /// Derivative of the snapped curve. The stencil stays on one segment's
+    /// polynomial, which is smooth, so it never sees the kinks between segments.
     pub fn derivative(&self, t: f64) -> Vec3 {
-        self.hermite(t).1
+        let (i, s) = self.segment(t);
+        let h = 1e-3;
+        (self.snapped(i, s - 2.0 * h) - self.snapped(i, s + 2.0 * h)
+            + (self.snapped(i, s + h) - self.snapped(i, s - h)) * 8.0)
+            / (12.0 * h)
     }
 
     /// Upper bound on the parametric speed.

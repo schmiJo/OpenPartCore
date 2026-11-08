@@ -8,10 +8,12 @@
 //! * Every operation validates what it returns. A failure is an `Err`, never a
 //!   silently broken solid.
 
+pub mod boolean;
 pub mod build;
 pub mod curve;
 pub mod error;
 pub mod export;
+pub mod fuzz;
 pub mod mass;
 pub mod math;
 pub mod profile;
@@ -20,6 +22,7 @@ pub mod tess;
 pub mod topo;
 pub mod validate;
 
+pub use boolean::{intersect, subtract, union, BoolOp};
 pub use build::{box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus};
 pub use curve::Curve;
 pub use error::{Error, Result};

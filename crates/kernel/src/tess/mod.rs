@@ -85,6 +85,11 @@ impl Mesh {
     /// Mesh edges that do not pair up exactly once in each direction, after
     /// matching vertices by exact coordinates. A watertight mesh has none.
     pub fn open_edge_count(&self) -> usize {
+        self.open_edges().len()
+    }
+
+    /// The endpoints of every mesh edge that fails to pair up.
+    pub fn open_edges(&self) -> Vec<(Vec3, Vec3)> {
         let mut ids: HashMap<[u64; 3], u32> = HashMap::new();
         let key = |p: Vec3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
         let mut canon = Vec::with_capacity(self.positions.len());
@@ -106,14 +111,25 @@ impl Mesh {
                 }
             }
         }
-        count.values().filter(|&&c| c != 0).count()
+        let mut position = vec![Vec3::ZERO; ids.len()];
+        for (i, &c) in canon.iter().enumerate() {
+            position[c as usize] = self.positions[i];
+        }
+        let mut open: Vec<(Vec3, Vec3)> = count
+            .iter()
+            .filter(|(_, &c)| c != 0)
+            .map(|(&(a, b), _)| (position[a as usize], position[b as usize]))
+            .collect();
+        open.sort_by(|p, q| p.0.x.total_cmp(&q.0.x));
+        open
     }
 }
 
-/// Samples an edge. The first and last points are exactly its vertices.
-fn edge_polyline(e: &Edge, vertices: &[Vec3], params: &TessParams) -> Vec<Vec3> {
+/// Samples an edge. The first and last points are exactly its vertices. `density`
+/// multiplies the number of samples.
+fn edge_polyline(e: &Edge, vertices: &[Vec3], params: &TessParams, density: usize) -> Vec<Vec3> {
     let dt = e.t1 - e.t0;
-    let steps = match &e.curve {
+    let base = match &e.curve {
         Curve::Line { .. } => 1,
         Curve::Circle { radius, .. } => {
             let by_chord = 2.0 * (1.0 - (params.chord / radius).min(1.0)).acos();
@@ -126,6 +142,7 @@ fn edge_polyline(e: &Edge, vertices: &[Vec3], params: &TessParams) -> Vec<Vec3> 
         }
         Curve::Sampled(_) => (dt.ceil() as usize).max(2),
     };
+    let steps = base * density;
     let mut pts = Vec::with_capacity(steps + 1);
     pts.push(vertices[e.v0]);
     for i in 1..steps {
@@ -136,18 +153,45 @@ fn edge_polyline(e: &Edge, vertices: &[Vec3], params: &TessParams) -> Vec<Vec3> 
 }
 
 /// Tessellates a body into a watertight mesh.
+///
+/// Two edges leaving a vertex at a small angle can have chords that cross even
+/// though the curves do not. When that happens the affected face's edges get more
+/// samples and everything starts again. Both faces of an edge must use the same
+/// points, so a partial redo could tear the mesh.
 pub fn tessellate(body: &Body, params: &TessParams) -> Result<Mesh> {
-    let mut polylines: Vec<Vec<Vec3>> = body
-        .edges
-        .iter()
-        .map(|e| edge_polyline(e, &body.vertices, params))
-        .collect();
-    let mut mesh = Mesh::default();
-    for f in 0..body.faces.len() {
-        tessellate_face(body, f, &mut polylines, params, &mut mesh)?;
+    let mut density = vec![1usize; body.edges.len()];
+    let mut last_error = None;
+    for _attempt in 0..5 {
+        let mut polylines: Vec<Vec<Vec3>> = body
+            .edges
+            .iter()
+            .zip(&density)
+            .map(|(e, &d)| edge_polyline(e, &body.vertices, params, d))
+            .collect();
+        let mut mesh = Mesh::default();
+        let mut crossing = None;
+        for f in 0..body.faces.len() {
+            if let Err(e) = tessellate_face(body, f, &mut polylines, params, &mut mesh) {
+                crossing = Some((f, e));
+                break;
+            }
+        }
+        match crossing {
+            None => {
+                mesh.edge_lines = polylines;
+                return Ok(mesh);
+            }
+            Some((f, e)) => {
+                last_error = Some(e);
+                for lp in &body.faces[f].loops {
+                    for c in lp {
+                        density[c.edge] *= 2;
+                    }
+                }
+            }
+        }
     }
-    mesh.edge_lines = polylines;
-    Ok(mesh)
+    Err(last_error.unwrap())
 }
 
 struct FaceFrame {
@@ -234,7 +278,7 @@ fn tessellate_face(
             })?;
         }
     }
-    cdt.mark_inside();
+    cdt.mark_inside(&loop_ids);
 
     if !matches!(surface, Surface::Plane(_)) {
         refine(&mut cdt, &frame, surface, chart, &mut point_of, params);

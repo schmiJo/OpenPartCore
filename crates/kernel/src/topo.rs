@@ -158,16 +158,10 @@ impl Body {
         e.curve.eval(e.t0 + (e.t1 - e.t0) * s)
     }
 
-    /// Adds a face and fits its chart to its boundary.
-    pub fn add_face(
-        &mut self,
-        surface: Surface,
-        flipped: bool,
-        loops: Vec<Vec<Coedge>>,
-        tag: FaceTag,
-    ) -> usize {
+    /// Fits a chart to a face's loops.
+    pub fn fit_face_chart(&self, surface: &Surface, flipped: bool, loops: &[Vec<Coedge>]) -> Chart {
         let mut points = Vec::new();
-        for l in &loops {
+        for l in loops {
             for &c in l {
                 for i in 0..=8 {
                     points.push(self.coedge_point(c, i as f64 / 8.0));
@@ -180,7 +174,7 @@ impl Body {
             // which side the patch is on. The loop direction does: the vector
             // area of the loops points at the middle of the patch.
             let mut area = Vec3::ZERO;
-            for l in &loops {
+            for l in loops {
                 let mut chain = Vec::new();
                 for &c in l {
                     for i in 0..16 {
@@ -192,11 +186,17 @@ impl Body {
                 }
             }
             let centre = if flipped { -area } else { area };
-            if centre.norm() > 1e-12 * frame.origin.norm().max(1.0) {
+            if centre.norm() > 1e-12 {
                 let z = centre.normalized();
                 chart.frame = Frame::new(frame.origin, z, z.any_perpendicular());
             }
         }
+        chart
+    }
+
+    /// Adds a face and fits its chart to its boundary.
+    pub fn add_face(&mut self, surface: Surface, flipped: bool, loops: Vec<Vec<Coedge>>, tag: FaceTag) -> usize {
+        let chart = self.fit_face_chart(&surface, flipped, &loops);
         self.faces.push(Face {
             surface,
             flipped,

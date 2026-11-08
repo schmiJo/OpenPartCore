@@ -543,31 +543,79 @@ impl Cdt {
         self.touch(t2);
     }
 
-    /// Marks triangles inside the domain by parity of constraint crossings from
-    /// the outside. Must be called after all boundary constraints are in.
-    pub fn mark_inside(&mut self) {
-        let mut seen = vec![false; self.tris.len()];
-        // Triangles touching the super-triangle are outside.
-        let mut stack = Vec::new();
-        for (i, t) in self.tris.iter().enumerate() {
-            if t.v.iter().any(|&v| v < 3) {
-                stack.push((i as u32, false));
+    /// Marks triangles inside the domain. Constraints divide the triangulation into
+    /// regions, and `is_inside` decides each one from a point well inside it. This
+    /// asks the polygon itself, so it stays right where a parity count would not:
+    /// at loops that touch, or at boundary pieces that coincide at grid resolution.
+    pub fn mark_inside_with(&mut self, is_inside: impl Fn([f64; 2]) -> bool) {
+        let n = self.tris.len();
+        let mut region = vec![u32::MAX; n];
+        let mut next_region = 0u32;
+        for start in 0..n {
+            if region[start] != u32::MAX {
+                continue;
             }
-        }
-        for &(t, _) in &stack {
-            seen[t as usize] = true;
-        }
-        while let Some((t, inside)) = stack.pop() {
-            self.tris[t as usize].inside = inside;
-            let tri = self.tris[t as usize].clone();
-            for i in 0..3 {
-                let n = tri.n[i];
-                if n != NONE && !seen[n as usize] {
-                    seen[n as usize] = true;
-                    stack.push((n, inside != tri.c[i]));
+            let id = next_region;
+            next_region += 1;
+            region[start] = id;
+            let mut stack = vec![start as u32];
+            let mut members = Vec::new();
+            let mut touches_outside = false;
+            while let Some(t) = stack.pop() {
+                members.push(t);
+                let tri = &self.tris[t as usize];
+                touches_outside |= tri.v.iter().any(|&v| v < 3);
+                for i in 0..3 {
+                    let m = tri.n[i];
+                    if m != NONE && !tri.c[i] && region[m as usize] == u32::MAX {
+                        region[m as usize] = id;
+                        stack.push(m);
+                    }
                 }
             }
+            let inside = if touches_outside {
+                false
+            } else {
+                // Decide from the centre of the region's largest triangle.
+                let largest = members
+                    .iter()
+                    .copied()
+                    .max_by_key(|&t| {
+                        let v = self.tris[t as usize].v;
+                        orient(self.p(v[0]), self.p(v[1]), self.p(v[2]))
+                    })
+                    .unwrap();
+                let v = self.tris[largest as usize].v;
+                let (a, b, c) = (self.p(v[0]), self.p(v[1]), self.p(v[2]));
+                is_inside([
+                    (a[0] + b[0] + c[0]) as f64 / 3.0,
+                    (a[1] + b[1] + c[1]) as f64 / 3.0,
+                ])
+            };
+            for t in members {
+                self.tris[t as usize].inside = inside;
+            }
         }
+    }
+
+    /// Marks triangles inside a set of closed polygons given as vertex ids: a point
+    /// is inside when it has a non-zero total winding.
+    pub fn mark_inside(&mut self, loops: &[Vec<u32>]) {
+        let polys: Vec<Vec<[f64; 2]>> = loops
+            .iter()
+            .map(|l| l.iter().map(|&v| [self.p(v)[0] as f64, self.p(v)[1] as f64]).collect())
+            .collect();
+        self.mark_inside_with(|q| {
+            let mut w = 0.0;
+            for poly in &polys {
+                for i in 0..poly.len() {
+                    let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                    let (ux, uy, vx, vy) = (a[0] - q[0], a[1] - q[1], b[0] - q[0], b[1] - q[1]);
+                    w += (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+                }
+            }
+            (w / std::f64::consts::TAU).round() != 0.0
+        });
     }
 
     /// Triangles inside the domain as `(vertices, constrained edges)`. Vertex ids
@@ -592,13 +640,15 @@ mod tests {
         let mut c = Cdt::new();
         let outer = [[0, 0], [8 * g, 0], [8 * g, 8 * g], [0, 8 * g]];
         let hole = [[3 * g, 3 * g], [3 * g, 5 * g], [5 * g, 5 * g], [5 * g, 3 * g]];
+        let mut loops = Vec::new();
         for poly in [&outer, &hole] {
             let ids: Vec<u32> = poly.iter().map(|&p| c.insert(p, true).unwrap()).collect();
             for i in 0..4 {
                 c.constrain(ids[i], ids[(i + 1) % 4]).unwrap();
             }
+            loops.push(ids);
         }
-        c.mark_inside();
+        c.mark_inside(&loops);
         let total: i128 = c.inside_triangles().map(|(v, _)| area2(&c, v)).sum();
         assert_eq!(total, 2 * (64 - 4) * (g as i128) * (g as i128));
     }
@@ -628,12 +678,12 @@ mod tests {
             for i in 0..n {
                 c.constrain(ids[i], ids[(i + 1) % n]).unwrap();
             }
-            c.mark_inside();
+            c.mark_inside(std::slice::from_ref(&ids));
             for _ in 0..50 {
                 let q = [(rng.f64() * GRID as f64) as i64, (rng.f64() * GRID as f64) as i64];
                 let _ = c.insert(q, false);
             }
-            c.mark_inside();
+            c.mark_inside(std::slice::from_ref(&ids));
             let total: i128 = c.inside_triangles().map(|(v, _)| area2(&c, v)).sum();
             assert_eq!(total, exact);
         }
