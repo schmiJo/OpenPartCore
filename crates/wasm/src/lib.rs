@@ -6,8 +6,8 @@
 
 pub mod models;
 
-use coreshape::document::{Outcome, StepState};
 use coreshape::*;
+use coreshape_document::{Document, Outcome, StepState};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write;

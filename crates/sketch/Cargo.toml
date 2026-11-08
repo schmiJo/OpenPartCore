@@ -1,0 +1,15 @@
+[package]
+name = "coreshape-sketch"
+description = "A 2D sketch constraint solver with no dependencies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately empty. This crate knows nothing about the kernel, so an app can use it alone,
+# and it builds for WebAssembly as it is.
+[dependencies]
+
+# The benchmark as a browser module. On other targets it is an ordinary program saying how to build it.
+[[example]]
+name = "wasm_bench"
+crate-type = ["cdylib"]

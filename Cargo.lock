@@ -7,8 +7,28 @@ name = "coreshape"
 version = "0.1.0"
 
 [[package]]
+name = "coreshape-document"
+version = "0.1.0"
+dependencies = [
+ "coreshape",
+ "coreshape-sketch",
+]
+
+[[package]]
+name = "coreshape-render"
+version = "0.1.0"
+dependencies = [
+ "coreshape",
+]
+
+[[package]]
+name = "coreshape-sketch"
+version = "0.1.0"
+
+[[package]]
 name = "coreshape-wasm"
 version = "0.1.0"
 dependencies = [
  "coreshape",
+ "coreshape-document",
 ]

@@ -2,8 +2,8 @@
 //! a demo can't hide what the kernel can't do. A demo is plain data: it can be saved to a
 //! file and opened again, or driven by the MCP server.
 
-use coreshape::document::*;
 use coreshape::*;
+use coreshape_document::*;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ParamDef {

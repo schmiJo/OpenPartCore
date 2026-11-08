@@ -358,7 +358,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::Rng;
+    use crate::rng::Rng;
 
     #[test]
     fn round_trips_values_exactly() {

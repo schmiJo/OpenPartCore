@@ -13,17 +13,17 @@
 //! the key covers everything a result depends on, this one rule is correct for dimension
 //! changes, edits, suppression and reordering alike.
 
-use crate::blend::{chamfer, fillet_with, BlendOptions};
-use crate::boolean::{boolean_with, BoolOp, Checks};
-use crate::build::{
+use coreshape::blend::{chamfer, fillet_with, BlendOptions};
+use coreshape::boolean::{boolean_with, BoolOp, Checks};
+use coreshape::build::{
     box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus, SLOT_END_CAP, SLOT_SEG_BASE, SLOT_START_CAP,
 };
-use crate::error::{Error, Result};
-use crate::expr::{Env, Expr};
-use crate::json::{self, Value};
-use crate::math::*;
-use crate::profile::{PathBuilder, Profile, Wire};
-use crate::topo::{Body, FaceTag};
+use coreshape::error::{Error, Result};
+use coreshape::math::*;
+use coreshape::profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
+use coreshape::topo::{Body, FaceTag};
+pub use coreshape_sketch::expr::{self, Env, Expr};
+pub use coreshape_sketch::json::{self, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -507,6 +507,10 @@ pub enum Primitive {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     Sketch { plane: Placement, regions: Vec<Region> },
+    /// A sketch drawn with constraints and dimensions, solved at each rebuild. Dimensions may be
+    /// expressions over the document's parameters. A face swept from it is named by the entity it
+    /// came from, `f3:side.7` for entity 7, so the name doesn't depend on drawing order.
+    ConstrainedSketch { plane: Placement, sketch: coreshape_sketch::Sketch },
     /// Extrudes a sketch along its normal, from `start` for `length`.
     Extrude { sketch: FeatureId, start: Expr, length: Expr, mode: Mode },
     /// Revolves a sketch about its Z axis. Profile x is the distance from the axis and
@@ -546,6 +550,7 @@ impl Op {
     pub fn kind(&self) -> &'static str {
         match self {
             Op::Sketch { .. } => "sketch",
+            Op::ConstrainedSketch { .. } => "constrained_sketch",
             Op::Extrude { .. } => "extrude",
             Op::Revolve { .. } => "revolve",
             Op::Solid { .. } => "solid",
@@ -554,9 +559,14 @@ impl Op {
         }
     }
 
+    /// Whether this makes profiles for later features, leaving the body alone.
+    fn is_sketch(&self) -> bool {
+        matches!(self, Op::Sketch { .. } | Op::ConstrainedSketch { .. })
+    }
+
     fn label(&self) -> &'static str {
         match self {
-            Op::Sketch { .. } => "Sketch",
+            Op::Sketch { .. } | Op::ConstrainedSketch { .. } => "Sketch",
             Op::Extrude { .. } => "Extrude",
             Op::Revolve { .. } => "Revolve",
             Op::Solid { .. } => "Solid",
@@ -619,6 +629,10 @@ impl Op {
                         None => {}
                     }
                 }
+            }
+            Op::ConstrainedSketch { plane, sketch } => {
+                place(plane, &mut out);
+                out.extend(sketch.constraints.iter().filter_map(|c| c.rule.value()));
             }
             Op::Extrude { start, length, .. } => out.extend([start, length]),
             Op::Revolve { degrees, .. } => out.push(degrees),
@@ -715,7 +729,16 @@ struct Cached {
     /// The body after this feature, for features that make one.
     body: Option<Arc<Body>>,
     /// A sketch's output, kept separately because a sketch doesn't touch the body.
-    sketch: Option<(Frame, Arc<Vec<Profile>>)>,
+    sketch: Option<SketchOutput>,
+}
+
+/// What a sketch hands to the features that use it.
+#[derive(Clone)]
+struct SketchOutput {
+    frame: Frame,
+    profiles: Arc<Vec<Profile>>,
+    /// Faces are named by entity, which is unique across the sketch, so regions need no offset.
+    by_entity: bool,
 }
 
 // ----- The document -----
@@ -878,7 +901,7 @@ impl Document {
     fn check_sketch_refs(op: &Op, before: &[Feature]) -> Result<()> {
         if let Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } = op {
             if let Some(f) = before.iter().find(|f| f.id == *sketch) {
-                if !matches!(f.op, Op::Sketch { .. }) {
+                if !f.op.is_sketch() {
                     return Err(Error::InvalidInput(format!("f{} is a {}, not a sketch", sketch.0, f.op.kind())));
                 }
             }
@@ -1013,7 +1036,7 @@ impl Document {
             // A sketch depends only on its own inputs. Everything else also depends on the
             // body so far, and on its sketch when it has one.
             let key = match &feature.op {
-                Op::Sketch { .. } => hash_text(1, &own),
+                Op::Sketch { .. } | Op::ConstrainedSketch { .. } => hash_text(1, &own),
                 Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } => {
                     let sketch_key = sketch_keys.get(sketch).copied().unwrap_or(0);
                     hash_text(body_key ^ sketch_key.rotate_left(17), &own)
@@ -1022,7 +1045,7 @@ impl Document {
             };
             let cached = self.cache.get(&feature.id).filter(|c| c.key == key).cloned();
             if let Some(c) = cached {
-                if matches!(feature.op, Op::Sketch { .. }) {
+                if feature.op.is_sketch() {
                     sketch_keys.insert(feature.id, key);
                 } else {
                     body = c.body.clone();
@@ -1064,10 +1087,9 @@ impl Document {
         Ok(text)
     }
 
-    #[allow(clippy::type_complexity)]
-    fn run(&self, feature: &Feature, env: &Env, body: Option<Arc<Body>>) -> Result<(Option<Arc<Body>>, Option<(Frame, Arc<Vec<Profile>>)>)> {
+    fn run(&self, feature: &Feature, env: &Env, body: Option<Arc<Body>>) -> Result<(Option<Arc<Body>>, Option<SketchOutput>)> {
         let tag = feature.id.0;
-        let sketch_output = |id: &FeatureId| -> Result<(Frame, Arc<Vec<Profile>>)> {
+        let sketch_output = |id: &FeatureId| -> Result<SketchOutput> {
             if self.feature(*id).is_some_and(|f| f.suppressed) {
                 return Err(Error::InvalidInput(format!("its sketch f{} is suppressed", id.0)));
             }
@@ -1085,26 +1107,35 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok((None, Some((plane.resolve(env)?, Arc::new(list)))))
+                Ok((None, Some(SketchOutput { frame: plane.resolve(env)?, profiles: Arc::new(list), by_entity: false })))
+            }
+            Op::ConstrainedSketch { plane, sketch } => {
+                let solved = sketch.solve_with(env).map_err(|e| Error::InvalidProfile(e.message))?;
+                let regions = solved.sketch.regions().map_err(|e| Error::InvalidProfile(e.message))?;
+                let list = profiles_from_regions(&regions);
+                for p in &list {
+                    p.validate()?;
+                }
+                Ok((None, Some(SketchOutput { frame: plane.resolve(env)?, profiles: Arc::new(list), by_entity: true })))
             }
             Op::Extrude { sketch, start, length, mode } => {
-                let (frame, list) = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
                 let shifted = Frame { origin: frame.origin + frame.z * num(start, env)?, ..frame };
                 let h = num(length, env)?;
                 let tools = list
                     .iter()
                     .enumerate()
-                    .map(|(k, p)| Ok(with_region(extrude(p, &shifted, h, tag)?, k as u32)))
+                    .map(|(k, p)| Ok(with_region(extrude(p, &shifted, h, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
                 Ok((Some(Arc::new(combine(body.as_deref(), tools, *mode)?)), None))
             }
             Op::Revolve { sketch, degrees, mode } => {
-                let (frame, list) = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
                 let a = num(degrees, env)?.to_radians();
                 let tools = list
                     .iter()
                     .enumerate()
-                    .map(|(k, p)| Ok(with_region(revolve(p, &frame, a, tag)?, k as u32)))
+                    .map(|(k, p)| Ok(with_region(revolve(p, &frame, a, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
                 Ok((Some(Arc::new(combine(body.as_deref(), tools, *mode)?)), None))
             }
@@ -1224,6 +1255,52 @@ impl Document {
         doc.next_id = (max_id + 1).max(if next.is_finite() && next >= 0.0 && next < u32::MAX as f64 { next as u32 } else { 0 });
         Ok(doc)
     }
+}
+
+/// Kernel profiles from a solved sketch's closed regions. Each segment's id is its entity's id.
+pub fn profiles_from_regions(regions: &[coreshape_sketch::Region]) -> Vec<Profile> {
+    regions
+        .iter()
+        .map(|r| Profile { outer: wire_from_loop(&r.outer), holes: r.holes.iter().map(wire_from_loop).collect() })
+        .collect()
+}
+
+/// The solver meets its equations to 1e-9 mm, so neighbouring ends can differ by that much. Here
+/// each joint gets one position, taken from an arc where there is one, since an arc's ends follow
+/// from its angles and can't be moved.
+fn wire_from_loop(l: &coreshape_sketch::Loop) -> Wire {
+    use coreshape_sketch::SegKind;
+    let n = l.segs.len();
+    let joint = |i: usize| -> Vec2 {
+        let (s, next) = (&l.segs[i], &l.segs[(i + 1) % n]);
+        let p = match (s.kind, next.kind) {
+            (SegKind::Arc { .. }, _) => s.end(),
+            (_, SegKind::Arc { .. }) => next.start(),
+            _ => s.end(),
+        };
+        v2(p[0], p[1])
+    };
+    let mut segs = Vec::with_capacity(n);
+    for (i, s) in l.segs.iter().enumerate() {
+        let id = s.entity.0;
+        match s.kind {
+            SegKind::Line { .. } => {
+                segs.push(Seg { geom: SegGeom::Line { a: joint((i + n - 1) % n), b: joint(i) }, id });
+            }
+            SegKind::Arc { center, radius, a0, a1 } => {
+                let center = v2(center[0], center[1]);
+                if (a1 - a0).abs() >= TAU - 1e-9 {
+                    // A whole circle is two halves, as the kernel draws one.
+                    let middle = (a0 + a1) / 2.0;
+                    segs.push(Seg { geom: SegGeom::Arc { center, radius, a0, a1: middle }, id });
+                    segs.push(Seg { geom: SegGeom::Arc { center, radius, a0: middle, a1 }, id });
+                } else {
+                    segs.push(Seg { geom: SegGeom::Arc { center, radius, a0, a1 }, id });
+                }
+            }
+        }
+    }
+    Wire { segs }
 }
 
 fn with_region(mut body: Body, region: u32) -> Body {
@@ -1659,6 +1736,11 @@ pub fn op_value(op: &Op) -> Value {
             ("plane", placement_value(plane)),
             ("regions", Value::Arr(regions.iter().map(region_value).collect())),
         ]),
+        Op::ConstrainedSketch { plane, sketch } => Value::obj(vec![
+            ("type", Value::str("constrained_sketch")),
+            ("plane", placement_value(plane)),
+            ("sketch", sketch.to_json()),
+        ]),
         Op::Extrude { sketch, start, length, mode } => Value::obj(vec![
             ("type", Value::str("extrude")),
             ("sketch", Value::Num(sketch.0 as f64)),
@@ -1751,6 +1833,16 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 .collect::<Result<Vec<Region>>>()?;
             Ok(Op::Sketch { plane, regions })
         }
+        "constrained_sketch" => {
+            with(&["type", "plane", "sketch"])?;
+            let plane = match v.get("plane") {
+                Some(p) => read_placement(p)?,
+                None => Placement::xy(0.0),
+            };
+            let sketch = coreshape_sketch::Sketch::from_json(field(v, "sketch", "a constrained sketch")?)
+                .map_err(|e| Error::InvalidInput(e.message))?;
+            Ok(Op::ConstrainedSketch { plane, sketch })
+        }
         "extrude" => {
             with(&["type", "sketch", "start", "length", "mode"])?;
             Ok(Op::Extrude {
@@ -1816,7 +1908,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::Chamfer { edges: read_edge_select(field(v, "edges", "a chamfer")?)?, distance: expr_field(v, "distance", "a chamfer")? })
         }
         other => Err(Error::InvalidInput(format!(
-            "unknown feature type \"{other}\"; expected sketch, extrude, revolve, solid, fillet or chamfer"
+            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, solid, fillet or chamfer"
         ))),
     }
 }

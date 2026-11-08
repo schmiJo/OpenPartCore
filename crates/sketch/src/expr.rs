@@ -366,7 +366,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::Rng;
+    use crate::rng::Rng;
 
     fn env() -> Env {
         [("width".to_string(), 40.0), ("inset".to_string(), 5.0), ("n".to_string(), 6.0)].into_iter().collect()

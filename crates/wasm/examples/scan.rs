@@ -2,6 +2,7 @@
 //! Usage: scan [positions per model]
 use coreshape::*;
 use coreshape_wasm::models;
+use coreshape_document::Document;
 use std::collections::{BTreeMap, HashMap};
 
 fn main() {
@@ -33,7 +34,7 @@ fn main() {
             }
             if let Some(i) = o.failed {
                 refused += 1;
-                if let document::StepState::Failed(why) = &o.steps[i].state {
+                if let coreshape_document::StepState::Failed(why) = &o.steps[i].state {
                     let key: String = why.chars().take(70).collect();
                     let e = reasons.entry(key).or_insert((0, o.steps[i].name.clone(), values.clone()));
                     e.0 += 1;

@@ -1,0 +1,11 @@
+[package]
+name = "coreshape-render"
+description = "Offscreen software rendering of CoreShape bodies to PNG"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Only the kernel, from this repository. The rasterizer and the PNG encoder are written here,
+# so a picture needs no GPU, no display and no other library.
+[dependencies]
+coreshape = { path = "../kernel" }

@@ -1,8 +1,8 @@
 //! Milestone 6: the document rebuilds correctly, keeps its references, and is plain data
 //! that can be saved, edited, suppressed and reordered.
 
-use coreshape::document::*;
 use coreshape::*;
+use coreshape_document::*;
 
 fn corner_area(r: f64) -> f64 {
     r * r * (1.0 - PI / 4.0)
@@ -231,7 +231,7 @@ fn a_grid_of_holes_and_each_region_keeps_its_name() {
     assert!(o.failed.is_none(), "{:?}", o.steps);
     assert!((vol(&o) - (12000.0 - 6.0 * PI * 4.0 * 5.0)).abs() < 1e-8);
     let body = o.body.unwrap();
-    let names = document::face_names(&body);
+    let names = face_names(&body);
     for region in 0..6 {
         let name = drill.region_side(region, 0).name();
         assert!(names.contains(&name), "{name} not in {names:?}");
@@ -583,7 +583,7 @@ fn save_and_load_round_trips_everything() {
     let (a, b) = (a.body.unwrap(), b.body.unwrap());
     assert_eq!(mass_properties(&a).volume.to_bits(), mass_properties(&b).volume.to_bits());
     assert_eq!(a.faces.len(), b.faces.len());
-    assert_eq!(document::face_names(&a), document::face_names(&b));
+    assert_eq!(face_names(&a), face_names(&b));
 }
 
 #[test]
@@ -691,8 +691,8 @@ fn every_selection_works_through_json() {
         EdgeSelect::Any(vec![EdgeSelect::All, EdgeSelect::Both(vec![EdgeSelect::Radius(1.0.into())])]),
     ];
     for q in list {
-        let text = document::edge_select_value(&q).to_text();
-        let back = document::read_edge_select(&json::parse(&text).unwrap()).unwrap();
+        let text = edge_select_value(&q).to_text();
+        let back = read_edge_select(&json::parse(&text).unwrap()).unwrap();
         assert_eq!(back, q, "{text}");
     }
 }

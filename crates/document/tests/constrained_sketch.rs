@@ -1,0 +1,243 @@
+//! Solved sketches as features: from constraints to a kernel solid, with names that hold.
+
+use coreshape::*;
+use coreshape_document::*;
+use coreshape_sketch as sk;
+use coreshape_sketch::{EntityId, Rule, ORIGIN};
+
+struct Plate {
+    sketch: sk::Sketch,
+    sides: [EntityId; 4],
+    hole: EntityId,
+}
+
+/// A rectangle from the origin, width and height set by parameters, with a centred hole. The
+/// geometry starts crooked and the wrong size, so the solver has real work to do.
+fn plate_sketch() -> Plate {
+    let mut s = sk::Sketch::new();
+    let a = s.line([1.0, 1.0], [30.0, -1.0]);
+    let b = s.line([30.5, 0.0], [31.0, 20.0]);
+    let c = s.line([30.0, 21.0], [-1.0, 19.0]);
+    let d = s.line([0.0, 20.0], [0.0, 0.5]);
+    for (p, q) in [(a, b), (b, c), (c, d), (d, a)] {
+        s.constrain(Rule::Coincident { a: p.end(), b: q.start() });
+    }
+    s.constrain(Rule::Coincident { a: a.start(), b: ORIGIN.whole() });
+    s.constrain(Rule::Horizontal { a: a.whole(), b: None });
+    s.constrain(Rule::Vertical { a: b.whole(), b: None });
+    s.constrain(Rule::Horizontal { a: c.whole(), b: None });
+    s.constrain(Rule::Vertical { a: d.whole(), b: None });
+    s.constrain(Rule::Distance { a: a.whole(), b: None, value: "w".into() });
+    s.constrain(Rule::Distance { a: b.whole(), b: None, value: "h".into() });
+    let hole = s.circle([12.0, 12.0], 3.0);
+    s.constrain(Rule::HorizontalDistance { a: a.start(), b: hole.center(), value: "w / 2".into() });
+    s.constrain(Rule::VerticalDistance { a: a.start(), b: hole.center(), value: "h / 2".into() });
+    s.constrain(Rule::Diameter { of: hole, value: "bore".into() });
+    Plate { sketch: s, sides: [a, b, c, d], hole }
+}
+
+fn vol(o: &Outcome) -> f64 {
+    mass_properties(o.body.as_ref().expect("a body")).volume
+}
+
+fn plate_doc() -> (Document, FeatureId, Plate) {
+    let plate = plate_sketch();
+    let mut doc = Document::new();
+    for (name, value) in [("w", 40.0), ("h", 25.0), ("bore", 8.0), ("t", 6.0)] {
+        doc.set_parameter(name, value).unwrap();
+    }
+    let s = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: plate.sketch.clone() }).unwrap();
+    let e = doc.add(Op::extrude(s, 0.0, "t", Mode::Add)).unwrap();
+    (doc, e, plate)
+}
+
+#[test]
+fn a_constrained_sketch_extrudes_to_the_right_solid() {
+    let (mut doc, _, _) = plate_doc();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    let want = (40.0 * 25.0 - PI * 16.0) * 6.0;
+    assert!((vol(&o) - want).abs() < 1e-6, "{} vs {want}", vol(&o));
+    let report = validate(o.body.as_ref().unwrap()).unwrap();
+    assert_eq!(report.genus, vec![1]);
+}
+
+#[test]
+fn parameters_drive_the_sketch_and_only_what_depends_on_it_rebuilds() {
+    let (mut doc, _, _) = plate_doc();
+    doc.rebuild(None);
+    doc.set_parameter("t", 9.0).unwrap();
+    let o = doc.rebuild(None);
+    assert_eq!(o.steps[0].state, StepState::Reused, "the thickness isn't in the sketch");
+    assert_eq!(o.steps[1].state, StepState::Rebuilt);
+    doc.set_parameter("w", 60.0).unwrap();
+    doc.set_parameter("bore", 10.0).unwrap();
+    let o = doc.rebuild(None);
+    assert_eq!(o.steps[0].state, StepState::Rebuilt);
+    let want = (60.0 * 25.0 - PI * 25.0) * 9.0;
+    assert!((vol(&o) - want).abs() < 1e-6, "{} vs {want}", vol(&o));
+}
+
+#[test]
+fn faces_are_named_by_entity_and_blends_find_them_after_a_change() {
+    let (mut doc, e, plate) = plate_doc();
+    let top_front = EdgeSelect::Between(e.end_cap(), e.side(plate.sides[0].0));
+    doc.add(Op::fillet(top_front, 2.0)).unwrap();
+    doc.add(Op::chamfer(EdgeSelect::Between(e.end_cap(), e.side(plate.hole.0)), 1.0)).unwrap();
+    let round = |w: f64| 4.0 * (1.0 - PI / 4.0) * w;
+    let cone = |r: f64, t: f64| PI * t / 3.0 * ((r + t).powi(2) + (r + t) * r + r * r) - PI * r * r * t;
+    for (w, bore) in [(40.0, 8.0), (70.0, 12.0)] {
+        doc.set_parameter("w", w).unwrap();
+        doc.set_parameter("bore", bore).unwrap();
+        let o = doc.rebuild(None);
+        assert!(o.failed.is_none(), "{:?}", o.steps);
+        let want = (w * 25.0 - PI * (bore / 2.0).powi(2)) * 6.0 - round(w) - cone(bore / 2.0, 1.0);
+        assert!((vol(&o) - want).abs() < 1e-5, "w={w}: {} vs {want}", vol(&o));
+        let names = face_names(o.body.as_ref().unwrap());
+        assert!(names.contains(&e.side(plate.sides[1].0).name()), "{names:?}");
+        assert!(names.contains(&e.side(plate.hole.0).name()), "{names:?}");
+    }
+}
+
+#[test]
+fn arcs_make_true_curved_walls() {
+    // A slot: two lines and two semicircles, tangent where they meet.
+    let mut s = sk::Sketch::new();
+    let right = s.arc([30.0, 0.0], 5.5, -90.0, 90.0);
+    let left = s.arc([0.0, 0.0], 4.5, 90.0, 270.0);
+    let bottom = s.line([0.0, -4.5], [30.0, -5.5]);
+    let top = s.line([30.0, 5.5], [0.0, 4.5]);
+    s.constrain(Rule::Coincident { a: bottom.end(), b: right.start() });
+    s.constrain(Rule::Coincident { a: right.end(), b: top.start() });
+    s.constrain(Rule::Coincident { a: top.end(), b: left.start() });
+    s.constrain(Rule::Coincident { a: left.end(), b: bottom.start() });
+    for (line, arc) in [(bottom, right), (top, right), (top, left), (bottom, left)] {
+        s.constrain(Rule::Tangent { a: line, b: arc });
+    }
+    s.constrain(Rule::Equal { a: left, b: right });
+    s.constrain(Rule::Radius { of: left, value: 5.0.into() });
+    s.constrain(Rule::Horizontal { a: bottom.whole(), b: None });
+    s.constrain(Rule::Coincident { a: left.center(), b: ORIGIN.whole() });
+    s.constrain(Rule::Distance { a: bottom.whole(), b: None, value: 30.0.into() });
+    let mut doc = Document::new();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    let e = doc.add(Op::extrude(f, 0.0, 4.0, Mode::Add)).unwrap();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    let want = (30.0 * 10.0 + PI * 25.0) * 4.0;
+    assert!((vol(&o) - want).abs() < 1e-6, "{} vs {want}", vol(&o));
+    let body = o.body.unwrap();
+    let curved = body.faces.iter().filter(|x| matches!(x.surface, Surface::Cylinder { .. })).count();
+    assert_eq!(curved, 2);
+    assert!(body.faces.iter().any(|x| x.tag == e.side(right.0).tag()));
+}
+
+#[test]
+fn a_revolved_constrained_profile_has_the_volume_pappus_says() {
+    // A square section out from the axis.
+    let mut s = sk::Sketch::new();
+    let a = s.line([20.0, 0.0], [31.0, 0.0]);
+    let b = s.line([30.0, 0.0], [30.0, 10.0]);
+    let c = s.line([30.0, 11.0], [20.0, 10.0]);
+    let d = s.line([20.0, 10.0], [20.0, 0.0]);
+    for (p, q) in [(a, b), (b, c), (c, d), (d, a)] {
+        s.constrain(Rule::Coincident { a: p.end(), b: q.start() });
+    }
+    s.constrain(Rule::Horizontal { a: a.whole(), b: None });
+    s.constrain(Rule::Vertical { a: b.whole(), b: None });
+    s.constrain(Rule::Horizontal { a: c.whole(), b: None });
+    s.constrain(Rule::Vertical { a: d.whole(), b: None });
+    s.fix(a.start()).unwrap();
+    s.constrain(Rule::Distance { a: a.whole(), b: None, value: 10.0.into() });
+    s.constrain(Rule::Distance { a: b.whole(), b: None, value: 10.0.into() });
+    let mut doc = Document::new();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    doc.add(Op::revolve(f, 360.0, Mode::Add)).unwrap();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    let want = TAU * 25.0 * 100.0;
+    assert!((vol(&o) - want).abs() < 1e-6, "{} vs {want}", vol(&o));
+}
+
+#[test]
+fn several_regions_each_become_a_solid_and_a_loop_in_a_hole_is_a_new_one() {
+    let mut s = sk::Sketch::new();
+    let a = s.circle([0.0, 0.0], 20.0);
+    let hole = s.circle([0.0, 0.0], 12.0);
+    let island = s.circle([0.0, 0.0], 5.0);
+    let apart = s.circle([60.0, 0.0], 3.0);
+    s.constrain(Rule::Concentric { a, b: hole });
+    s.constrain(Rule::Concentric { a, b: island });
+    let mut doc = Document::new();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    let e = doc.add(Op::extrude(f, 0.0, 2.0, Mode::Add)).unwrap();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    let want = PI * (400.0 - 144.0 + 25.0 + 9.0) * 2.0;
+    assert!((vol(&o) - want).abs() < 1e-6, "{} vs {want}", vol(&o));
+    let body = o.body.unwrap();
+    assert_eq!(validate(&body).unwrap().shells, 3);
+    assert!(body.faces.iter().any(|x| x.tag == e.side(apart.0).tag()));
+}
+
+#[test]
+fn a_conflict_fails_the_feature_with_its_reason_and_keeps_the_last_good_body() {
+    let (mut doc, e, plate) = plate_doc();
+    doc.add(Op::solid(Primitive::Sphere { radius: 2.0.into() }, Placement::at(point3(0.0, -50.0, 0.0)), Mode::Add)).unwrap();
+    let first = doc.features()[0].id;
+    let good = doc.rebuild(None);
+    assert!(good.failed.is_none(), "{:?}", good.steps);
+    let mut broken = plate.sketch.clone();
+    broken.constrain(Rule::Distance { a: plate.sides[0].whole(), b: None, value: 5.0.into() });
+    doc.edit(first, Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: broken }).unwrap();
+    let o = doc.rebuild(None);
+    assert_eq!(o.failed, Some(0));
+    match &o.steps[0].state {
+        StepState::Failed(why) => assert!(why.contains("c17") || why.contains("conflict") || why.contains("can't all hold"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(o.steps[1].state, StepState::Blocked);
+    // Fixing the sketch brings everything back without recomputing what depends on it.
+    doc.edit(first, Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: plate.sketch.clone() }).unwrap();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none());
+    assert_eq!(o.steps[1].state, StepState::Reused);
+    let _ = e;
+}
+
+#[test]
+fn an_open_sketch_says_which_entity_has_the_free_end() {
+    let mut s = sk::Sketch::new();
+    let a = s.line([0.0, 0.0], [10.0, 0.0]);
+    s.line([10.0, 0.0], [10.0, 10.0]);
+    let _ = a;
+    let mut doc = Document::new();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    doc.add(Op::extrude(f, 0.0, 1.0, Mode::Add)).unwrap();
+    let o = doc.rebuild(None);
+    match &o.steps[0].state {
+        StepState::Failed(why) => assert!(why.contains("isn't closed"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_document_with_a_constrained_sketch_saves_and_loads_exactly() {
+    let (mut doc, _, _) = plate_doc();
+    let text = doc.save_text();
+    let mut back = Document::load_text(&text).unwrap();
+    assert_eq!(back.features(), doc.features());
+    assert_eq!(back.save_text(), text);
+    let (a, b) = (doc.rebuild(None), back.rebuild(None));
+    assert_eq!(mass_properties(a.body.as_ref().unwrap()).volume.to_bits(), mass_properties(b.body.as_ref().unwrap()).volume.to_bits());
+    // A broken sketch inside a document is refused when it's read.
+    let bad = text.replace("\"coreshape-sketch\"", "\"something-else\"");
+    assert!(Document::load_text(&bad).err().expect("refused").to_string().contains("not a CoreShape sketch"));
+}
+
+#[test]
+fn a_parameter_used_only_in_a_sketch_can_not_be_removed() {
+    let (mut doc, _, _) = plate_doc();
+    let err = doc.remove_parameter("bore").unwrap_err().to_string();
+    assert!(err.contains("uses"), "{err}");
+}
