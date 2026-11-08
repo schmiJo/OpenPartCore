@@ -16,6 +16,7 @@
 //! which `crate::spline` finds with certainty. See that module for why it's a true distance.
 
 use crate::math::*;
+use crate::patch::Patch;
 use crate::spline::PlaneCurve;
 use std::sync::Arc;
 
@@ -45,6 +46,8 @@ pub enum Surface {
     /// it. Normal is to the right of the curve's direction of travel in that half-plane. The curve may end
     /// on the axis, and only there.
     Revolved { frame: Frame, curve: Arc<PlaneCurve> },
+    /// A free-form patch, in the frame's coordinates. Normal is along `S_u x S_v`.
+    Free { frame: Frame, patch: Arc<Patch> },
 }
 
 /// Per-face chart parameters. Only some fields apply to each surface: `u0` and
@@ -73,7 +76,8 @@ impl Surface {
             | Surface::Sphere { frame, .. }
             | Surface::Torus { frame, .. }
             | Surface::Extruded { frame, .. }
-            | Surface::Revolved { frame, .. } => frame,
+            | Surface::Revolved { frame, .. }
+            | Surface::Free { frame, .. } => frame,
         }
     }
 
@@ -86,6 +90,7 @@ impl Surface {
             Surface::Torus { .. } => "torus",
             Surface::Extruded { .. } => "extrusion",
             Surface::Revolved { .. } => "revolution",
+            Surface::Free { .. } => "free-form surface",
         }
     }
 
@@ -95,6 +100,7 @@ impl Surface {
         match self {
             Surface::Extruded { curve, .. } => return curve.signed_distance(v2(l.x, l.y)),
             Surface::Revolved { curve, .. } => return curve.signed_distance(v2(l.x.hypot(l.y), l.z)),
+            Surface::Free { patch, .. } => return patch.signed_distance(l),
             _ => {}
         }
         match *self {
@@ -110,7 +116,7 @@ impl Surface {
             }
             Surface::Sphere { radius, .. } => l.norm() - radius,
             Surface::Torus { major, minor, .. } => (l.x.hypot(l.y) - major).hypot(l.z) - minor,
-            Surface::Extruded { .. } | Surface::Revolved { .. } => unreachable!(),
+            Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. } => unreachable!(),
         }
     }
 
@@ -161,6 +167,7 @@ impl Surface {
                 let n = curve.foot(v2(l.x.hypot(l.y), l.z)).tangent.right();
                 radial(l.x, l.y) * n.x + f.z * n.y
             }
+            Surface::Free { ref patch, .. } => f.dir_to_world(patch.normal(l)),
         }
     }
 
@@ -267,7 +274,7 @@ impl Surface {
                 };
                 chart.frame = Frame::new(f.origin, c, c.any_perpendicular());
             }
-            Surface::Extruded { .. } => {}
+            Surface::Extruded { .. } | Surface::Free { .. } => {}
             Surface::Revolved { ref curve, .. } => {
                 let us: Vec<f64> = points
                     .iter()
@@ -338,6 +345,7 @@ impl Surface {
                 let l = f.to_local(p);
                 v2(curve.foot(v2(l.x, l.y)).t * curve.speed, l.z)
             }
+            Surface::Free { ref patch, .. } => patch.to_chart(f.to_local(p)),
             Surface::Revolved { ref curve, .. } => {
                 let l = f.to_local(p);
                 let rho = l.x.hypot(l.y);
@@ -430,6 +438,10 @@ impl Surface {
                 let rho = major + minor * cv;
                 (f.origin + radial * rho + f.z * (minor * sv), theta * (rho / (major + minor)), radial * -sv + f.z * cv)
             }
+            Surface::Free { ref patch, .. } => {
+                let (q, dx, dy) = patch.from_chart(uv);
+                (f.to_world(q), f.dir_to_world(dx), f.dir_to_world(dy))
+            }
             Surface::Extruded { ref curve, .. } => {
                 let t = uv.x / curve.speed;
                 let (at, d) = (curve.eval(t), curve.derivative(t) / curve.speed);
@@ -477,6 +489,11 @@ impl Surface {
                 curve: curve.clone(),
             },
             Surface::Revolved { frame, ref curve } => Surface::Revolved { frame: m.of_surface_frame(&frame), curve: curve.clone() },
+            // The frame's y turns over in the reflection, so the patch's own y does too. Its data is the same
+            // kind of surface, so this can't fail where the original didn't.
+            Surface::Free { frame, ref patch } => {
+                Surface::Free { frame: m.of_surface_frame(&frame), patch: Arc::new(patch.reflected_y().expect("the reflection of a valid patch is valid")) }
+            }
             Surface::Plane(f) => Surface::Plane(m.of_surface_frame(&f)),
             Surface::Cylinder { frame, radius } => Surface::Cylinder { frame: m.of_surface_frame(&frame), radius },
             Surface::Cone { frame, radius, half_angle } => Surface::Cone { frame: m.of_surface_frame(&frame), radius, half_angle },
@@ -496,6 +513,7 @@ impl Surface {
             Surface::Torus { frame, major, minor } => Surface::Torus { frame: t.compose(&frame), major, minor },
             Surface::Extruded { frame, ref curve } => Surface::Extruded { frame: t.compose(&frame), curve: curve.clone() },
             Surface::Revolved { frame, ref curve } => Surface::Revolved { frame: t.compose(&frame), curve: curve.clone() },
+            Surface::Free { frame, ref patch } => Surface::Free { frame: t.compose(&frame), patch: patch.clone() },
         }
     }
 }

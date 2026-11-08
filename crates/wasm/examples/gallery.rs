@@ -42,6 +42,36 @@ fn spline_extras() -> Vec<(&'static str, Result<Body>)> {
     ]
 }
 
+fn loft_extras() -> Vec<(&'static str, Result<Body>)> {
+    let at = |z: f64| Frame::translation(v3(0.0, 0.0, z));
+    let circle = |r: f64| Profile::new(Wire::circle(v2(0.0, 0.0), r));
+    let square = |s: f64| Profile::new(Wire::polygon(&[v2(-s / 2.0, -s / 2.0), v2(s / 2.0, -s / 2.0), v2(s / 2.0, s / 2.0), v2(-s / 2.0, s / 2.0)]));
+    let ring = |a: f64, b: f64| Profile::new(Wire::circle(v2(0.0, 0.0), a)).with_hole(Wire::circle(v2(0.0, 0.0), b));
+    let wavy = || {
+        let points: Vec<Vec3> = [(18.0, 0.0), (9.0, 13.0), (-7.0, 10.0), (-16.0, -4.0), (-3.0, -15.0), (12.0, -11.0), (18.0, 0.0)].iter().map(|p| v3(p.0, p.1, 0.0)).collect();
+        Profile::new(PathBuilder::new(v2(18.0, 0.0)).spline_to(Spline::through(&points).unwrap()).close())
+    };
+    let tilted = Frame::new(v3(4.0, 0.0, 30.0), v3(0.25, 0.1, 1.0), Vec3::X);
+    let nozzle = || loft(&[(&square(40.0), at(0.0)), (&circle(13.0), at(25.0)), (&square(18.0), at(50.0))], 1);
+    let free = || loft(&[(&wavy(), at(0.0)), (&square(22.0), at(20.0)), (&circle(10.0), tilted)], 1);
+    let ball = |x: f64, y: f64, z: f64, r: f64| sphere(&Frame::translation(v3(x, y, z)), r, 2).unwrap();
+    let across = Frame::new(v3(-40.0, 1.0, 25.0), Vec3::X, Vec3::Y);
+    vec![
+        ("loft_cylinder", loft(&[(&circle(10.0), at(0.0)), (&circle(10.0), at(30.0))], 1)),
+        ("loft_frustum", loft(&[(&circle(14.0), at(0.0)), (&circle(6.0), at(25.0))], 1)),
+        ("loft_square_circle", loft(&[(&square(30.0), at(0.0)), (&circle(10.0), at(30.0))], 1)),
+        ("loft_ring", loft(&[(&ring(16.0, 8.0), at(0.0)), (&ring(10.0, 3.0), at(20.0))], 1)),
+        ("loft_nozzle", nozzle()),
+        ("loft_free", free()),
+        ("loft_nozzle_ball", subtract(&nozzle().unwrap(), &ball(10.0, 8.0, 26.0, 9.0))),
+        ("loft_nozzle_bored", subtract(&nozzle().unwrap(), &cylinder(&across, 4.0, 80.0, 2).unwrap())),
+        ("loft_nozzle_joined", union(&nozzle().unwrap(), &cylinder(&across, 4.0, 80.0, 2).unwrap())),
+        ("loft_free_halved", intersect(&free().unwrap(), &box_solid(&Frame::translation(v3(-40.0, -40.0, 8.0)), 80.0, 80.0, 40.0, 2).unwrap())),
+        ("loft_free_ball", subtract(&free().unwrap(), &ball(8.0, 5.0, 12.0, 7.0))),
+        ("loft_mirrored", nozzle().map(|b| b.mirrored(&Mirror::new(v3(30.0, 0.0, 0.0), v3(1.0, 0.1, 0.0))))),
+    ]
+}
+
 fn extras() -> Vec<(&'static str, Result<Body>)> {
     let void = {
         let outer = box_solid(&Frame::translation(v3(0.0, 0.0, 0.0)), 40.0, 40.0, 40.0, 1).unwrap();
@@ -204,7 +234,7 @@ fn main() {
         assert!(outcome.failed.is_none(), "{}: {:?}", m.id, outcome.steps);
         bodies.push((m.id.to_string(), (*outcome.body.unwrap()).clone()));
     }
-    for (name, r) in extras().into_iter().chain(spline_extras()) {
+    for (name, r) in extras().into_iter().chain(spline_extras()).chain(loft_extras()) {
         bodies.push((name.to_string(), r.unwrap()));
     }
     for (name, body) in &bodies {

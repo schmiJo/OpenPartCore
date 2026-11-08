@@ -94,6 +94,18 @@ impl Vec3 {
     pub fn lerp(self, o: Vec3, t: f64) -> Vec3 {
         self + (o - self) * t
     }
+    pub fn splat(x: f64) -> Vec3 {
+        Vec3 { x, y: x, z: x }
+    }
+
+    pub fn min(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x.min(o.x), y: self.y.min(o.y), z: self.z.min(o.z) }
+    }
+
+    pub fn max(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x.max(o.x), y: self.y.max(o.y), z: self.z.max(o.z) }
+    }
+
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
     }

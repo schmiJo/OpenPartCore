@@ -565,6 +565,9 @@ pub enum Op {
     ImportStep { text: String, mode: Mode },
     Fillet { edges: EdgeSelect, radius: Expr, propagate: bool },
     Chamfer { edges: EdgeSelect, distance: Expr, propagate: bool },
+    /// A solid through sketches in order, each holding one outline, with free-form sides. Straight between
+    /// two sections, and a smooth cubic through three or more. Sides are named from the first section.
+    Loft { sections: Vec<FeatureId>, mode: Mode },
     /// Sweeps a sketch along a smooth path of lines and arcs, starting at the sketch plane and
     /// heading along its normal.
     Sweep { sketch: FeatureId, path: Vec<SweepStep>, mode: Mode },
@@ -640,6 +643,7 @@ impl Op {
             Op::Fillet { .. } => "fillet",
             Op::Chamfer { .. } => "chamfer",
             Op::Sweep { .. } => "sweep",
+            Op::Loft { .. } => "loft",
             Op::Pattern { .. } => "pattern",
             Op::Mirror { .. } => "mirror",
             Op::Offset { .. } => "offset",
@@ -663,6 +667,7 @@ impl Op {
             Op::Fillet { .. } => "Fillet",
             Op::Chamfer { .. } => "Chamfer",
             Op::Sweep { .. } => "Sweep",
+            Op::Loft { .. } => "Loft",
             Op::Pattern { .. } => "Pattern",
             Op::Mirror { .. } => "Mirror",
             Op::Offset { .. } => "Offset",
@@ -676,6 +681,7 @@ impl Op {
         let mut out = Vec::new();
         match self {
             Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } => out.push(*sketch),
+            Op::Loft { sections, .. } => out.extend_from_slice(sections),
             Op::Fillet { edges, .. } | Op::Chamfer { edges, .. } => edges.references(&mut out),
             Op::Pattern { of, .. } | Op::Mirror { of, .. } => out.extend_from_slice(of),
             Op::Shell { open: faces, .. } | Op::Draft { faces, .. } => out.extend(faces.iter().map(|f| f.feature)),
@@ -747,6 +753,7 @@ impl Op {
                     Primitive::Torus { major, minor } => out.extend([major, minor]),
                 }
             }
+            Op::Loft { .. } => {}
             Op::Sweep { path, .. } => {
                 for step in path {
                     match step {
@@ -1057,7 +1064,12 @@ impl Document {
     }
 
     fn check_sketch_refs(op: &Op, before: &[Feature]) -> Result<()> {
-        if let Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } = op {
+        let list: &[FeatureId] = match op {
+            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } => std::slice::from_ref(sketch),
+            Op::Loft { sections, .. } => sections,
+            _ => &[],
+        };
+        for sketch in list {
             if let Some(f) = before.iter().find(|f| f.id == *sketch) {
                 if !f.op.is_sketch() {
                     return Err(Error::InvalidInput(format!("f{} is a {}, not a sketch", sketch.0, f.op.kind())));
@@ -1199,6 +1211,12 @@ impl Document {
                     let sketch_key = sketch_keys.get(sketch).copied().unwrap_or(0);
                     hash_text(body_key ^ sketch_key.rotate_left(17), &own)
                 }
+                Op::Loft { sections, .. } => {
+                    let mixed = sections.iter().enumerate().fold(0u64, |sum, (k, id)| {
+                        sum ^ sketch_keys.get(id).copied().unwrap_or(0).rotate_left(17 + k as u32)
+                    });
+                    hash_text(body_key ^ mixed, &own)
+                }
                 _ => hash_text(body_key, &own),
             };
             let cached = self.cache.get(&feature.id).filter(|c| c.key == key).cloned();
@@ -1302,6 +1320,17 @@ impl Document {
                     .map(|(k, p)| Ok(with_region(revolve(p, &frame, a, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
                 applied(body.as_deref(), tools, *mode)
+            }
+            Op::Loft { sections, mode } => {
+                let outputs = sections.iter().map(&sketch_output).collect::<Result<Vec<_>>>()?;
+                let mut list = Vec::with_capacity(outputs.len());
+                for (id, out) in sections.iter().zip(&outputs) {
+                    match out.profiles.as_slice() {
+                        [one] => list.push((one, out.frame)),
+                        many => return Err(Error::InvalidInput(format!("a loft's section f{} must hold one outline, not {}", id.0, many.len()))),
+                    }
+                }
+                applied(body.as_deref(), vec![coreshape::loft::loft(&list, tag)?], *mode)
             }
             Op::Sweep { sketch, path, mode } => {
                 let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
@@ -2122,6 +2151,11 @@ pub fn op_value(op: &Op) -> Value {
             items.push(("mode", mode_value(*mode)));
             Value::obj(items)
         }
+        Op::Loft { sections, mode } => Value::obj(vec![
+            ("type", Value::str("loft")),
+            ("sections", Value::Arr(sections.iter().map(|s| Value::Num(s.0 as f64)).collect())),
+            ("mode", mode_value(*mode)),
+        ]),
         Op::Sweep { sketch, path, mode } => Value::obj(vec![
             ("type", Value::str("sweep")),
             ("sketch", Value::Num(sketch.0 as f64)),
@@ -2329,6 +2363,17 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 None => Placement::xy(0.0),
             };
             Ok(Op::Solid { primitive, at, mode: read_mode(v)? })
+        }
+        "loft" => {
+            with(&["type", "sections", "mode"])?;
+            let bad = || Error::InvalidInput("\"sections\" must be a list of feature ids".into());
+            let sections = field(v, "sections", "a loft")?
+                .as_array()
+                .ok_or_else(bad)?
+                .iter()
+                .map(|x| x.as_f64().filter(|n| n.fract() == 0.0 && *n >= 1.0 && *n < u32::MAX as f64).map(|n| FeatureId(n as u32)).ok_or_else(bad))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Op::Loft { sections, mode: read_mode(v)? })
         }
         "sweep" => {
             with(&["type", "sketch", "path", "mode"])?;

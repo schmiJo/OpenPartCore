@@ -32,11 +32,11 @@ fn moved_surface(s: &Surface, d: f64) -> Result<Surface> {
             Err(refuse(format!("offsetting by {d} shrinks a curved face away to nothing")))
         }
     };
-    if matches!(s, Surface::Extruded { .. } | Surface::Revolved { .. }) {
+    if matches!(s, Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. }) {
         return Err(Error::Unsupported("offset and shell on spline faces aren't available yet: an offset of a spline isn't a spline, and this kernel gives an exact answer or none".into()));
     }
     Ok(match *s {
-        Surface::Extruded { .. } | Surface::Revolved { .. } => unreachable!(),
+        Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. } => unreachable!(),
         Surface::Plane(f) => Surface::Plane(Frame { origin: f.origin + f.z * d, ..f }),
         Surface::Cylinder { frame, radius } => Surface::Cylinder { frame, radius: positive(radius + d)? },
         // Moving along a cone's slanted normal shifts it sideways by more than d.

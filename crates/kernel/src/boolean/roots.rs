@@ -38,6 +38,7 @@ fn surface_feature(s: &Surface, p: Vec3) -> f64 {
         }
         Surface::Torus { minor, .. } => minor,
         Surface::Extruded { ref curve, .. } => curve.min_radius(),
+        Surface::Free { ref patch, .. } => patch.min_radius(),
         Surface::Revolved { frame, ref curve } => {
             let l = frame.to_local(p);
             curve.min_radius().min(l.x.hypot(l.y).max(1e-3))

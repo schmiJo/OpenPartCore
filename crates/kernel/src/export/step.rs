@@ -47,6 +47,69 @@ fn quote(s: &str) -> String {
     out
 }
 
+/// A sphere for writing one face, with its poles and seam away from that face where that's possible.
+///
+/// STEP gives a sphere an axis, which means nothing to this kernel but a lot to a reader. A loop around a pole
+/// isn't closed in the reader's parameters, and OpenCASCADE repairs that by guessing which side of the loop the
+/// face is on. It guessed wrong on a trimmed sphere with an ordinary loop, reading the rest of the sphere instead.
+/// With no pole inside, a loop is plainly closed and there's nothing to guess. A whole hemisphere has no such
+/// axis, since every line through the center meets it, and it keeps the one it has, which reads fine.
+fn sphere_axis_off_face(body: &Body, index: &crate::boolean::classify::Index, f: usize) -> Option<Surface> {
+    let face = &body.faces[f];
+    let Surface::Sphere { frame, radius } = face.surface else {
+        return None;
+    };
+    let mut boundary = Vec::new();
+    for c in face.loops.iter().flatten() {
+        for k in 0..12 {
+            boundary.push((body.coedge_point(*c, k as f64 / 12.0) - frame.origin).normalized());
+        }
+    }
+    let on_face = |d: Vec3| index.locate_on_face(f, frame.origin + d * radius, 1e-6) != crate::boolean::classify::FaceLoc::Outside;
+    // Evenly spread directions, so the choice doesn't depend on the order anything happened in.
+    const CANDIDATES: usize = 200;
+    let mut best: Option<(f64, Vec3)> = None;
+    for k in 0..CANDIDATES {
+        let z = 1.0 - (k as f64 + 0.5) / CANDIDATES as f64;
+        let (s, c) = (k as f64 * 2.399963229728653).sin_cos();
+        let rho = (1.0 - z * z).max(0.0).sqrt();
+        let d = frame.x * (rho * c) + frame.y * (rho * s) + frame.z * z;
+        if on_face(d) || on_face(-d) {
+            continue;
+        }
+        let clearance = boundary.iter().fold(f64::INFINITY, |m, b| m.min(1.0 - b.dot(d).abs()));
+        if best.is_none_or(|b| clearance > b.0) {
+            best = Some((clearance, d));
+        }
+    }
+    let (clearance, axis) = best?;
+    // A pole almost touching the boundary would be no improvement.
+    if clearance < 0.005 {
+        return None;
+    }
+    // The seam runs through the frame's x, so put that on the far side from the face.
+    let middle = boundary.iter().fold(Vec3::ZERO, |m, b| m + *b);
+    let across = middle - axis * middle.dot(axis);
+    let x = if across.norm() > 1e-9 { -across.normalized() } else { axis.any_perpendicular() };
+    Some(Surface::Sphere { frame: Frame::new(frame.origin, axis, x), radius })
+}
+
+/// A knot vector as STEP wants it: multiplicities and distinct values.
+fn knot_lists(knots: &[f64]) -> (String, String) {
+    let (mut values, mut mults): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < knots.len() {
+        let mut j = i;
+        while j < knots.len() && knots[j] == knots[i] {
+            j += 1;
+        }
+        values.push(real(knots[i]));
+        mults.push((j - i).to_string());
+        i = j;
+    }
+    (mults.join(","), values.join(","))
+}
+
 impl Writer {
     fn entity(&mut self, body: &str) -> usize {
         let id = self.next;
@@ -71,21 +134,35 @@ impl Writer {
     }
 
     /// A B-spline curve, with the complex form STEP uses when it has weights.
+    fn patch(&mut self, frame: &crate::math::Frame, patch: &crate::patch::Patch) -> usize {
+        let (nu, nv) = patch.count();
+        let (du, dv) = patch.degree();
+        let mut rows = Vec::with_capacity(nu);
+        for i in 0..nu {
+            let row: Vec<String> = (0..nv).map(|j| format!("#{}", self.point(frame.to_world(patch.points()[i * nv + j])))).collect();
+            rows.push(format!("({})", row.join(",")));
+        }
+        let rows = rows.join(",");
+        let (mu, ku) = knot_lists(patch.knots().0);
+        let (mv, kv) = knot_lists(patch.knots().1);
+        if patch.is_polynomial() {
+            return self.entity(&format!(
+                "B_SPLINE_SURFACE_WITH_KNOTS('',{du},{dv},({rows}),.UNSPECIFIED.,.F.,.F.,.F.,({mu}),({mv}),({ku}),({kv}),.UNSPECIFIED.)"
+            ));
+        }
+        let weights: Vec<String> = (0..nu)
+            .map(|i| format!("({})", (0..nv).map(|j| real(patch.weights()[i * nv + j])).collect::<Vec<_>>().join(",")))
+            .collect();
+        self.entity(&format!(
+            "(BOUNDED_SURFACE() B_SPLINE_SURFACE({du},{dv},({rows}),.UNSPECIFIED.,.F.,.F.,.F.) B_SPLINE_SURFACE_WITH_KNOTS(({mu}),({mv}),({ku}),({kv}),.UNSPECIFIED.) GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_SURFACE(({})) REPRESENTATION_ITEM('') SURFACE())",
+            weights.join(",")
+        ))
+    }
+
     fn spline(&mut self, c: &crate::spline::Spline) -> usize {
         let ids: Vec<String> = c.points().iter().map(|&p| format!("#{}", self.point(p))).collect();
-        let (mut values, mut mults): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
-        let knots = c.knots();
-        let mut i = 0;
-        while i < knots.len() {
-            let mut j = i;
-            while j < knots.len() && knots[j] == knots[i] {
-                j += 1;
-            }
-            values.push(real(knots[i]));
-            mults.push((j - i).to_string());
-            i = j;
-        }
-        let (ids, mults, values) = (ids.join(","), mults.join(","), values.join(","));
+        let (mults, values) = knot_lists(c.knots());
+        let ids = ids.join(",");
         let degree = c.degree();
         if c.is_polynomial() {
             return self.entity(&format!("B_SPLINE_CURVE_WITH_KNOTS('',{degree},({ids}),.UNSPECIFIED.,.F.,.F.,({mults}),({values}),.UNSPECIFIED.)"));
@@ -152,6 +229,7 @@ impl Writer {
 
     fn surface(&mut self, s: &Surface) -> usize {
         match s {
+            Surface::Free { frame, patch } => self.patch(frame, patch),
             Surface::Extruded { frame, curve } => {
                 let lifted = curve.spline.mapped(|q| frame.point(q.x, q.y, 0.0));
                 let c = self.spline(&lifted);
@@ -283,11 +361,15 @@ pub fn write_step(body: &Body, name: &str) -> String {
     let is_void: Vec<bool> = (0..body.shells.len()).map(|s| shell_volume(body, s) < 0.0).collect();
 
     let uses = body.edge_uses();
+    let index = crate::boolean::classify::Index::new(body);
     let write_shell = |w: &mut Writer, shell: usize, invert: bool| -> usize {
         let mut faces = Vec::with_capacity(body.shells[shell].len());
         for f in connected_order(body, &body.shells[shell], &uses) {
             let face = &body.faces[f];
-            let surface = w.surface(&face.surface);
+            let surface = match sphere_axis_off_face(body, &index, f) {
+                Some(s) => w.surface(&s),
+                None => w.surface(&face.surface),
+            };
             let mut bounds = Vec::with_capacity(face.loops.len());
             for (l, lp) in face.loops.iter().enumerate() {
                 let oriented: Vec<String> = lp

@@ -270,6 +270,43 @@ fn face_integrals_with(body: &Body, face: &Face, reference: Vec3, along_edges: &
             }
             (flux / 3.0, area * sign)
         }
+        Surface::Free { patch, .. } => {
+            // The same as the general case below, with the inner integral stopping at the knots, where the
+            // surface is less smooth than a Gauss rule expects.
+            let (lo, hi) = body_chart_range(body, face);
+            let x_ref = (lo + hi) / 2.0;
+            let knots = patch.chart_breaks_x();
+            let rule = gauss_24();
+            let (mut flux, mut area) = (0.0, 0.0);
+            for lp in &face.loops {
+                for &c in lp {
+                    for_each_boundary_node(body, c, along_edges, |p, dp| {
+                        let (uv, duv) = chart_velocity(surface, chart, p, dp);
+                        if duv.y == 0.0 {
+                            return;
+                        }
+                        let (from, to) = (x_ref.min(uv.x), x_ref.max(uv.x));
+                        let sense = if uv.x >= x_ref { 1.0 } else { -1.0 };
+                        let mut stops = vec![from];
+                        stops.extend(knots.iter().copied().filter(|k| *k > from && *k < to));
+                        stops.push(to);
+                        let (mut h_flux, mut h_area) = (0.0, 0.0);
+                        for w in stops.windows(2) {
+                            let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
+                            for &(x, weight) in rule {
+                                let (q, sx, sy) = surface.chart_derivs(chart, v2(mid + half * x, uv.y));
+                                let n = sx.cross(sy);
+                                h_flux += weight * half * (q - reference).dot(n);
+                                h_area += weight * half * n.norm();
+                            }
+                        }
+                        flux += sense * h_flux * duv.y;
+                        area += sense * h_area * duv.y;
+                    });
+                }
+            }
+            (flux / 3.0, area * sign)
+        }
         _ => {
             let (lo, hi) = body_chart_range(body, face);
             let x_ref = (lo + hi) / 2.0;
@@ -340,7 +377,7 @@ pub fn mass_properties(body: &Body) -> MassProps {
         out.volume += v;
         out.area += a;
     }
-    let numeric = body.faces.iter().any(|f| matches!(f.surface, Surface::Extruded { .. } | Surface::Revolved { .. }))
+    let numeric = body.faces.iter().any(|f| matches!(f.surface, Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. }))
         || body.edges.iter().any(|e| matches!(e.curve, Curve::Sampled(_)));
     if numeric {
         let coarse: f64 = body.faces.iter().map(|f| face_integrals_with(body, f, reference, gauss_12()).0).sum();

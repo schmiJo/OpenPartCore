@@ -41,7 +41,7 @@ pub(crate) fn within_half_turn(surface: &Surface, points: &[Vec3]) -> bool {
     let limit = PI / 2.0 + 1e-6;
     let frame = surface.frame();
     match *surface {
-        Surface::Plane(_) | Surface::Extruded { .. } => true,
+        Surface::Plane(_) | Surface::Extruded { .. } | Surface::Free { .. } => true,
         Surface::Cylinder { .. } | Surface::Cone { .. } | Surface::Revolved { .. } => {
             let us: Vec<f64> = points
                 .iter()
@@ -174,7 +174,8 @@ fn merge_faces(body: Body) -> Result<Body> {
 fn one_surface_fits_both(a: &Surface, b: &Surface) -> bool {
     match (a, b) {
         (Surface::Extruded { curve: c, .. }, Surface::Extruded { curve: d, .. }) | (Surface::Revolved { curve: c, .. }, Surface::Revolved { curve: d, .. }) => c == d,
-        (Surface::Extruded { .. } | Surface::Revolved { .. }, _) | (_, Surface::Extruded { .. } | Surface::Revolved { .. }) => false,
+        (Surface::Free { patch: p, .. }, Surface::Free { patch: q, .. }) => p == q,
+        (Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. }, _) | (_, Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. }) => false,
         _ => true,
     }
 }

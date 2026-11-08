@@ -46,6 +46,15 @@ outline = Part.Wire([curve.toShape(), Part.makeLine(V(30, 2, 0), V(30, 20, 0)), 
 save("spline_prism", Part.Face(outline).extrude(V(0, 0, 5)))
 # Between two circles a loft is a true cone, which imports.
 save("loft_cone", Part.makeLoft([Part.Wire(Part.makeCircle(5)), Part.Wire(Part.makeCircle(9, V(0, 0, 12)))], True))
-# Through three it's free-form, which has to be refused by name.
+# Through three it's free-form.
 save("loft_free", Part.makeLoft([Part.Wire(Part.makeCircle(5)), Part.Wire(Part.makeCircle(9, V(0, 0, 12))), Part.Wire(Part.makeCircle(4, V(0, 0, 25)))], True, False))
+# Free-form with corners, so a face that isn't closed, over many knot intervals.
+def rect(w, h, z):
+    a, b, c, d = V(-w / 2, -h / 2, z), V(w / 2, -h / 2, z), V(w / 2, h / 2, z), V(-w / 2, h / 2, z)
+    return Part.Wire([Part.makeLine(a, b), Part.makeLine(b, c), Part.makeLine(c, d), Part.makeLine(d, a)])
+save("loft_rects", Part.makeLoft([rect(20, 14, 0), rect(10, 16, 10), rect(16, 8, 22), rect(12, 12, 30)], True))
+save("loft_rect_circle", Part.makeLoft([rect(20, 20, 0), Part.Wire(Part.makeCircle(7, V(0, 0, 20)))], True))
+# A hole cut through free-form walls, so that the file holds traced curves on these faces.
+blend = Part.makeLoft([Part.Wire(Part.makeCircle(9)), Part.Wire(Part.makeCircle(13, V(0, 0, 15))), Part.Wire(Part.makeCircle(7, V(0, 0, 30)))], True)
+save("loft_drilled", blend.cut(Part.makeCylinder(3, 60, V(-30, 0, 15), V(1, 0, 0))))
 report.close()

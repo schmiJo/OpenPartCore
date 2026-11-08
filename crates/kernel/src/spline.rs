@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::math::*;
 
 /// The highest degree allowed, which keeps evaluation free of allocation.
-pub const MAX_DEGREE: usize = 7;
+pub const MAX_DEGREE: usize = 16;
 /// Coefficients of the stationary polynomial at the highest degree: its degree is `3 p - 1`.
 const MAX_COEFFICIENTS: usize = 3 * MAX_DEGREE;
 
@@ -28,23 +28,23 @@ const KINK: f64 = 1e-7;
 
 /// A point in homogeneous form.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Hom {
-    a: Vec3,
-    w: f64,
+pub(crate) struct Hom {
+    pub(crate) a: Vec3,
+    pub(crate) w: f64,
 }
 
 impl Hom {
-    const ZERO: Hom = Hom { a: Vec3::ZERO, w: 0.0 };
+    pub(crate) const ZERO: Hom = Hom { a: Vec3::ZERO, w: 0.0 };
 
-    fn lerp(self, o: Hom, s: f64) -> Hom {
+    pub(crate) fn lerp(self, o: Hom, s: f64) -> Hom {
         Hom { a: self.a + (o.a - self.a) * s, w: self.w + (o.w - self.w) * s }
     }
 
-    fn of(p: Vec3, w: f64) -> Hom {
+    pub(crate) fn of(p: Vec3, w: f64) -> Hom {
         Hom { a: p * w, w }
     }
 
-    fn point(self) -> Vec3 {
+    pub(crate) fn point(self) -> Vec3 {
         self.a / self.w
     }
 }
@@ -276,7 +276,7 @@ fn single_root(g: &[f64]) -> f64 {
     (a + b) / 2.0
 }
 
-fn box_distance(p: Vec3, lo: Vec3, hi: Vec3) -> f64 {
+pub(crate) fn box_distance(p: Vec3, lo: Vec3, hi: Vec3) -> f64 {
     let d = v3((lo.x - p.x).max(p.x - hi.x).max(0.0), (lo.y - p.y).max(p.y - hi.y).max(0.0), (lo.z - p.z).max(p.z - hi.z).max(0.0));
     d.norm()
 }
@@ -644,6 +644,11 @@ impl Spline {
         best
     }
 
+    /// The curve as rational Bezier pieces: each knot interval and its control points in homogeneous form.
+    pub(crate) fn bezier_spans(&self) -> Vec<(f64, f64, Vec<Hom>)> {
+        self.spans.iter().map(|s| (s.t0, s.t1, s.h.clone())).collect()
+    }
+
     /// The same curve with its direction reversed, over the same parameter range.
     pub fn reversed(&self) -> Spline {
         let (u0, u1) = self.domain();
@@ -860,7 +865,7 @@ pub enum FacePiece {
     Curve(Spline),
 }
 
-fn find_knot_span(knots: &[f64], degree: usize, t: f64, count: usize) -> usize {
+pub(crate) fn find_knot_span(knots: &[f64], degree: usize, t: f64, count: usize) -> usize {
     if t >= knots[count] {
         // At the very end: the last interval with any length.
         let mut k = count - 1;
@@ -877,7 +882,7 @@ fn find_knot_span(knots: &[f64], degree: usize, t: f64, count: usize) -> usize {
     k
 }
 
-fn basis_functions(knots: &[f64], degree: usize, span: usize, t: f64) -> Vec<f64> {
+pub(crate) fn basis_functions(knots: &[f64], degree: usize, span: usize, t: f64) -> Vec<f64> {
     let mut out = vec![0.0; degree + 1];
     out[0] = 1.0;
     let (mut left, mut right) = (vec![0.0; degree + 1], vec![0.0; degree + 1]);

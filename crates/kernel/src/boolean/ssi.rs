@@ -105,6 +105,11 @@ pub fn coincident(a: &Surface, b: &Surface, size: f64) -> Option<bool> {
         }
         // A swept curve is the same surface as another if each one's curve lies on the other, where the
         // curves exist. That covers a rational circle swept into a true cylinder too.
+        // Two different patches can share part of their extent, but only the same patch in the same place is
+        // recognised. Anything else near it refuses as a tangency.
+        (Surface::Free { frame: f, patch: p }, Surface::Free { frame: g, patch: q }) => {
+            (f.origin.dist(g.origin) <= TOL && f.z.dot(g.z) > 1.0 - 1e-12 && f.x.dot(g.x) > 1.0 - 1e-12 && p == q).then_some(true)
+        }
         (Surface::Extruded { frame: f, curve: c }, Surface::Extruded { frame: g, curve: d }) => {
             if !parallel(f.z, g.z, size) {
                 return None;
@@ -195,7 +200,7 @@ fn meridian_of(s: &Surface, o: Vec3, z: Vec3) -> Option<Meridian> {
         Surface::Torus { frame, major, minor } => {
             Some(Meridian::Circle { c: v2(major, height(frame.origin)), r: minor })
         }
-        Surface::Extruded { .. } | Surface::Revolved { .. } => None,
+        Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. } => None,
     }
 }
 
@@ -580,6 +585,7 @@ fn surface_feature(s: &Surface) -> f64 {
         Surface::Torus { minor, .. } => minor,
         Surface::Extruded { ref curve, .. } => curve.min_radius(),
         Surface::Revolved { ref curve, .. } => curve.min_radius().min(curve.reach),
+        Surface::Free { ref patch, .. } => patch.min_radius(),
     }
 }
 

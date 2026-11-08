@@ -520,6 +520,7 @@ fn surface_name(s: &Surface) -> &'static str {
         Surface::Torus { .. } => "torus",
         Surface::Extruded { .. } => "extrusion",
         Surface::Revolved { .. } => "revolution",
+        Surface::Free { .. } => "free-form",
     }
 }
 
@@ -555,7 +556,7 @@ fn faces_value(body: &Body) -> R<Value> {
                 items.push(("major", num(major)));
                 items.push(("minor", num(minor)));
             }
-            Surface::Plane(_) | Surface::Extruded { .. } | Surface::Revolved { .. } => {}
+            Surface::Plane(_) | Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. } => {}
         }
         out.push(Value::obj(items));
     }

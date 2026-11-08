@@ -123,13 +123,21 @@ fn other_units_are_converted() {
 
 #[test]
 fn surfaces_it_cant_represent_are_refused_by_name_and_count() {
-    let spline_surface = SEAMED_CYLINDER.replace(
+    let other = SEAMED_CYLINDER.replace("#30=PLANE('',#9);", "#30=OFFSET_SURFACE('',#9,1.,.F.);");
+    let e = read_step(&other, 1).unwrap_err().to_string();
+    assert!(e.contains("1 on OFFSET_SURFACE"), "{e}");
+    assert!(e.contains("Planes, cylinders"), "{e}");
+}
+
+#[test]
+fn a_free_form_surface_with_a_pole_says_so() {
+    // Two rows of the same two points: it has no area, and so no normal.
+    let flat = SEAMED_CYLINDER.replace(
         "#30=PLANE('',#9);",
         "#30=B_SPLINE_SURFACE_WITH_KNOTS('',1,1,((#2,#3),(#2,#3)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);",
     );
-    let e = read_step(&spline_surface, 1).unwrap_err().to_string();
-    assert!(e.contains("1 on B_SPLINE_SURFACE"), "{e}");
-    assert!(e.contains("Planes, cylinders"), "{e}");
+    let e = read_step(&flat, 1).unwrap_err().to_string();
+    assert!(e.contains("pole"), "{e}");
 }
 
 #[test]

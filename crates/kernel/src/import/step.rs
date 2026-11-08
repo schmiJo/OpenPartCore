@@ -18,6 +18,7 @@ use crate::boolean::trace::{trace_faces, FaceChart};
 use crate::curve::Curve;
 use crate::error::{Error, Result};
 use crate::math::*;
+use crate::patch::Patch;
 use crate::spline::{PlaneCurve, Spline};
 use crate::surface::Surface;
 use crate::topo::{Body, Coedge, Edge, FaceTag};
@@ -321,6 +322,49 @@ impl File {
 }
 
 impl File {
+    /// A B-spline surface, in its plain form or spread over a complex instance's parts.
+    fn patch(&self, id: usize) -> Result<Patch> {
+        let knots_part = self.part(id, "B_SPLINE_SURFACE_WITH_KNOTS")?;
+        let complex = self.has(id, "B_SPLINE_SURFACE");
+        let (du, dv, rows, offset) = if complex {
+            let a = self.part(id, "B_SPLINE_SURFACE")?;
+            (File::number(a.first())?, File::number(a.get(1))?, a.get(2), 0)
+        } else {
+            (File::number(knots_part.get(1))?, File::number(knots_part.get(2))?, knots_part.get(3), 8)
+        };
+        let expand = |mults: Vec<f64>, values: Vec<f64>| -> Vec<f64> {
+            let mut out = Vec::new();
+            for (m, k) in mults.iter().zip(&values) {
+                out.extend(std::iter::repeat_n(*k, *m as usize));
+            }
+            out
+        };
+        let knots_u = expand(File::numbers(knots_part.get(offset))?, File::numbers(knots_part.get(offset + 2))?);
+        let knots_v = expand(File::numbers(knots_part.get(offset + 1))?, File::numbers(knots_part.get(offset + 3))?);
+        let rows = File::list(rows)?;
+        let nu = rows.len();
+        let mut points = Vec::new();
+        let mut nv = 0;
+        for row in rows {
+            let line = File::list(Some(row))?;
+            nv = line.len();
+            for p in line {
+                points.push(self.point(File::id(Some(p))?)?);
+            }
+        }
+        let weights = match self.part(id, "RATIONAL_B_SPLINE_SURFACE") {
+            Ok(a) => {
+                let mut all = Vec::with_capacity(points.len());
+                for row in File::list(a.first())? {
+                    all.extend(File::numbers(Some(row))?);
+                }
+                all
+            }
+            Err(_) => vec![1.0; points.len()],
+        };
+        Patch::new((du as usize, dv as usize), (knots_u, knots_v), (nu, nv), points, weights)
+    }
+
     /// The curve a swept surface is swept from, as a spline: a conic is exactly one.
     fn basis_curve(&self, id: usize) -> Result<Spline> {
         match self.name(id) {
@@ -409,13 +453,34 @@ enum Family {
 
 /// Whether a point has no phase, being on the axis: an apex or a pole.
 fn on_axis(surface: &Surface, family: Family, p: Vec3) -> bool {
+    if matches!(surface, Surface::Free { .. }) {
+        return false;
+    }
     let l = surface.frame().to_local(p);
     family == Family::AroundAxis && l.x.hypot(l.y) <= 1e-7
+}
+
+/// A closed free-form surface's direction: its parameter, as an angle, which is what its cuts work in.
+fn free_phase(patch: &Patch, family: Family, l: Vec3) -> f64 {
+    let foot = patch.foot(l);
+    let ((u0, u1), (v0, v1)) = patch.domain();
+    let (x, a, b) = if family == Family::AroundAxis { (foot.u, u0, u1) } else { (foot.v, v0, v1) };
+    (x - a) / (b - a) * TAU - PI
+}
+
+/// The parameter at a free-form surface's phase.
+fn free_parameter(patch: &Patch, family: Family, phase: f64) -> f64 {
+    let ((u0, u1), (v0, v1)) = patch.domain();
+    let (a, b) = if family == Family::AroundAxis { (u0, u1) } else { (v0, v1) };
+    a + (b - a) * ((phase + PI) / TAU).clamp(0.0, 1.0)
 }
 
 fn phase(surface: &Surface, family: Family, p: Vec3) -> f64 {
     let f = surface.frame();
     let l = f.to_local(p);
+    if let Surface::Free { patch, .. } = surface {
+        return free_phase(patch, family, l);
+    }
     match (family, surface) {
         (Family::AroundTube, Surface::Torus { major, .. }) => l.z.atan2(l.x.hypot(l.y) - major),
         _ => l.y.atan2(l.x),
@@ -425,6 +490,12 @@ fn phase(surface: &Surface, family: Family, p: Vec3) -> f64 {
 /// The surface's curve at a fixed value of the phase, with parameters running along the other direction.
 fn wall_curve(surface: &Surface, family: Family, a: f64) -> Option<(Curve, f64, f64)> {
     let f = *surface.frame();
+    if let Surface::Free { patch, .. } = surface {
+        let at = free_parameter(patch, family, wrap_pi(a));
+        let curve = patch.iso_curve(at, family == Family::AroundAxis).ok()?.mapped(|q| f.to_world(q));
+        let (t0, t1) = curve.domain();
+        return Some((Curve::Spline(Arc::new(curve)), t0, t1));
+    }
     let radial = f.x * a.cos() + f.y * a.sin();
     match (family, surface) {
         (Family::AroundAxis, Surface::Cylinder { radius, .. }) => Some((Curve::Line { origin: f.origin + radial * *radius, dir: f.z }, -1e9, 1e9)),
@@ -603,7 +674,12 @@ fn goes_round(b: &Builder, face: &RawFace, family: Family) -> bool {
 
 /// Whether a family needs cutting on this face, and at which two phases.
 fn walls_for(b: &Builder, face: &RawFace, family: Family) -> Option<[f64; 2]> {
-    if family == Family::AroundTube && !matches!(face.surface, Surface::Torus { .. }) {
+    if let Surface::Free { patch, .. } = &face.surface {
+        // Only one that closes up can go round.
+        if !patch.closes_up(family == Family::AroundTube) {
+            return None;
+        }
+    } else if family == Family::AroundTube && !matches!(face.surface, Surface::Torus { .. }) {
         return None;
     }
     if matches!(face.surface, Surface::Plane(_) | Surface::Extruded { .. }) {
@@ -652,6 +728,56 @@ fn walls_for(b: &Builder, face: &RawFace, family: Family) -> Option<[f64; 2]> {
     // Through the middle of what it covers, on an irregular angle so as not to land on a vertex.
     let center = angular_center(&phases) + 0.137;
     Some([center, center + PI])
+}
+
+/// The surface for the half turn of phase from `start`.
+fn sector_surface(surface: &Surface, family: Family, start: f64) -> Result<Surface> {
+    let Surface::Free { frame, patch } = surface else {
+        return Ok(surface.clone());
+    };
+    let mut lo = wrap_pi(start);
+    if lo > PI - 1e-6 {
+        lo -= TAU;
+    }
+    let hi = lo + PI;
+    if hi > PI + 1e-6 {
+        return Err(Error::Unsupported("a free-form face that runs across its surface's seam".into()));
+    }
+    let (u, v) = patch.domain();
+    let part = (free_parameter(patch, family, lo), free_parameter(patch, family, hi));
+    let own = if family == Family::AroundAxis { patch.restricted(part, v)? } else { patch.restricted(u, part)? };
+    Ok(Surface::Free { frame: *frame, patch: Arc::new(own) })
+}
+
+/// A face cut from a surface that closes up gets a patch of only its part. On the whole surface, a point on the
+/// seam is at both ends of the parameters, and a chart can't say which end this face means.
+fn keep_own_part_of_closed_patch(b: &Builder, face: &mut RawFace) -> Result<()> {
+    let Surface::Free { frame, patch } = &face.surface else {
+        return Ok(());
+    };
+    let points = b.boundary_points(face);
+    let range = |family: Family| -> Result<(f64, f64)> {
+        let ((u0, u1), (v0, v1)) = patch.domain();
+        if !patch.closes_up(family == Family::AroundTube) {
+            return Ok(if family == Family::AroundAxis { (u0, u1) } else { (v0, v1) });
+        }
+        let phases: Vec<f64> = points.iter().map(|p| phase(&face.surface, family, *p)).collect();
+        let center = angular_center(&phases);
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for a in &phases {
+            let at = center + wrap_pi(a - center);
+            lo = lo.min(at);
+            hi = hi.max(at);
+        }
+        if lo < -PI - 1e-6 || hi > PI + 1e-6 {
+            return Err(Error::Unsupported("a free-form face that runs across its surface's seam".into()));
+        }
+        Ok((free_parameter(patch, family, lo), free_parameter(patch, family, hi)))
+    };
+    let (u, v) = (range(Family::AroundAxis)?, range(Family::AroundTube)?);
+    let own = patch.restricted(u, v)?;
+    face.surface = Surface::Free { frame: *frame, patch: Arc::new(own) };
+    Ok(())
 }
 
 /// How wide the largest arc a set of angles covers is.
@@ -737,7 +863,7 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
             }
         }
         stops.sort_by(|x, y| x.0.total_cmp(&y.0));
-        let closes_on_itself = (matches!(surface, Surface::Torus { .. }) && family == Family::AroundAxis) || family == Family::AroundTube;
+        let closes_on_itself = !matches!(surface, Surface::Free { .. }) && ((matches!(surface, Surface::Torus { .. }) && family == Family::AroundAxis) || family == Family::AroundTube);
         let mut intervals: Vec<(f64, usize, f64, usize)> = Vec::new();
         let mut end_at = |b: &mut Builder, t: f64| -> usize {
             let p = curve.eval(t);
@@ -842,6 +968,10 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
                 (0..=8).map(move |i| (e, i)).map(|(e, i)| e.curve.eval(e.t0 + (e.t1 - e.t0) * i as f64 / 8.0))
             })
             .collect();
+        // On a closed free-form surface, each sector gets a patch of its own before anything is traced, since
+        // on the whole surface a point on the seam is at both ends of the parameters.
+        let own = sector_surface(surface, family, walls[0] + PI * sector as f64)?;
+        let surface = &own;
         let mut chart = surface.fit_chart(&points);
         if family == Family::AroundAxis {
             chart.u0 = if matches!(surface, Surface::Plane(_)) { chart.u0 } else { wrap_pi(mid) };
@@ -1001,6 +1131,19 @@ fn split_extruded(b: &mut Builder, faces: Vec<RawFace>) -> Result<Vec<RawFace>> 
 fn move_phase(surface: &Surface, family: Family, p: Vec3, h: f64) -> Vec3 {
     let f = surface.frame();
     let l = f.to_local(p);
+    if let Surface::Free { patch, .. } = surface {
+        let foot = patch.foot(l);
+        let ((u0, u1), (v0, v1)) = patch.domain();
+        // Past the end of a surface that closes up is back at its start.
+        let (u, v) = if family == Family::AroundAxis {
+            let u = foot.u + h / TAU * (u1 - u0);
+            (if u > u1 { u - (u1 - u0) } else { u }, foot.v)
+        } else {
+            let v = foot.v + h / TAU * (v1 - v0);
+            (foot.u, if v > v1 { v - (v1 - v0) } else { v })
+        };
+        return f.to_world(patch.eval(u, v));
+    }
     match (family, surface) {
         (Family::AroundTube, Surface::Torus { major, .. }) => {
             let rho = l.x.hypot(l.y);
@@ -1027,6 +1170,10 @@ struct Reader<'a> {
 impl Reader<'_> {
     fn surface(&self, id: usize) -> Result<Surface> {
         let f = self.file;
+        if f.has(id, "B_SPLINE_SURFACE_WITH_KNOTS") {
+            let patch = f.patch(id)?;
+            return Ok(Surface::Free { frame: Frame::WORLD, patch: Arc::new(patch) });
+        }
         Ok(match f.name(id) {
             "PLANE" => Surface::Plane(f.placement(File::id(f.part(id, "PLANE")?.get(1))?)?),
             "CYLINDRICAL_SURFACE" => {
@@ -1297,7 +1444,7 @@ fn single_piece(flat: &Spline, what: &str) -> Result<()> {
 
 /// Everything that can't be imported, named and counted.
 fn unsupported_surfaces(file: &File, shells: &[usize]) -> Vec<(String, usize)> {
-    let known = ["PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE", "SPHERICAL_SURFACE", "TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE", "SURFACE_OF_LINEAR_EXTRUSION", "SURFACE_OF_REVOLUTION"];
+    let known = ["B_SPLINE_SURFACE_WITH_KNOTS", "PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE", "SPHERICAL_SURFACE", "TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE", "SURFACE_OF_LINEAR_EXTRUSION", "SURFACE_OF_REVOLUTION"];
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for &s in shells {
         let Ok(list) = file.part(s, "CLOSED_SHELL").and_then(|a| File::list(a.get(1))) else { continue };
@@ -1551,6 +1698,10 @@ fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Re
             }
         }
         faces = next;
+    }
+
+    for face in &mut faces {
+        keep_own_part_of_closed_patch(&b, face)?;
     }
 
     // Any closed edge left, on a face that didn't need cutting: a plane's circle whose neighbour was cut
