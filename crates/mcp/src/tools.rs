@@ -316,7 +316,7 @@ impl Session {
                 for s in &o.steps {
                     let built = matches!(s.state, StepState::Rebuilt | StepState::Reused);
                     // Copies keep the names of what they copied, so these have no faces of their own.
-                    let names_none = matches!(s.kind, "sketch" | "constrained_sketch" | "pattern" | "mirror");
+                    let names_none = matches!(s.kind, "sketch" | "constrained_sketch" | "pattern" | "mirror" | "offset" | "draft");
                     if built && !names_none && !body.faces.iter().any(|f| f.tag.feature == s.id.0) {
                         notes.push(Value::str(format!("f{} ({}) left no faces on the solid, so it may not have touched it", s.id.0, s.name)));
                     }

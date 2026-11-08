@@ -11,6 +11,8 @@ It runs natively and in the browser through WebAssembly.
 - **Modelling:** 2D profiles that extrude and revolve, and union, subtract and intersect
   on all five surface types, including coplanar and touching contacts.
 - **Blends:** constant-radius fillets and chamfers on straight and circular edges.
+- **More modelling:** many tools in one Boolean, patterns, mirror, sweeps along lines and arcs,
+  offset, shell and draft, all on the same exact surfaces.
 - **Documents:** parameters and features as plain data, saved as readable JSON. Features can
   be edited, suppressed, deleted and reordered. References go by name, and a rebuild reuses
   every step whose inputs didn't change.
@@ -99,6 +101,7 @@ The file format is described in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
 | `crates/kernel/src/profile.rs`, `build.rs` | Sketch profiles, extrude, revolve, primitives |
 | `crates/kernel/src/boolean/` | Root finding, intersections, face tracing, classification, cleanup |
 | `crates/kernel/src/blend.rs` | Fillets and chamfers |
+| `crates/kernel/src/multi.rs`, `tweak.rs` | Many tools at once, sweeps; offset, shell and draft |
 | `crates/kernel/src/mass.rs` | Volume and area from the B-rep through Green's theorem |
 | `crates/kernel/src/tess/` | Exact-predicate triangulator and meshing |
 | `crates/kernel/src/export/` | STL and STEP |

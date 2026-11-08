@@ -107,10 +107,34 @@ flange 6, plate 11, crossed cylinders 7, and stress 11 (always the deliberate kn
 Most refusals are dimensions that truly don't fit. The rest are exact tangencies, for example
 crossed cylinders whose radius difference equals the axis offset.
 
+## Offset, shell and draft
+
+These keep a body's topology and move its surfaces, so they are exact, but:
+
+- **A change big enough to alter the topology is refused,** such as an offset that makes a small face vanish or
+  closes a hole. Commercial kernels restructure the neighbours. This one says the change is too big.
+- **Outward offsets keep sharp edges sharp,** meeting further out. There are no rounded joins.
+- **Faces that meet smoothly must move together.** Shelling with one of a smooth pair open is refused, as is
+  drafting half of one.
+- **Draft takes planes along the pull and cylinders on it.** Spheres, cones and tori aren't draftable, and neither is a
+  smooth edge that isn't straight, so a fillet running around the top of a prism blocks drafting its walls.
+- **Offset walls aren't checked against each other beyond the edges.** A wall that would pass through a distant
+  part of the same body isn't caught by the offset itself. In a shell, the cavity's vertices must lie inside the part, and the
+  Boolean's own checks apply. Other cases have little test coverage.
+
+Checked in OpenCASCADE: `offset_out` and `offset_in` on a fully rounded box match its own `makeOffsetShape` volumes (12497.7143
+and 5404.3606), and all the results read as valid solids.
+
+## Many tools at once
+
+Tools go in together if their bounding boxes don't touch, and are joined first if they do, one by one. So heavily overlapping tools
+are no faster than before. 400 holes: 0.77 s at once, 7.9 s one by one, and 19.7 s in OpenCASCADE one by one. 1600 holes: 6.9 s.
+
 ## Documents
 
 - Each feature keeps one cached result, so switching back and forth between two states recomputes
   whatever changed each time.
+- A copy from a pattern or mirror keeps the names of what it copied, so a name covers them all.
 - All patches made by one fillet or chamfer feature share a face name. A name can also cover several
   pieces of a face split by a later feature. Selecting by name takes all of them; combine it with
   `near` or `in_box` to pick one.

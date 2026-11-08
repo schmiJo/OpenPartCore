@@ -882,7 +882,7 @@ fn a_sweep_feature_follows_its_path_and_saves() {
 
 #[test]
 fn patterns_and_mirrors_save_and_refuse_with_reasons() {
-    let (mut doc, e, drill) = plate_with_hole();
+    let (mut doc, _, drill) = plate_with_hole();
     doc.with(Op::Pattern { of: vec![drill], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 2.0.into(), spacing: 20.0.into() } });
     doc.with(Op::Pattern { of: vec![drill], along: PatternPath::Circular { center: point3(50.0, 20.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: 2.0.into(), degrees: 360.0.into() } });
     doc.with(Op::Mirror { of: vec![], point: point3(0.0, 0.0, 5.0), normal: point3(0.0, 0.0, 1.0) });
@@ -919,4 +919,61 @@ fn patterns_and_mirrors_save_and_refuse_with_reasons() {
     let m = late.with(Op::Mirror { of: vec![], point: point3(0.0, 0.0, 0.0), normal: point3(0.0, 0.0, 0.0) });
     let _ = m;
     assert!(late.rebuild(None).failed.is_some());
+}
+
+// ----- Offset, shell and draft -----
+
+#[test]
+fn offset_shell_and_draft_work_as_features_and_follow_dimensions() {
+    let mut doc = Document::new();
+    doc.set_parameter("w", 40.0).unwrap();
+    doc.set_parameter("wall", 2.0).unwrap();
+    let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::centered("w", "30"))]));
+    let e = doc.with(Op::extrude(s, 0.0, 20.0, Mode::Add));
+    let tray = doc.with(Op::Shell { open: vec![e.end_cap()], thickness: "wall".into() });
+    let want = |w: f64, t: f64| w * 30.0 * 20.0 - (w - 2.0 * t) * (30.0 - 2.0 * t) * (20.0 - t);
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - want(40.0, 2.0)).abs() < 1e-8, "{}", vol(&o));
+    // The inner floor has a name of its own, and a fillet can find it.
+    let body = o.body.unwrap();
+    assert!(body.faces.iter().any(|f| f.tag == tray.start_cap().tag()), "{:?}", face_names(&body));
+    // The opened face remains as the rim around the opening, one loop inside another.
+    let rim = body.faces.iter().find(|f| f.tag == e.end_cap().tag()).expect("the rim");
+    assert_eq!(rim.loops.len(), 2);
+    for (w, t) in [(60.0, 2.0), (60.0, 3.5)] {
+        doc.set_parameter("w", w).unwrap();
+        doc.set_parameter("wall", t).unwrap();
+        let o = doc.rebuild(None);
+        assert!(o.failed.is_none(), "{:?}", o.steps);
+        assert!((vol(&o) - want(w, t)).abs() < 1e-8, "{}", vol(&o));
+    }
+    // Walls too thick for the part are refused, with the last good solid kept.
+    doc.set_parameter("wall", 16.0).unwrap();
+    let o = doc.rebuild(None);
+    assert_eq!(o.failed, Some(2), "{:?}", o.steps);
+    assert!(o.body.is_some());
+    doc.set_parameter("wall", 2.0).unwrap();
+
+    let mut d = Document::new();
+    let s = d.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::centered("20", "20"))]));
+    let e = d.with(Op::extrude(s, 0.0, 10.0, Mode::Add));
+    let sides: Vec<FaceRef> = (0..4).map(|i| e.side(i)).collect();
+    d.with(Op::Draft { faces: sides, pull: point3(0.0, 0.0, 1.0), neutral: point3(0.0, 0.0, 0.0), degrees: 5.0.into() });
+    d.with(Op::Offset { distance: 1.0.into() });
+    let o = d.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    let text = d.save_text();
+    let mut back = Document::load_text(&text).unwrap();
+    assert_eq!(back.save_text(), text);
+    assert_eq!(vol(&back.rebuild(None)).to_bits(), vol(&d.rebuild(None)).to_bits());
+    // A name that's gone says so.
+    let mut d = Document::new();
+    let s = d.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::centered("20", "20"))]));
+    let e = d.with(Op::extrude(s, 0.0, 10.0, Mode::Add));
+    d.with(Op::Shell { open: vec![e.side(99)], thickness: 1.0.into() });
+    match &d.rebuild(None).steps[2].state {
+        StepState::Failed(why) => assert!(why.contains("no longer exists"), "{why}"),
+        other => panic!("{other:?}"),
+    }
 }

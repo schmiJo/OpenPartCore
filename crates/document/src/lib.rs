@@ -14,7 +14,7 @@
 //! changes, edits, suppression and reordering alike.
 
 use coreshape::blend::{chamfer, fillet_with, BlendOptions};
-use coreshape::boolean::{boolean_with, BoolOp, Checks};
+use coreshape::boolean::BoolOp;
 use coreshape::multi::{boolean_many, merged_tools, sweep, PathStep};
 use coreshape::build::{
     box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus, SLOT_END_CAP, SLOT_SEG_BASE, SLOT_START_CAP,
@@ -23,6 +23,7 @@ use coreshape::error::{Error, Result};
 use coreshape::math::*;
 use coreshape::profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
 use coreshape::topo::{Body, FaceTag};
+use coreshape::tweak::{draft, offset, shell};
 pub use coreshape_sketch::expr::{self, Env, Expr};
 pub use coreshape_sketch::json::{self, Value};
 use std::collections::{HashMap, HashSet};
@@ -529,6 +530,14 @@ pub enum Op {
     /// Reflects earlier features, or the whole body if `of` is empty, across a plane, adding them to
     /// the originals. A reflection keeps names too.
     Mirror { of: Vec<FeatureId>, point: Point3, normal: Point3 },
+    /// Moves every face outward by a distance, or inward if negative. Sharp edges stay sharp.
+    Offset { distance: Expr },
+    /// Hollows the body to walls of a thickness, leaving named faces open. An inner wall is named
+    /// for this feature, with the slot of the face it follows: `f9:side.3` lies behind `f2:side.3`.
+    Shell { open: Vec<FaceRef>, thickness: Expr },
+    /// Tapers named faces along a pull direction, keeping them in place on the neutral plane through
+    /// `neutral`. A positive angle narrows the part along the pull, and widens a hole.
+    Draft { faces: Vec<FaceRef>, pull: Point3, neutral: Point3, degrees: Expr },
 }
 
 /// One step along a sweep's path. See `coreshape::PathStep`.
@@ -587,6 +596,9 @@ impl Op {
             Op::Sweep { .. } => "sweep",
             Op::Pattern { .. } => "pattern",
             Op::Mirror { .. } => "mirror",
+            Op::Offset { .. } => "offset",
+            Op::Shell { .. } => "shell",
+            Op::Draft { .. } => "draft",
         }
     }
 
@@ -606,6 +618,9 @@ impl Op {
             Op::Sweep { .. } => "Sweep",
             Op::Pattern { .. } => "Pattern",
             Op::Mirror { .. } => "Mirror",
+            Op::Offset { .. } => "Offset",
+            Op::Shell { .. } => "Shell",
+            Op::Draft { .. } => "Draft",
         }
     }
 
@@ -616,6 +631,7 @@ impl Op {
             Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } => out.push(*sketch),
             Op::Fillet { edges, .. } | Op::Chamfer { edges, .. } => edges.references(&mut out),
             Op::Pattern { of, .. } | Op::Mirror { of, .. } => out.extend_from_slice(of),
+            Op::Shell { open: faces, .. } | Op::Draft { faces, .. } => out.extend(faces.iter().map(|f| f.feature)),
             _ => {}
         }
         out.sort();
@@ -703,6 +719,13 @@ impl Op {
             Op::Mirror { point, normal, .. } => {
                 out.extend(point.iter());
                 out.extend(normal.iter());
+            }
+            Op::Offset { distance } => out.push(distance),
+            Op::Shell { thickness, .. } => out.push(thickness),
+            Op::Draft { pull, neutral, degrees, .. } => {
+                out.extend(pull.iter());
+                out.extend(neutral.iter());
+                out.push(degrees);
             }
             Op::Fillet { edges, radius, .. } => {
                 edges.collect_exprs(&mut out);
@@ -1264,6 +1287,24 @@ impl Document {
                 };
                 applied(body.as_deref(), vec![made], *mode)
             }
+            Op::Offset { distance } => {
+                let current = body.ok_or_else(|| Error::InvalidInput("an offset needs a body to work on".into()))?;
+                Ok(solid(offset(&current, num(distance, env)?)?))
+            }
+            Op::Shell { open, thickness } => {
+                let current = body.ok_or_else(|| Error::InvalidInput("a shell needs a body to work on".into()))?;
+                let faces = named_faces(&current, open)?;
+                Ok(solid(shell(&current, &faces, num(thickness, env)?, tag)?))
+            }
+            Op::Draft { faces, pull, neutral, degrees } => {
+                let current = body.ok_or_else(|| Error::InvalidInput("a draft needs a body to work on".into()))?;
+                let list = named_faces(&current, faces)?;
+                if list.is_empty() {
+                    return Err(Error::InvalidInput("a draft needs at least one face".into()));
+                }
+                let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
+                Ok(solid(draft(&current, &list, at(pull)?, at(neutral)?, num(degrees, env)?.to_radians())?))
+            }
             Op::Fillet { edges, radius, propagate } => {
                 let current = body.ok_or_else(|| Error::InvalidInput("a fillet needs a body to work on".into()))?;
                 let list = select_edges(edges, &current, env)?;
@@ -1497,6 +1538,20 @@ fn pattern_moves(along: &PatternPath, env: &Env) -> Result<Vec<Frame>> {
             (1..n).map(|k| Frame::rotation(c, a, step * k as f64)).collect()
         }
     })
+}
+
+/// The faces of a body that go by these names. A name with no faces is an error, since a change that
+/// removed a face a later feature needs should say so.
+fn named_faces(body: &Body, names: &[FaceRef]) -> Result<Vec<usize>> {
+    let mut out = Vec::new();
+    for name in names {
+        let before = out.len();
+        out.extend(body.faces.iter().enumerate().filter(|(_, f)| f.tag == name.tag()).map(|(i, _)| i));
+        if out.len() == before {
+            return Err(Error::InvalidInput(format!("the face {} no longer exists in the model", name.name())));
+        }
+    }
+    Ok(out)
 }
 
 /// The edges of a body a selection picks out.
@@ -1978,6 +2033,19 @@ pub fn op_value(op: &Op) -> Value {
             ("point", point3_value(point)),
             ("normal", point3_value(normal)),
         ]),
+        Op::Offset { distance } => Value::obj(vec![("type", Value::str("offset")), ("distance", expr_value(distance))]),
+        Op::Shell { open, thickness } => Value::obj(vec![
+            ("type", Value::str("shell")),
+            ("open", face_list_value(open)),
+            ("thickness", expr_value(thickness)),
+        ]),
+        Op::Draft { faces, pull, neutral, degrees } => Value::obj(vec![
+            ("type", Value::str("draft")),
+            ("faces", face_list_value(faces)),
+            ("pull", point3_value(pull)),
+            ("neutral", point3_value(neutral)),
+            ("degrees", expr_value(degrees)),
+        ]),
         Op::Fillet { edges, radius, propagate } => Value::obj(vec![
             ("type", Value::str("fillet")),
             ("edges", edge_select_value(edges)),
@@ -1989,6 +2057,18 @@ pub fn op_value(op: &Op) -> Value {
             ("edges", edge_select_value(edges)),
             ("distance", expr_value(distance)),
         ]),
+    }
+}
+
+fn face_list_value(list: &[FaceRef]) -> Value {
+    Value::Arr(list.iter().map(|f| Value::str(f.name())).collect())
+}
+
+fn read_face_list(v: &Value, key: &str) -> Result<Vec<FaceRef>> {
+    let bad = || Error::InvalidInput(format!("\"{key}\" must be a list of face names"));
+    match v.get(key) {
+        None => Ok(Vec::new()),
+        Some(list) => list.as_array().ok_or_else(bad)?.iter().map(|n| n.as_str().ok_or_else(bad).and_then(FaceRef::parse)).collect(),
     }
 }
 
@@ -2147,6 +2227,23 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 normal: read_point3(field(v, "normal", "a mirror")?)?,
             })
         }
+        "offset" => {
+            with(&["type", "distance"])?;
+            Ok(Op::Offset { distance: expr_field(v, "distance", "an offset")? })
+        }
+        "shell" => {
+            with(&["type", "open", "thickness"])?;
+            Ok(Op::Shell { open: read_face_list(v, "open")?, thickness: expr_field(v, "thickness", "a shell")? })
+        }
+        "draft" => {
+            with(&["type", "faces", "pull", "neutral", "degrees"])?;
+            Ok(Op::Draft {
+                faces: read_face_list(v, "faces")?,
+                pull: v.get("pull").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 1.0)),
+                neutral: v.get("neutral").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
+                degrees: expr_field(v, "degrees", "a draft")?,
+            })
+        }
         "fillet" => {
             with(&["type", "edges", "radius", "propagate"])?;
             Ok(Op::Fillet {
@@ -2163,7 +2260,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::Chamfer { edges: read_edge_select(field(v, "edges", "a chamfer")?)?, distance: expr_field(v, "distance", "a chamfer")? })
         }
         other => Err(Error::InvalidInput(format!(
-            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, sweep, solid, pattern, mirror, fillet or chamfer"
+            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, sweep, solid, pattern, mirror, fillet, chamfer, offset, shell or draft"
         ))),
     }
 }

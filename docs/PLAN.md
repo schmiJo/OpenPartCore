@@ -43,13 +43,12 @@ oracle, through a neighbouring FreeCAD build, read-only.
 | M7 | Published demos and a known-failures list | Done, except testing on a real iPhone |
 | M8 | Sketch constraint solver, checked against PlaneGCS | Done, see `SKETCH_SOLVER.md` |
 | M9 | MCP server and offscreen rendering | Done, except connecting a real MCP client, see `MCP.md` |
+| M10 | Multi-tool Booleans, patterns, mirror, sweep, offset, shell, draft | Done, with the limits in `KNOWN_LIMITS.md` |
 
 ## Not planned yet
 
-NURBS surfaces and Booleans on them, STEP import, variable-radius fillets, general vertex
-blends, assemblies, and drawings.
+STEP import, variable-radius fillets, general vertex blends, assemblies, and drawings.
 
 ## Next, in order
 
-1. Multi-tool Booleans, mirror, patterns, shell and offset, draft, sweep on lines and arcs.
-2. A NURBS design note before any NURBS code: the distance-function certificates don't carry over.
+1. Decide on NURBS: see [NURBS_DESIGN.md](NURBS_DESIGN.md). No NURBS code exists yet.

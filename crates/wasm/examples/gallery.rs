@@ -104,7 +104,34 @@ fn extras() -> Vec<(&'static str, Result<Body>)> {
         ];
         sweep(&section, &Frame::WORLD, &path, 1)
     };
+    let rounded = {
+        let b = box_solid(&Frame::WORLD, 30.0, 20.0, 15.0, 1).unwrap();
+        let all: Vec<usize> = (0..b.edges.len()).collect();
+        fillet(&b, &all, 3.0, 2).unwrap()
+    };
+    let top_of = |b: &Body| b.faces.iter().position(|f| f.tag.slot == 1).unwrap();
+    let tray = {
+        let b = extrude(&Profile::new(Wire::rounded_rect(60.0, 40.0, 8.0)), &Frame::WORLD, 15.0, 1).unwrap();
+        let top = top_of(&b);
+        shell(&b, &[top], 2.0, 9)
+    };
+    let tapered = {
+        let b = extrude(&Profile::new(Wire::rounded_rect(60.0, 40.0, 8.0)).with_hole(Wire::circle(v2(0.0, 0.0), 6.0)), &Frame::WORLD, 10.0, 1).unwrap();
+        let walls: Vec<usize> = (0..b.faces.len()).filter(|&f| b.faces[f].tag.slot >= 2).collect();
+        draft(&b, &walls, Vec3::Z, Vec3::ZERO, 4f64.to_radians())
+    };
+    let offset_traced = {
+        let a = cylinder(&Frame::translation(v3(0.0, 0.0, -20.0)), 8.0, 40.0, 1).unwrap();
+        let b = cylinder(&Frame::new(v3(-20.0, 1.5, 0.0), Vec3::X, Vec3::Y), 5.0, 40.0, 2).unwrap();
+        offset(&union(&a, &b).unwrap(), 0.5)
+    };
     vec![
+        ("offset_out", offset(&rounded, 1.5)),
+        ("offset_in", offset(&rounded, -1.5)),
+        ("offset_traced", offset_traced),
+        ("shell_closed", shell(&rounded, &[], 1.5, 9)),
+        ("shell_tray", tray),
+        ("draft_rounded", tapered),
         ("many_holes", many_holes),
         ("mirrored_part", mirrored_part),
         ("mirror_of_curves", mirror_of_curves),

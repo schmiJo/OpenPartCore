@@ -23,6 +23,7 @@ pub mod profile;
 pub mod surface;
 pub mod tess;
 pub mod topo;
+pub mod tweak;
 pub mod validate;
 
 pub use blend::{chamfer, fillet, fillet_with, BlendOptions};
@@ -37,4 +38,5 @@ pub use multi::{boolean_many, compound, merged_tools, sweep, PathStep};
 pub use surface::{Chart, Surface};
 pub use tess::{tessellate, Mesh, TessParams};
 pub use topo::{Body, Coedge, Edge, Face, FaceTag};
+pub use tweak::{draft, offset, offset_faces, shell};
 pub use validate::{validate, Report};

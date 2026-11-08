@@ -407,6 +407,30 @@ mod tests {
         }
     }
 
+    /// Out and back in again must give the same solid, on real parts, whenever it's allowed at all.
+    /// Refusing is fine. A wrong volume isn't.
+    #[test]
+    fn offsetting_the_demos_out_and_back_returns_their_volume() {
+        let (mut tried, mut refused) = (0, 0);
+        for m in models::catalog() {
+            let Some(body) = m.document(0).rebuild(None).body else { continue };
+            for d in [0.25, -0.25] {
+                tried += 1;
+                let moved = coreshape::offset(&body, d).and_then(|b| coreshape::offset(&b, -d));
+                match moved {
+                    Ok(back) => {
+                        let (a, b) = (mass_properties(&back).volume, mass_properties(&body).volume);
+                        assert!((a - b).abs() < 1e-5 * b, "{} by {d}: {a} against {b}", m.id);
+                        validate(&back).unwrap();
+                    }
+                    Err(_) => refused += 1,
+                }
+            }
+        }
+        eprintln!("offset out and back: {refused} of {tried} refused");
+        assert!(refused < tried, "every demo refused, so this tested nothing");
+    }
+
     /// The stress cases must keep behaving as the slider promises: every case builds,
     /// except the last, which is the documented refusal.
     #[test]

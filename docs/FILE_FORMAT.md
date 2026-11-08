@@ -63,6 +63,9 @@ Common fields: `id`, `name`, and `suppressed` (default false).
 | `mirror` | `of` (as above), `point` (default origin), `normal` |
 | `fillet` | `edges`, `radius`, `propagate` (default true: follow tangent neighbours) |
 | `chamfer` | `edges`, `distance` |
+| `offset` | `distance`: every face moves out, or in if negative. Sharp edges stay sharp. |
+| `shell` | `thickness`, `open` (face names, default none). An inner wall is named for this feature, with the slot of the face it follows: `f9:side.3` lies behind `f2:side.3`. |
+| `draft` | `faces` (names), `degrees`, `pull` (default +z), `neutral` (a point on the plane where faces stay put; default the origin). A positive angle narrows the part along the pull, and widens a hole. |
 
 `mode` is `add`, `remove` or `intersect`. A placement is `{"origin": [x, y, z], "z": [x, y, z], "x": [x, y, z]}`,
 where each part has a default: the origin, world Z, and world X (world Y if z runs along X).
