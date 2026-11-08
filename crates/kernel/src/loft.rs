@@ -8,7 +8,7 @@
 use crate::error::{Error, Result};
 use crate::math::*;
 use crate::curve::Curve;
-use crate::patch::{interpolate, interpolation_knots, Patch};
+use crate::patch::{interpolation_knots, Collocation, Patch};
 use crate::profile::{Profile, Seg, SegGeom};
 use crate::spline::{Hom, Spline};
 use crate::surface::Surface;
@@ -252,6 +252,10 @@ pub fn loft(sections: &[(&Profile, Frame)], feature: u32) -> Result<Body> {
         *p /= total;
     }
     let (degree_v, knots_v) = interpolation_knots(&params);
+    let collocation = match Collocation::new(&params, degree_v, &knots_v) {
+        Some(c) => c,
+        None => return bad("these sections can't be interpolated".into()),
+    };
 
     // All outlines run counter-clockwise seen from the direction of travel, so that outward is to their right.
     let direction = |k: usize| if k + 1 < centers.len() { centers[k + 1] - centers[k] } else { centers[k] - centers[k - 1] };
@@ -320,14 +324,7 @@ pub fn loft(sections: &[(&Profile, Frame)], feature: u32) -> Result<Body> {
             let mut grid = Vec::with_capacity(lines[0].len());
             for j in 0..lines[0].len() {
                 let values: Vec<Hom> = lines.iter().map(|l| l[j]).collect();
-                let column = if values.len() == 2 {
-                    values
-                } else {
-                    match interpolate(&params, degree_v, &knots_v, &values) {
-                        Some(c) => c,
-                        None => return bad("these sections can't be interpolated".into()),
-                    }
-                };
+                let column = if values.len() == 2 { values } else { collocation.solve(&values) };
                 if column.iter().any(|q| !(q.w > 1e-6)) {
                     return bad("going through these sections would take a weight below zero, so they're too different".into());
                 }

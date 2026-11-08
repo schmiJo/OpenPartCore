@@ -23,7 +23,7 @@ use crate::surface::Surface;
 use crate::topo::{Body, Edge, FaceOrigin, FaceTag};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Fillet(f64),
     Chamfer(f64),
 }
@@ -89,7 +89,11 @@ pub fn fillet_with(body: &Body, edges: &[usize], radius: f64, options: BlendOpti
         return Err(Error::InvalidInput(format!("fillet radius {radius} is too small")));
     }
     let selected = if options.propagate { propagate_tangents(body, edges)? } else { edges.to_vec() };
-    blend(body, &selected, Kind::Fillet(radius), feature)
+    // An exact surface where there is one. Where there isn't, a fitted one, held to a stated tolerance.
+    match blend(body, &selected, Kind::Fillet(radius), feature) {
+        Err(Error::Unsupported(_)) => crate::rolling::blend(body, edges, Kind::Fillet(radius), feature),
+        other => other,
+    }
 }
 
 /// Adds every edge reachable from the selection through tangent continuation. An edge
@@ -163,7 +167,10 @@ pub fn chamfer_with(body: &Body, edges: &[usize], distance: f64, options: BlendO
         return Err(Error::InvalidInput(format!("chamfer distance {distance} is too small")));
     }
     let selected = if options.propagate { propagate_tangents(body, edges)? } else { edges.to_vec() };
-    blend(body, &selected, Kind::Chamfer(distance), feature)
+    match blend(body, &selected, Kind::Chamfer(distance), feature) {
+        Err(Error::Unsupported(_)) => crate::rolling::blend(body, edges, Kind::Chamfer(distance), feature),
+        other => other,
+    }
 }
 
 fn same_curve(a: &Curve, b: &Curve) -> bool {

@@ -72,6 +72,30 @@ fn loft_extras() -> Vec<(&'static str, Result<Body>)> {
     ]
 }
 
+/// Fillets and chamfers with no exact surface, which OpenCASCADE then has to read.
+fn blend_extras() -> Vec<(&'static str, Result<Body>)> {
+    let curved = |b: &Body| -> Vec<usize> { (0..b.edges.len()).filter(|&e| !matches!(b.edges[e].curve, Curve::Circle { .. } | Curve::Line { .. })).collect() };
+    let ellipse = || {
+        let cyl = cylinder(&Frame::WORLD, 10.0, 40.0, 1).unwrap();
+        let f = Frame::rotation(v3(0.0, 0.0, 25.0), Vec3::X, 0.5).compose(&Frame::translation(v3(-50.0, -50.0, 25.0)));
+        subtract(&cyl, &box_solid(&f, 100.0, 100.0, 50.0, 2).unwrap()).unwrap()
+    };
+    let tee = || union(&cylinder(&Frame::new(v3(-30.0, 0.0, 0.0), Vec3::X, Vec3::Y), 10.0, 60.0, 1).unwrap(), &cylinder(&Frame::WORLD, 5.0, 30.0, 2).unwrap()).unwrap();
+    let drilled = || subtract(&cylinder(&Frame::WORLD, 20.0, 40.0, 1).unwrap(), &cylinder(&Frame::new(v3(0.0, 0.0, 20.0), Vec3::X, Vec3::Y), 4.0, 40.0, 2).unwrap()).unwrap();
+    let points: Vec<Vec3> = [(30.0, 0.0), (20.0, 14.0), (5.0, 9.0), (-10.0, 18.0), (-30.0, 0.0)].iter().map(|p| v3(p.0, p.1, 0.0)).collect();
+    let wavy = extrude(&Profile::new(PathBuilder::new(v2(30.0, 0.0)).spline_to(Spline::through(&points).unwrap()).close()), &Frame::WORLD, 10.0, 1).unwrap();
+    let wavy_top: Vec<usize> = (0..wavy.edges.len()).filter(|&e| matches!(wavy.edges[e].curve, Curve::Spline(_)) && (wavy.edge_midpoint(e).z - 10.0).abs() < 1e-9).collect();
+    let (e, t, d) = (ellipse(), tee(), drilled());
+    vec![
+        ("blend_ellipse_fillet", fillet(&e, &curved(&e), 2.0, 3)),
+        ("blend_ellipse_chamfer", chamfer(&e, &curved(&e), 1.0, 3)),
+        ("blend_tee_fillet", fillet(&t, &curved(&t), 2.0, 3)),
+        ("blend_drilled_fillet", fillet(&d, &curved(&d), 1.0, 3)),
+        ("blend_drilled_chamfer", chamfer(&d, &curved(&d), 1.0, 3)),
+        ("blend_spline_fillet", fillet(&wavy, &wavy_top, 1.0, 2)),
+    ]
+}
+
 fn extras() -> Vec<(&'static str, Result<Body>)> {
     let void = {
         let outer = box_solid(&Frame::translation(v3(0.0, 0.0, 0.0)), 40.0, 40.0, 40.0, 1).unwrap();
@@ -234,7 +258,7 @@ fn main() {
         assert!(outcome.failed.is_none(), "{}: {:?}", m.id, outcome.steps);
         bodies.push((m.id.to_string(), (*outcome.body.unwrap()).clone()));
     }
-    for (name, r) in extras().into_iter().chain(spline_extras()).chain(loft_extras()) {
+    for (name, r) in extras().into_iter().chain(spline_extras()).chain(loft_extras()).chain(blend_extras()) {
         bodies.push((name.to_string(), r.unwrap()));
     }
     for (name, body) in &bodies {

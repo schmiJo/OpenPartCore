@@ -23,7 +23,7 @@ oracle, through a neighbouring FreeCAD build, read-only.
 
 ## Scope changes from the brief
 
-- Fillets cover straight and circular edges, plus sphere patches at convex three-edge corners.
+- Fillets are exact on straight and circular edges, with sphere patches at convex three-edge corners, and fitted to a stated tolerance on any other edge.
   A radius that would swallow a neighbouring face is an error.
 - The `sketch` feature takes explicitly dimensioned profiles, and `constrained_sketch` adds the constraint solver, which is a crate of its own.
 - STEP import reads analytic surfaces, swept curves and free-form surfaces without poles. Assemblies are refused.
@@ -48,6 +48,7 @@ oracle, through a neighbouring FreeCAD build, read-only.
 | M12 | Splines in sketches, extruded and revolved (phases 1 and 2 of `NURBS_DESIGN.md`) | Done, with the limits in `KNOWN_LIMITS.md`. Phase 3 isn't decided |
 | M13 | STEP import of analytic surfaces and swept curves | Done, checked on OpenCASCADE's files only |
 | M14 | Free-form surfaces and lofts, read from and written to STEP (phase 3 of `NURBS_DESIGN.md`) | Done, with the limits in `KNOWN_LIMITS.md` |
+| M15 | Fitted fillets and chamfers on traced, elliptical, spline and free-form edges | Done, with the limits in `KNOWN_LIMITS.md` |
 
 ## For code building on this repository
 

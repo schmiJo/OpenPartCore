@@ -10,7 +10,7 @@ It runs natively and in the browser through WebAssembly.
   ellipses and traced intersection curves.
 - **Modelling:** 2D profiles that extrude and revolve, and union, subtract and intersect
   on all five surface types, including coplanar and touching contacts.
-- **Blends:** constant-radius fillets and chamfers on straight and circular edges.
+- **Blends:** constant-radius fillets and chamfers, exact on straight and circular edges, and fitted to a stated tolerance on any other.
 - **Free-form:** lofts through sections and rational B-spline surfaces, in Booleans and in STEP files both ways.
 - **More modelling:** many tools in one Boolean, patterns, mirror, sweeps along lines and arcs,
   offset, shell and draft, all on the same exact surfaces.

@@ -188,6 +188,23 @@ impl Surface {
         }
     }
 
+    /// Whether the nearest point of this surface to `p` is really on it, and not on what it carries on as past its
+    /// own curve or boundary. Only surfaces that stop somewhere can say no.
+    pub fn foot_within(&self, p: Vec3) -> bool {
+        let l = self.frame().to_local(p);
+        let within = |curve: &PlaneCurve, q: Vec2| {
+            let (t0, t1) = curve.spline.domain();
+            let t = curve.foot(q).t;
+            t >= t0 - 1e-9 && t <= t1 + 1e-9
+        };
+        match self {
+            Surface::Extruded { curve, .. } => within(curve, v2(l.x, l.y)),
+            Surface::Revolved { curve, .. } => within(curve, v2(l.x.hypot(l.y), l.z)),
+            Surface::Free { patch, .. } => !patch.foot(l).boundary,
+            _ => true,
+        }
+    }
+
     /// Closest point on the surface, for points near it.
     pub fn project(&self, p: Vec3) -> Vec3 {
         let f = self.frame();

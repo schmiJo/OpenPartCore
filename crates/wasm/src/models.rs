@@ -148,6 +148,18 @@ fn nozzle(doc: &mut Document, _: usize) {
     doc.with(Op::extrude(across, 0.0, "2 * width", Mode::Remove));
 }
 
+/// A branch off a pipe, with the saddle between them filleted. No exact surface exists for that, so it's a fitted one.
+fn tee(doc: &mut Document, _: usize) {
+    let along = doc.with(Op::sketch(
+        Placement::new(point3("-length / 2", 0.0, 0.0), point3(1.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)),
+        vec![Region::new(Shape::circle(0.0, 0.0, "main"))],
+    ));
+    let pipe = doc.with(Op::extrude(along, 0.0, "length", Mode::Add));
+    let up = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle(0.0, 0.0, "branch"))]));
+    let stub = doc.with(Op::extrude(up, 0.0, "reach", Mode::Add));
+    doc.with(Op::fillet(EdgeSelect::Between(pipe.side(0), stub.side(0)), "round"));
+}
+
 fn bracket(doc: &mut Document, _: usize) {
     // Sketched on XZ, with the extrusion running from y = width back toward y = 0.
     let plane = Placement::new(point3(0.0, "width", 0.0), point3(0.0, -1.0, 0.0), point3(1.0, 0.0, 0.0));
@@ -381,6 +393,13 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("lip", "Lip radius", 14.0, 30.0, 22.0),
         mm("pin", "Cross hole", 4.0, 12.0, 8.0),
     ];
+    static TEE: [ParamDef; 5] = [
+        mm("main", "Pipe radius", 8.0, 16.0, 12.0),
+        mm("branch", "Branch radius", 3.0, 7.0, 5.0),
+        mm("length", "Pipe length", 50.0, 90.0, 70.0),
+        mm("reach", "Branch height", 22.0, 40.0, 30.0),
+        mm("round", "Fillet radius", 0.5, 2.5, 1.5),
+    ];
     static CAM: [ParamDef; 7] = [
         mm("lift", "Lobe radius", 40.0, 70.0, 55.0),
         mm("base", "Base radius", 24.0, 36.0, 30.0),
@@ -461,7 +480,7 @@ pub fn catalog() -> &'static [ModelDef] {
         default: 0.0,
         choices: &STRESS_NAMES,
     }];
-    static MODELS: [ModelDef; 12] = [
+    static MODELS: [ModelDef; 13] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -517,6 +536,13 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A sketched spline revolved, with a second spline cut out to hollow it. The curve stays an exact spline all the way to the STEP file.",
             params: &VASE,
             build: vase,
+        },
+        ModelDef {
+            id: "tee",
+            name: "Filleted tee",
+            blurb: "A branch off a pipe with the saddle between them rounded. A true rolling-ball surface has no exact form here, so this one is fitted to within 1.5e-7 mm of the two pipes.",
+            params: &TEE,
+            build: tee,
         },
         ModelDef {
             id: "nozzle",

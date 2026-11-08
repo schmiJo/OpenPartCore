@@ -17,7 +17,7 @@ These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 - **More kinds of loft.** No loft to a point, closed loop, guide curve or tangency at the ends: see [below](#free-form-surfaces-and-lofts).
 - **Helix, delete face and thicken.** Not started. A sweep path can only be lines and arcs.
 - **Offset, shell and draft that change a body's topology.** They refuse instead: see [below](#offset-shell-and-draft).
-- **Fillets and chamfers beyond straight and circular edges.** No ellipses, traced curves, spline or free-form faces, no variable radius, and no general vertex blends: see [below](#fillets-and-chamfers).
+- **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
 - **Assemblies and drawings.** A STEP assembly is refused.
 
 ## Fuzz results
@@ -86,8 +86,7 @@ has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
 
 Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.md).
 
-- **Refused by name:** fillets, chamfers, offset, shell and draft on these faces, because the true result isn't a spline. Their neighbours can still be filleted if the edge
-  doesn't touch a spline face.
+- **Refused by name:** offset, shell and draft on these faces, because the true result isn't a spline. Fillets and chamfers are fitted: see [below](#fillets-and-chamfers).
 - **Two different splines sharing part of their length** are refused when their faces overlap there. Identical curves are fine, so two extrusions from one profile work.
 - **A spline can touch a revolve axis only at its ends.**
 - **An outline that crosses itself is found by sampling,** 16 pieces per knot interval and closer toward its ends, so a crossing much smaller than that could get through to the mesher, which
@@ -99,7 +98,7 @@ Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.
 
 Rational B-spline patches, from a loft or a file: see [NURBS_DESIGN.md](NURBS_DESIGN.md#phase-3-free-form-patches).
 
-- **Refused by name:** fillets, chamfers, offset, shell and draft on these faces, as on swept splines. A pole or a fold, found by sampling each knot interval at 169 points for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
+- **Refused by name:** offset, shell and draft on these faces, as on swept splines. A pole or a fold, found by sampling each knot interval at 169 points for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
 - **Two surfaces lying on each other are refused unless they're the same patch.** A patch that's exactly a cylinder, against a real cylinder of that size, is refused as a tangency, and nothing guesses that they're the same.
 - **The proof has edges.** The closest point is proven for every point of the patch. Past its boundary the surface carries on along its tangent planes, where the value is only a height, and that's only used near faces' edges. Far from a surface, if a great many points are almost equally close, a search can run out of budget and report a smaller distance it can prove. A patch's tightest bend, which sets how fine a trace is, is sampled and not proven, so a very small feature between samples could be stepped over. The checks on every result still apply.
 - **Lofts take one outline per section, with the same number of holes,** and they can't end in a point, close into a ring, follow guide curves or set tangency at the ends.
@@ -115,16 +114,14 @@ Rational B-spline patches, from a loft or a file: see [NURBS_DESIGN.md](NURBS_DE
 
 ## Cases OpenCASCADE handles and this kernel refuses
 
-Found by an independent review harness and still open. `--example review named <file>` reruns them, and all four were refused the same way on 2026-11-08:
+Found by an independent review harness and still open. `--example review named <file>` reruns them. The two it also found on fillets, an elliptical rim and a tee's saddle, now work: see [below](#fillets-and-chamfers).
 
 | Case | This kernel | OpenCASCADE |
 |---|---|---|
 | Cylinder r = 5.00001 over r = 5, coaxial: subtract the thin shell | Refused: "the result does not close" | Volume 0.003 |
 | Cylinder r = 5 with its axis offset 1e-5: subtract the sliver | Refused: "the result does not close" | Volume 0.001 |
-| Fillet an elliptical rim | Refused: "fillets and chamfers work on straight and circular edges only" | 7835.628 |
-| Fillet the saddle edge of a tee pipe | Refused the same way | 20449.687 |
 
-The first two are slivers near the tolerance, and a refusal there is the safe answer, but the
+These are slivers near the tolerance, and a refusal there is the safe answer, but the
 message should name the sliver instead of blaming closure. OpenCASCADE also reads surfaces with poles and
 assemblies from STEP files, which this kernel refuses.
 
@@ -152,13 +149,23 @@ Supported:
 - A rim whose corner radius is below the fillet radius: see the difference below.
 - A sphere patch where three convex edges between planes meet.
 
+Supported, but fitted and not exact, which makes them the only results in this kernel that are neither exact nor refused:
+
+- Traced intersection curves, ellipses, and any edge on a spline or free-form face, such as the rim of a hole through a cylinder or a tee's saddle.
+- The surface is a cubic through exact sections of the true rolling-ball surface, with stations added until its two long sides are within 1.5e-7 mm of the faces they lie on. Between stations its middle is a fit too, and isn't measured directly.
+
 Not supported, returning an error:
 
-- Edges on traced intersection curves or ellipses, such as the rim of a hole through a cylinder.
-- Any edge touching a spline or free-form face.
 - Variable radius.
 - A radius that runs off a neighbouring face. Real kernels can absorb the overrun and restructure
   the neighbours. This one refuses.
+- A fitted blend passing a vertex where a sharp edge meets it, or that ends where more than one face lies beyond it. Those need corner blends.
+- A fitted blend's end at a reflex corner, where its side would end past the neighbouring edge, which takes reshaping that neighbour.
+- A surface so kinked that the fit doesn't reach its tolerance within 1,024 stations.
+
+**How fitted blends were checked.** On edges an exact fillet also handles, a straight edge, a concave one and whole rims, the fitted route has to match it, and does to 1e-7 relative. On an elliptical rim the solid is convex, so a fillet is by definition what's within the radius of the solid shrunk by the radius, and that volume can be worked out with none of the kernel: at radius 2 it removes 71.8840 and heading for about 71.8845 as that sum gets finer, this kernel removes 71.8850, and OpenCASCADE's fillet removes 71.768. Its fillets on a tee and a drilled wall are within 0.1 of these in added or removed volume, where its Booleans alone differ by about that much. All 6 fitted parts read back valid in OpenCASCADE, and 5 of them agree on volume to 4e-8 or better. The other, on a spline, is 1.1e-4 off, the same effect as on `spline_outline`.
+
+**Fuzz** (`--example fuzz_blends`), on random curved edges of random Booleans: of 300 seeds, 210 had an edge to try, 80 blended and 130 were refused, and 0 were wrong by validity, a closed mesh, a believable change of volume, membership away from the edges, and surviving a later Boolean. Most refusals were the two corner cases above, 36 each. 9 didn't reach the fit, and 25 didn't fit at all at a radius up to 3% of the part. So a closed rim or an edge between two simple ends generally works, and an edge ending in a complicated corner often won't.
 
 Works, but differs from commercial CAD:
 

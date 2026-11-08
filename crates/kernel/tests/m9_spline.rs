@@ -204,14 +204,12 @@ fn surfaces_of_a_free_form_revolve_match_a_mesh() {
 // ----- Refusals -----
 
 #[test]
-fn blends_and_offsets_on_spline_faces_are_refused_by_name() {
+fn offsets_on_spline_faces_are_refused_by_name() {
     let body = extrude(&Profile::new(ellipse_wire(9.0, 4.0)), &Frame::WORLD, 3.0, 1).unwrap();
     let mentions = |e: Error| {
         let text = e.to_string();
         assert!(text.contains("spline") || text.contains("straight and circular"), "{text}");
     };
-    mentions(fillet(&body, &[0], 0.5, 2).unwrap_err());
-    mentions(chamfer(&body, &[0], 0.5, 2).unwrap_err());
     mentions(offset(&body, 0.5).unwrap_err());
     mentions(shell(&body, &[], 0.5, 2).unwrap_err());
     let side = body.faces.iter().position(|f| matches!(f.surface, Surface::Extruded { .. })).unwrap();

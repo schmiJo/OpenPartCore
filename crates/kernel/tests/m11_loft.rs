@@ -354,9 +354,4 @@ fn refusals_name_what_is_wrong() {
     assert!(same.contains("one place"), "{same}");
     let holes = loft(&[(&circle_with_hole(5.0, 2.0), at(0.0)), (&circle(5.0), at(4.0))], 1).err().unwrap().to_string();
     assert!(holes.contains("holes"), "{holes}");
-    // Fillets on a free-form face are still refused by name.
-    let b = loft(&[(&circle(5.0), at(0.0)), (&square(6.0), at(8.0))], 1).unwrap();
-    let side = b.edges.iter().position(|e| matches!(e.curve, Curve::Spline(_))).unwrap();
-    let why = fillet(&b, &[side], 0.5, 2).err().unwrap().to_string();
-    assert!(why.contains("spline faces") || why.contains("straight and circular"), "{why}");
 }

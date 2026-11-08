@@ -23,6 +23,7 @@ pub mod math;
 pub mod multi;
 pub mod patch;
 pub mod profile;
+pub mod rolling;
 pub mod spline;
 pub mod surface;
 pub mod tess;

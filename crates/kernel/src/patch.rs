@@ -307,8 +307,15 @@ struct Local {
 }
 
 /// How many times a cell is halved each way ahead of time. Most searches then open a leaf or two and find
-/// everything already small enough to decide.
-const LEAF_LEVELS: u32 = 3;
+/// everything already small enough to decide. A surface with a great many cells gets fewer, since each cell's
+/// leaves take memory and those cells are small to begin with.
+fn leaf_levels(cells: usize) -> u32 {
+    match cells {
+        0..=64 => 3,
+        65..=512 => 2,
+        _ => 1,
+    }
+}
 
 /// A small piece of a cell: its range, two bounding boxes, and its stationary polynomials cut down to it.
 struct Leaf {
@@ -338,6 +345,7 @@ struct BezierCell {
     /// No speed along `s`, or `t`, exceeds these.
     speed: (f64, f64),
     center: Vec3,
+    levels: u32,
     leaves: OnceLock<Vec<Leaf>>,
 }
 
@@ -349,7 +357,7 @@ impl BezierCell {
             lo = lo.min(p);
             hi = hi.max(p);
         }
-        let mut out = BezierCell { u, v, m, n, h, lo, hi, speed: (0.0, 0.0), center: Vec3::ZERO, leaves: OnceLock::new() };
+        let mut out = BezierCell { u, v, m, n, h, lo, hi, speed: (0.0, 0.0), center: Vec3::ZERO, levels: 3, leaves: OnceLock::new() };
         out.center = out.point(0.5, 0.5);
         let (ns, nt, _, _) = out.tangent_numerators();
         let least = out.h.iter().fold(f64::INFINITY, |m, q| m.min(q.w));
@@ -442,7 +450,7 @@ impl BezierCell {
             };
             let net = Grid { r: self.m + 1, c: self.n + 1, a: self.h.clone() };
             let mut level = vec![(root, net)];
-            for _ in 0..2 * LEAF_LEVELS {
+            for _ in 0..2 * self.levels {
                 let mut next = Vec::with_capacity(level.len() * 2);
                 for (leaf, net) in level {
                     // Each way in turn.
@@ -762,6 +770,10 @@ impl Patch {
             }
         }
 
+        let levels = leaf_levels(cells.len());
+        for c in &mut cells {
+            c.levels = levels;
+        }
         let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
         let (mut speed_u, mut speed_v) = (0.0f64, 0.0f64);
         for c in &cells {
@@ -1237,48 +1249,73 @@ pub(crate) fn interpolation_knots(params: &[f64]) -> (usize, Vec<f64>) {
     (degree, knots)
 }
 
-/// The inverse of the collocation matrix's action, for each line of homogeneous values.
-pub(crate) fn interpolate(params: &[f64], degree: usize, knots: &[f64], values: &[Hom]) -> Option<Vec<Hom>> {
-    let n = params.len();
-    let mut rows = vec![vec![0.0; n + 4]; n];
-    for (k, row) in rows.iter_mut().enumerate() {
-        let span = find_knot_span(knots, degree, params[k], n);
-        for (b, value) in basis_functions(knots, degree, span, params[k]).iter().enumerate() {
-            row[span - degree + b] = *value;
+/// Solves for the control points of interpolations through many lines of values at one set of parameters. The
+/// matrix is banded and totally positive, so elimination needs no pivoting and each line costs little.
+pub(crate) struct Collocation {
+    n: usize,
+    band: usize,
+    rows: Vec<Vec<f64>>,
+    multipliers: Vec<Vec<f64>>,
+}
+
+impl Collocation {
+    pub(crate) fn new(params: &[f64], degree: usize, knots: &[f64]) -> Option<Collocation> {
+        let n = params.len();
+        let band = degree;
+        let mut rows = vec![vec![0.0; 2 * band + 1]; n];
+        for (k, row) in rows.iter_mut().enumerate() {
+            let span = find_knot_span(knots, degree, params[k], n);
+            for (b, value) in basis_functions(knots, degree, span, params[k]).iter().enumerate() {
+                let column = span - degree + b;
+                row[column + band - k] = *value;
+            }
         }
-        row[n] = values[k].a.x;
-        row[n + 1] = values[k].a.y;
-        row[n + 2] = values[k].a.z;
-        row[n + 3] = values[k].w;
-    }
-    for c in 0..n {
-        let pivot = (c..n).max_by(|&a, &b| rows[a][c].abs().total_cmp(&rows[b][c].abs()))?;
-        rows.swap(c, pivot);
-        if rows[c][c].abs() < 1e-14 {
-            return None;
-        }
-        for r in c + 1..n {
-            let f = rows[r][c] / rows[c][c];
-            if f != 0.0 {
-                let top = rows[c].clone();
-                for (x, y) in rows[r][c..].iter_mut().zip(&top[c..]) {
-                    *x -= f * y;
+        let mut multipliers = vec![vec![0.0; band]; n];
+        for k in 0..n {
+            let pivot = rows[k][band];
+            if pivot.abs() < 1e-14 {
+                return None;
+            }
+            for below in k + 1..(k + band + 1).min(n) {
+                let offset = below - k;
+                let f = rows[below][band - offset] / pivot;
+                multipliers[k][offset - 1] = f;
+                if f != 0.0 {
+                    for c in 0..=band {
+                        let value = rows[k][band + c];
+                        rows[below][band - offset + c] -= f * value;
+                    }
                 }
             }
         }
+        Some(Collocation { n, band, rows, multipliers })
     }
-    let mut out = vec![Hom::ZERO; n];
-    for c in (0..n).rev() {
-        let mut sum = [rows[c][n], rows[c][n + 1], rows[c][n + 2], rows[c][n + 3]];
-        for k in c + 1..n {
-            let q = out[k];
-            for (s, x) in sum.iter_mut().zip([q.a.x, q.a.y, q.a.z, q.w]) {
-                *s -= rows[c][k] * x;
+
+    pub(crate) fn solve(&self, values: &[Hom]) -> Vec<Hom> {
+        let (n, band) = (self.n, self.band);
+        let mut rhs = values.to_vec();
+        for k in 0..n {
+            for below in k + 1..(k + band + 1).min(n) {
+                let f = self.multipliers[k][below - k - 1];
+                let q = rhs[k];
+                rhs[below].a -= q.a * f;
+                rhs[below].w -= q.w * f;
             }
         }
-        out[c] = Hom { a: v3(sum[0], sum[1], sum[2]) / rows[c][c], w: sum[3] / rows[c][c] };
+        let mut out = vec![Hom::ZERO; n];
+        for k in (0..n).rev() {
+            let mut sum = rhs[k];
+            for c in 1..=band {
+                if k + c < n {
+                    sum.a -= out[k + c].a * self.rows[k][band + c];
+                    sum.w -= out[k + c].w * self.rows[k][band + c];
+                }
+            }
+            let d = self.rows[k][band];
+            out[k] = Hom { a: sum.a / d, w: sum.w / d };
+        }
+        out
     }
-    Some(out)
 }
 
 #[cfg(test)]
@@ -1674,7 +1711,7 @@ mod tests {
         let params = [0.0, 1.0, 2.5, 3.0, 4.5];
         let (degree, knots) = interpolation_knots(&params);
         let values: Vec<Hom> = params.iter().map(|t| Hom { a: v3(t * t, t.sin(), 1.0 - t), w: 1.0 + 0.1 * t }).collect();
-        let solved = interpolate(&params, degree, &knots, &values).unwrap();
+        let solved = Collocation::new(&params, degree, &knots).unwrap().solve(&values);
         for (k, t) in params.iter().enumerate() {
             let span = find_knot_span(&knots, degree, *t, params.len());
             let (mut a, mut w) = (Vec3::ZERO, 0.0);
