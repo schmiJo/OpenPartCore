@@ -85,7 +85,10 @@ impl DragSession {
         let point_vars = |r: Ref| -> Result<[u32; 2], SketchError> {
             let b = base_var(r.entity)?;
             let e = base.entity(r.entity).ok_or_else(|| bad(format!("{} can't be moved", r.name())))?;
-            let offset = match (e.geometry, r.part) {
+            let offset = match (e.geometry.clone(), r.part) {
+                (Geometry::Spline(_), Part::Start) => 0,
+                (Geometry::Spline(shape), Part::End) => 2 * (shape.points.len() as u32 - 1),
+                (Geometry::Spline(shape), Part::Control(i)) if (i as usize) < shape.points.len() => 2 * i,
                 (Geometry::Point { .. }, Part::Whole) => 0,
                 (Geometry::Line { .. }, Part::Start) => 0,
                 (Geometry::Line { .. }, Part::End) => 2,
@@ -121,6 +124,13 @@ impl DragSession {
                     Geometry::Circle { .. } | Geometry::Arc { .. } => {
                         soft_vars.push(b + 2);
                         targets.push(Target::RadiusTo { cx: b, cy: b + 1 });
+                    }
+                    // Grabbing a spline by its edge moves the whole thing too.
+                    Geometry::Spline(ref shape) => {
+                        for k in 0..2 * shape.points.len() as u32 {
+                            soft_vars.push(b + k);
+                            targets.push(Target::Value(x[(b + k) as usize]));
+                        }
                     }
                     // Grabbing an ellipse by its edge moves the whole thing, like grabbing a line.
                     Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {

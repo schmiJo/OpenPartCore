@@ -175,10 +175,14 @@ An arc runs counter-clockwise from `start` to `end`.
 An `ellipse` has `center`, `major` (the point where its major axis ends) and `minor` (the other radius). An `elliptical_arc`
 adds `start` and `end`, and runs counter-clockwise between them. `"7.major"` is the end of the major axis.
 
+A `spline` has `points` (its control points), with optional `degree` (default 3), `knots` (default evenly spaced, and always clamped) and `weights`
+(default all 1). By hand, `{"type": "spline", "through": [[0, 0], [5, 4], [10, 0]]}` makes the smooth curve through those points, and it's saved as
+control points after that. `"7.p2"` is control point 2, and `"7.start"` and `"7.end"` are the first and last.
+
 **Reference dimensions.** Any dimension can carry `"reference": true`. It then reports what the geometry measures and takes no
 part in solving. Solving writes the measured value into it, and a file may leave `value` out.
 
-**References.** `"7"` is a whole entity. `"7.start"`, `"7.end"`, `"7.center"` and `"7.major"` are its parts. `"origin"`,
+**References.** `"7"` is a whole entity. `"7.start"`, `"7.end"`, `"7.center"`, `"7.major"` and `"7.p2"` are its parts. `"origin"`,
 `"x_axis"` and `"y_axis"` are fixed reference geometry.
 
 | Constraint `type` | Fields | Meaning |

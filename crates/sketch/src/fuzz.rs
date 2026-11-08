@@ -10,6 +10,7 @@
 
 use crate::model::*;
 use crate::rng::Rng;
+use crate::spline::SplineShape;
 use crate::solve::{ErrorKind, SketchError};
 use std::f64::consts::{PI, TAU};
 
@@ -30,9 +31,10 @@ pub enum Category {
     /// Last, because a category's number seeds its cases and the others must keep theirs.
     Distances,
     Ellipses,
+    Splines,
 }
 
-pub const ALL_CATEGORIES: [Category; 14] = [
+pub const ALL_CATEGORIES: [Category; 15] = [
     Category::Rectilinear,
     Category::Polygons,
     Category::Rectangles,
@@ -43,6 +45,7 @@ pub const ALL_CATEGORIES: [Category; 14] = [
     Category::Mixed,
     Category::Distances,
     Category::Ellipses,
+    Category::Splines,
     Category::Large,
     Category::Redundant,
     Category::Conflict,
@@ -62,6 +65,7 @@ impl Category {
             Category::Mixed => "mixed",
             Category::Distances => "distances",
             Category::Ellipses => "ellipses",
+            Category::Splines => "splines",
             Category::Large => "large",
             Category::Redundant => "redundant",
             Category::Conflict => "conflict",
@@ -152,7 +156,15 @@ fn point_of(s: &Sketch, r: Ref) -> Option<P2> {
         (Y_AXIS, Part::End) => return Some([0.0, 1.0]),
         _ => {}
     }
-    match (s.entity(r.entity)?.geometry, r.part) {
+    if let Geometry::Spline(ref shape) = s.entity(r.entity)?.geometry {
+        return match r.part {
+            Part::Start => shape.points.first().copied(),
+            Part::End => shape.points.last().copied(),
+            Part::Control(i) => shape.points.get(i as usize).copied(),
+            _ => None,
+        };
+    }
+    match (s.entity(r.entity)?.geometry.clone(), r.part) {
         (Geometry::Point { at }, Part::Whole) => Some(at),
         (Geometry::Line { start, .. }, Part::Start) => Some(start),
         (Geometry::Line { end, .. }, Part::End) => Some(end),
@@ -163,6 +175,13 @@ fn point_of(s: &Sketch, r: Ref) -> Option<P2> {
         (Geometry::Ellipse { major, .. } | Geometry::EllipticalArc { major, .. }, Part::Major) => Some(major),
         (Geometry::EllipticalArc { start, .. }, Part::Start) => Some(start),
         (Geometry::EllipticalArc { end, .. }, Part::End) => Some(end),
+        _ => None,
+    }
+}
+
+fn spline_of(s: &Sketch, id: EntityId) -> Option<std::sync::Arc<SplineShape>> {
+    match s.entity(id)?.geometry {
+        Geometry::Spline(ref shape) => Some(shape.clone()),
         _ => None,
     }
 }
@@ -293,6 +312,31 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
             let measure = if matches!(rule, Rule::Parallel { .. }) { cross(u, v) } else { dot(u, v) };
             (measure / (nu * nv).max(1e-300)).abs() * nu.max(nv)
         }
+        // The curve's own direction at the end they share, from evaluating it, against the other's.
+        Rule::Tangent { a, b } if spline_of(s, *a).is_some() || spline_of(s, *b).is_some() => {
+            let p = shared_end(s, *a, *b)?;
+            let direction = |e: EntityId| -> Option<P2> {
+                if let Some(shape) = spline_of(s, e) {
+                    let (t0, t1) = shape.domain();
+                    let (start, v0) = shape.eval(t0);
+                    let (_, v1) = shape.eval(t1);
+                    let v = if dist(start, p) < 1e-7 { v0 } else { v1 };
+                    Some([v[0] / v[0].hypot(v[1]), v[1] / v[0].hypot(v[1])])
+                } else if let Some((u, w)) = line_of(s, e) {
+                    let d = sub(w, u);
+                    Some([d[0] / d[0].hypot(d[1]), d[1] / d[0].hypot(d[1])])
+                } else if let Some((c, _)) = curve_of(s, e) {
+                    let d = sub(p, c);
+                    Some([-d[1] / d[0].hypot(d[1]), d[0] / d[0].hypot(d[1])])
+                } else {
+                    let shape = ellipse_of(s, e)?;
+                    let (t, _) = nearest_on_ellipse(shape, p);
+                    let n = ellipse_normal_at(shape, t);
+                    Some([-n[1], n[0]])
+                }
+            };
+            cross(direction(*a)?, direction(*b)?).abs() * 10.0
+        }
         Rule::Tangent { a, b } if ellipse_of(s, *a).is_some() || ellipse_of(s, *b).is_some() => {
             let (first, other) = if ellipse_of(s, *a).is_some() { (*a, *b) } else { (*b, *a) };
             let e = ellipse_of(s, first)?;
@@ -408,6 +452,7 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
                         .max(dist(start, [at[5], at[6]]))
                         .max(dist(end, [at[7], at[8]])),
                     Geometry::Point { .. } => return None,
+                    Geometry::Spline(ref shape) => shape.points.iter().zip(at.chunks(2)).map(|(q, v)| dist(*q, [v[0], v[1]])).fold(0.0, f64::max),
                 }
             }
         }
@@ -748,6 +793,83 @@ impl Gen<'_> {
         vec![bottom, right, top, left]
     }
 
+    /// Splines with their ends joined to other things, tangent or not, and control points dimensioned.
+    fn splines(&mut self, c: P2) -> Vec<EntityId> {
+        let mut made = Vec::new();
+        for block in 0..3 {
+            let base = polar(c, 60.0 * block as f64, self.rng.range(0.0, TAU));
+            // A cubic heading roughly along x.
+            let count = self.rng.int(4, 8) as usize;
+            let mut points = Vec::new();
+            let mut x = base[0];
+            for _ in 0..count {
+                points.push([x, base[1] + self.rng.range(-8.0, 8.0)]);
+                x += self.rng.range(4.0, 10.0);
+            }
+            let rational = self.rng.chance(0.3);
+            let mut shape = SplineShape::uniform(3, points.clone()).expect("a spline");
+            if rational {
+                for w in &mut shape.weights {
+                    *w = self.rng.range(0.5, 3.0);
+                }
+            }
+            let sp = self.s.spline(shape);
+            made.push(sp);
+            let (first, last) = (points[0], points[count - 1]);
+            // A line ahead of it, tangent along its first leg.
+            if self.rng.chance(0.7) {
+                let d = sub(points[1], first);
+                let len = self.rng.range(0.5, 3.0);
+                let l = self.s.line([first[0] - d[0] * len, first[1] - d[1] * len], first);
+                self.join(l.end(), sp.start());
+                self.on(Rule::Tangent { a: l, b: sp });
+                self.length_of(l);
+                made.push(l);
+            }
+            // An arc off the far end, tangent along its last leg.
+            if self.rng.chance(0.7) {
+                let d = sub(last, points[count - 2]);
+                let n = d[0].hypot(d[1]);
+                let (ux, uy) = (d[0] / n, d[1] / n);
+                let r = self.rng.range(3.0, 10.0);
+                let center = [last[0] - uy * r, last[1] + ux * r];
+                let from = (last[1] - center[1]).atan2(last[0] - center[0]);
+                let arc = self.s.add(Geometry::Arc { center, radius: r, start: last, end: polar(center, r, from + self.rng.range(0.5, 2.5)) });
+                self.join(arc.start(), sp.end());
+                self.on(Rule::Tangent { a: arc, b: sp });
+                self.on(Rule::Radius { of: arc, value: r.into() });
+                made.push(arc);
+            }
+            // Control points held by dimensions and by each other.
+            if self.rng.chance(0.7) {
+                let i = self.rng.int(1, count as i64 - 2) as u32;
+                let (p, q) = (points[i as usize], points[i as usize + 1]);
+                self.on(Rule::Distance { a: sp.control(i), b: Some(sp.control(i + 1)), value: dist(p, q).into() });
+            }
+            if self.rng.chance(0.5) {
+                self.pin_somewhere(sp.start());
+            }
+            // Another spline carrying on smoothly from this one.
+            if self.rng.chance(0.5) {
+                let d = sub(last, points[count - 2]);
+                let (a, b) = ([last[0] + d[0], last[1] + d[1]], [last[0] + d[0] * 2.0 + 3.0, last[1] + d[1] * 2.0 - 2.0]);
+                let next = self.s.spline(SplineShape::uniform(3, vec![last, a, b, [b[0] + 6.0, b[1] + 1.0]]).expect("a spline"));
+                self.join(next.start(), sp.end());
+                self.on(Rule::Tangent { a: sp, b: next });
+                made.push(next);
+            }
+        }
+        // A fixed one, whose every control point stays.
+        if self.rng.chance(0.3) {
+            let far = polar(c, 250.0, self.rng.range(0.0, TAU));
+            let shape = SplineShape::through(&[far, [far[0] + 8.0, far[1] + 5.0], [far[0] + 16.0, far[1] - 2.0], [far[0] + 25.0, far[1] + 1.0]]).expect("a spline");
+            let f = self.s.spline(shape);
+            let _ = self.s.fix(f);
+            made.push(f);
+        }
+        made
+    }
+
     /// Ellipses and elliptical arcs, with everything that can hold them.
     fn ellipses(&mut self, c: P2) -> Vec<EntityId> {
         let (ra, rb, turn) = (self.rng.range(10.0, 20.0), self.rng.range(4.0, 9.0), self.rng.range(0.0, TAU));
@@ -826,7 +948,7 @@ impl Gen<'_> {
             self.on(Rule::Horizontal { a: a.center(), b: Some(a.major()) });
             self.on(Rule::MajorRadius { of: a, value: sa.into() });
             self.on(Rule::MinorRadius { of: a, value: sb.into() });
-            if let Some(Geometry::EllipticalArc { start, end, .. }) = self.s.entity(a).map(|x| x.geometry) {
+            if let Some(Geometry::EllipticalArc { start, end, .. }) = self.s.entity(a).map(|x| x.geometry.clone()) {
                 let (l0, l1) = (self.s.line(end, [end[0] + 3.0, end[1] + 9.0]), self.s.line([start[0] - 4.0, start[1] + 8.0], start));
                 self.join(a.end(), l0.start());
                 self.join(l1.end(), a.start());
@@ -1076,6 +1198,13 @@ pub fn perturb(s: &Sketch, rng: &mut Rng, m: f64) -> Sketch {
     let mut out = s.clone();
     for e in &mut out.entities {
         e.geometry = match e.geometry {
+            Geometry::Spline(ref shape) => {
+                let mut moved = (**shape).clone();
+                for q in &mut moved.points {
+                    *q = nudge(*q, rng, m);
+                }
+                Geometry::Spline(std::sync::Arc::new(moved))
+            }
             Geometry::Point { at } => Geometry::Point { at: nudge(at, rng, m) },
             Geometry::Line { start, end } => Geometry::Line { start: nudge(start, rng, m), end: nudge(end, rng, m) },
             Geometry::Circle { center, radius } => {
@@ -1164,13 +1293,17 @@ pub fn generate_sized(category: Category, seed: u64, entities: usize) -> Case {
             let c = [gen.rng.range(-20.0, 20.0), gen.rng.range(-20.0, 20.0)];
             gen.ellipses(c);
         }
+        Category::Splines => {
+            let c = [gen.rng.range(-20.0, 20.0), gen.rng.range(-20.0, 20.0)];
+            gen.splines(c);
+        }
         Category::Mixed => {
             let blocks = gen.rng.int(2, 5);
             let mut anchors: Vec<EntityId> = Vec::new();
             for b in 0..blocks {
                 let c = [b as f64 * 120.0, gen.rng.range(-30.0, 30.0)];
                 let made = gen.block(c);
-                if let Some(&first) = made.iter().find(|&&e| matches!(gen.s.entity(e).map(|x| x.geometry), Some(Geometry::Line { .. }))) {
+                if let Some(&first) = made.iter().find(|&&e| matches!(gen.s.entity(e).map(|x| x.geometry.clone()), Some(Geometry::Line { .. }))) {
                     anchors.push(first);
                 }
             }
@@ -1194,7 +1327,7 @@ pub fn generate_sized(category: Category, seed: u64, entities: usize) -> Case {
                 }
                 let c = [(b % 8) as f64 * 130.0, (b / 8) as f64 * 130.0];
                 let made = gen.block(c);
-                let line = made.iter().copied().find(|&e| matches!(gen.s.entity(e).map(|x| x.geometry), Some(Geometry::Line { .. })));
+                let line = made.iter().copied().find(|&e| matches!(gen.s.entity(e).map(|x| x.geometry.clone()), Some(Geometry::Line { .. })));
                 if let (Some(a), Some(l)) = (last, line) {
                     let (p, q) = (point_of(&gen.s, a.start()).unwrap(), point_of(&gen.s, l.start()).unwrap());
                     gen.on(Rule::HorizontalDistance { a: a.start(), b: l.start(), value: (q[0] - p[0]).into() });
@@ -1449,6 +1582,7 @@ fn describe_failure(e: &SketchError) -> String {
 pub fn largest_move(a: &Sketch, b: &Sketch) -> f64 {
     let flat = |g: &Geometry| -> Vec<f64> {
         match *g {
+            Geometry::Spline(ref shape) => shape.points.iter().flatten().copied().collect(),
             Geometry::Point { at } => at.to_vec(),
             Geometry::Line { start, end } => vec![start[0], start[1], end[0], end[1]],
             Geometry::Circle { center, radius } => vec![center[0], center[1], radius],

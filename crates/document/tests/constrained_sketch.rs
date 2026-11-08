@@ -307,6 +307,46 @@ fn a_d_shape_from_an_elliptical_arc_and_a_chord_extrudes() {
 }
 
 #[test]
+fn a_drawn_spline_extrudes_and_revolves() {
+    // A spline over a base line, dimensioned by its ends.
+    let build = || {
+        let mut s = sk::Sketch::new();
+        let k = s.spline_through(&[[0.0, 5.0], [8.0, 11.0], [16.0, 7.0], [24.0, 12.0]]).unwrap();
+        let down = s.line([24.0, 12.0], [24.0, 0.0]);
+        let base = s.line([24.0, 0.0], [0.0, 0.0]);
+        let up = s.line([0.0, 0.0], [0.0, 5.0]);
+        s.constrain(Rule::Coincident { a: k.end(), b: down.start() });
+        s.constrain(Rule::Coincident { a: down.end(), b: base.start() });
+        s.constrain(Rule::Coincident { a: base.end(), b: up.start() });
+        s.constrain(Rule::Coincident { a: up.end(), b: k.start() });
+        s.constrain(Rule::Coincident { a: base.end(), b: ORIGIN.whole() });
+        s.constrain(Rule::Horizontal { a: base.whole(), b: None });
+        s.constrain(Rule::Vertical { a: up.whole(), b: None });
+        s.constrain(Rule::Vertical { a: down.whole(), b: None });
+        (s, k)
+    };
+    let (s, k) = build();
+    let area: f64 = s.solve().unwrap().sketch.regions().unwrap().iter().map(|r| r.area()).sum();
+    assert!(area > 100.0, "{area}");
+    let (o, e) = solid_of(s);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - area * 2.0).abs() < 1e-7, "{} vs {}", vol(&o), area * 2.0);
+    let body = o.body.as_ref().unwrap();
+    validate(body).unwrap();
+    assert!(body.faces.iter().any(|f| f.tag == e.side(k.0).tag() && matches!(f.surface, Surface::Extruded { .. })), "the spline's face is named for it");
+
+    // Around the sketch's y axis: a turned shape, with its volume from Pappus through the kernel's own integral.
+    let (s, _) = build();
+    let mut doc = Document::new();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    doc.add(Op::Revolve { sketch: f, degrees: 360.0.into(), mode: Mode::Add }).unwrap();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!(vol(&o) > 0.0);
+    validate(o.body.as_ref().unwrap()).unwrap();
+}
+
+#[test]
 fn an_ellipse_with_a_hole_revolves() {
     // Away from the axis: an elliptical torus, whose volume Pappus gives.
     let mut s = sk::Sketch::new();

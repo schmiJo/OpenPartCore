@@ -35,7 +35,7 @@ fn pick_drag(s: &Sketch, free: &[Ref], rng: &mut Rng) -> Option<(Ref, P2)> {
         return None;
     }
     let r = points[rng.int(0, points.len() as i64 - 1) as usize];
-    let at = match (s.entity(r.entity)?.geometry, r.part) {
+    let at = match (s.entity(r.entity)?.geometry.clone(), r.part) {
         (Geometry::Point { at }, _) => at,
         (Geometry::Line { start, .. }, Part::Start) => start,
         (Geometry::Line { end, .. }, Part::End) => end,
@@ -126,6 +126,7 @@ fn export(dir: &str, cases: u64, first: u64) {
 fn moved_others(a: &Sketch, b: &Sketch, grab: Ref) -> f64 {
     let parts = |g: &Geometry| -> Vec<(Part, P2)> {
         match *g {
+            Geometry::Spline(ref shape) => shape.points.iter().enumerate().map(|(i, q)| (Part::Control(i as u32), *q)).collect(),
             Geometry::Point { at } => vec![(Part::Whole, at)],
             Geometry::Line { start, end } => vec![(Part::Start, start), (Part::End, end)],
             Geometry::Circle { center, radius } => vec![(Part::Center, center), (Part::Radius, [radius, 0.0])],
@@ -154,7 +155,7 @@ fn moved_others(a: &Sketch, b: &Sketch, grab: Ref) -> f64 {
 /// asked to meet that one.
 fn without_unmapped(s: &Sketch) -> Sketch {
     let mut out = s.clone();
-    let curve = |id: EntityId| matches!(s.entity(id).map(|e| e.geometry), Some(Geometry::Circle { .. } | Geometry::Arc { .. }));
+    let curve = |id: EntityId| matches!(s.entity(id).map(|e| e.geometry.clone()), Some(Geometry::Circle { .. } | Geometry::Arc { .. }));
     out.constraints.retain(|c| !matches!(c.rule, Rule::Normal { a, b } if curve(a) && curve(b)));
     out
 }
@@ -165,6 +166,7 @@ fn with_geometry(s: &Sketch, list: &[Value]) -> Option<Sketch> {
     for (e, values) in out.entities.iter_mut().zip(list) {
         let v: Vec<f64> = values.as_array()?.iter().filter_map(Value::as_f64).collect();
         e.geometry = match e.geometry {
+            Geometry::Spline(_) => e.geometry.clone(),
             Geometry::Point { .. } => Geometry::Point { at: [v[0], v[1]] },
             Geometry::Line { .. } => Geometry::Line { start: [v[0], v[1]], end: [v[2], v[3]] },
             Geometry::Circle { .. } => Geometry::Circle { center: [v[0], v[1]], radius: v[2] },

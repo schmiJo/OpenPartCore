@@ -655,7 +655,7 @@ fn bad_files_are_refused_with_a_reason() {
         ("nonsense".into(), "not valid JSON"),
         ("{\"format\":\"coreshape-sketch\",\"version\":9}".into(), "version"),
         ("{\"format\":\"coreshape-sketch\",\"version\":1,\"more\":1}".into(), "unknown field"),
-        (wrap(r#"{"id":1,"type":"spline"}"#, ""), "unknown entity"),
+        (wrap(r#"{"id":1,"type":"hyperbola"}"#, ""), "unknown entity"),
         (wrap(r#"{"id":1,"type":"line","start":[0,0]}"#, ""), "needs a \"end\""),
         (wrap(r#"{"id":1,"type":"line","start":[0],"end":[1,0]}"#, ""), "written [x, y]"),
         (wrap(&format!("{line},{line}"), ""), "appears twice"),
@@ -1008,4 +1008,147 @@ fn ellipses_save_and_load() {
     let back = Sketch::load_text(&s.save_text()).unwrap();
     assert_eq!(back, s);
     assert_eq!(Ref::parse("7.major").unwrap(), EntityId(7).major());
+}
+
+// ----- Splines -----
+
+fn sample_spline() -> SplineShape {
+    SplineShape::uniform(3, vec![[0.0, 0.0], [5.0, 8.0], [12.0, -4.0], [18.0, 6.0], [25.0, 0.0]]).unwrap()
+}
+
+#[test]
+fn a_splines_freedoms_are_its_control_points() {
+    let mut s = Sketch::new();
+    let k = s.spline(sample_spline());
+    assert_eq!(s.solve().unwrap().analysis.dof, 10);
+    s.constrain(Rule::Coincident { a: k.start(), b: ORIGIN.whole() });
+    assert_eq!(s.solve().unwrap().analysis.dof, 8);
+    s.constrain(Rule::Horizontal { a: k.control(0), b: Some(k.control(4)) });
+    let span = s.constrain(Rule::Distance { a: k.start(), b: Some(k.end()), value: 30.0.into() });
+    let solved = s.solve().unwrap();
+    assert_eq!(solved.analysis.dof, 6);
+    assert!((solved.sketch.measure(span).unwrap() - 30.0).abs() < 1e-9);
+    match solved.sketch.entity(k).unwrap().geometry {
+        Geometry::Spline(ref shape) => {
+            let (t0, t1) = shape.domain();
+            // Its ends land where the control points do.
+            assert!(shape.eval(t0).0[0].abs() < 1e-9 && shape.eval(t0).0[1].abs() < 1e-9);
+            assert!((shape.eval(t1).0[0].abs() - 30.0).abs() < 1e-9 && shape.eval(t1).0[1].abs() < 1e-9);
+            assert_eq!(shape.knots, sample_spline().knots, "knots don't move");
+        }
+        _ => panic!(),
+    }
+    let free: Vec<String> = solved.analysis.free.iter().map(|r| r.name()).collect();
+    assert!(free.contains(&"1.p2".to_string()), "{free:?}");
+}
+
+#[test]
+fn tangent_at_an_end_goes_along_its_first_or_last_leg() {
+    let mut s = Sketch::new();
+    let k = s.spline(sample_spline());
+    let l = s.line([-10.0, -3.0], [0.0, 0.0]);
+    s.constrain(Rule::Coincident { a: l.end(), b: k.start() });
+    s.constrain(Rule::Tangent { a: l, b: k });
+    s.constrain(Rule::Horizontal { a: l.whole(), b: None });
+    let c = s.circle([29.0, 0.0], 3.0);
+    let a = s.arc([30.0, 3.0], 3.0, 180.0, 270.0);
+    let _ = c;
+    s.constrain(Rule::Coincident { a: a.start(), b: k.end() });
+    s.constrain(Rule::Tangent { a, b: k });
+    let solved = s.solve().unwrap();
+    assert!(violations(&solved.sketch, 1e-8).is_empty(), "{:?}", violations(&solved.sketch, 1e-8));
+    match solved.sketch.entity(k).unwrap().geometry {
+        Geometry::Spline(ref shape) => {
+            let (t0, _) = shape.domain();
+            let d = shape.eval(t0).1;
+            assert!(d[1].abs() < 1e-8 * d[0].abs(), "leaves level: {d:?}");
+        }
+        _ => panic!(),
+    }
+    // Two splines end to end, smooth across the join.
+    let mut t = Sketch::new();
+    let x = t.spline(sample_spline());
+    let y = t.spline(SplineShape::uniform(3, vec![[25.0, 0.0], [30.0, -5.0], [38.0, 3.0], [45.0, 0.0]]).unwrap());
+    t.constrain(Rule::Coincident { a: y.start(), b: x.end() });
+    t.constrain(Rule::Tangent { a: x, b: y });
+    let solved = t.solve().unwrap();
+    assert!(violations(&solved.sketch, 1e-8).is_empty(), "{:?}", violations(&solved.sketch, 1e-8));
+    // Tangent with nothing shared, or a point on the curve, is refused for now and says so.
+    let mut u = Sketch::new();
+    let k = u.spline(sample_spline());
+    let l = u.line([0.0, 20.0], [30.0, 20.0]);
+    u.constrain(Rule::Tangent { a: l, b: k });
+    assert!(u.solve().unwrap_err().message.contains("needs an end of it joined"));
+    let mut u = Sketch::new();
+    let k = u.spline(sample_spline());
+    let p = u.point(10.0, 3.0);
+    u.constrain(Rule::Coincident { a: p.whole(), b: k.whole() });
+    assert!(u.solve().unwrap_err().message.contains("isn't available yet"));
+}
+
+#[test]
+fn splines_drag_and_fix_and_save() {
+    let mut s = Sketch::new();
+    let k = s.spline(sample_spline());
+    let l = s.line([25.0, 0.0], [40.0, 0.0]);
+    s.constrain(Rule::Coincident { a: l.start(), b: k.end() });
+    // Dragging a control point moves only what it must.
+    let (dragged, report) = s.drag(Grab::Point(k.control(2)), [12.0, 9.0]).unwrap();
+    assert!(report.distance < 1e-6, "{report:?}");
+    assert!(largest_unrelated_move(&s, &dragged, l) < 1e-6);
+    // Grabbing an end drags the line with it.
+    let (dragged, _) = s.drag(Grab::Point(k.end()), [27.0, 5.0]).unwrap();
+    match dragged.entity(l).unwrap().geometry {
+        Geometry::Line { start, .. } => assert!((start[0] - 27.0).abs() < 1e-6 && (start[1] - 5.0).abs() < 1e-6, "{start:?}"),
+        _ => panic!(),
+    }
+    let mut f = Sketch::new();
+    let k = f.spline(sample_spline());
+    f.fix(k).unwrap();
+    f.fix(k.control(1)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(f.solve().unwrap().analysis.dof, 0);
+
+    // As data, exactly, and by hand with just the points it goes through.
+    let back = Sketch::load_text(&s.save_text()).unwrap();
+    assert_eq!(back, s);
+    let text = r#"{"format":"coreshape-sketch","version":1,"entities":[{"id":1,"type":"spline","through":[[0,0],[5,4],[10,0],[15,3]]}],"constraints":[]}"#;
+    let by_hand = Sketch::load_text(text).unwrap();
+    assert_eq!(by_hand.solve().unwrap().analysis.dof, 8);
+    assert_eq!(Ref::parse("7.p12").unwrap(), EntityId(7).control(12));
+    assert!(Sketch::load_text(&text.replace("[[0,0],[5,4],[10,0],[15,3]]", "[[0,0],[0,0]]")).is_err());
+}
+
+fn largest_unrelated_move(a: &Sketch, b: &Sketch, only: EntityId) -> f64 {
+    let (ga, gb) = (&a.entity(only).unwrap().geometry, &b.entity(only).unwrap().geometry);
+    match (ga, gb) {
+        (Geometry::Line { start: s0, end: e0 }, Geometry::Line { start: s1, end: e1 }) => {
+            (s0[0] - s1[0]).abs().max((s0[1] - s1[1]).abs()).max((e0[0] - e1[0]).abs()).max((e0[1] - e1[1]).abs())
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn a_spline_through_points_passes_through_them_exactly() {
+    let through = [[0.0, 0.0], [10.0, 4.0], [22.0, -3.0], [30.0, 5.0], [41.0, 0.0]];
+    let shape = SplineShape::through(&through).unwrap();
+    let (t0, t1) = shape.domain();
+    for q in &through {
+        let best = (0..=20000).map(|i| {
+            let p = shape.eval(t0 + (t1 - t0) * i as f64 / 20000.0).0;
+            (p[0] - q[0]).hypot(p[1] - q[1])
+        }).fold(f64::INFINITY, f64::min);
+        assert!(best < 1e-2, "{q:?} {best}");
+    }
+    // The derivative matches differences, with weights too.
+    let mut r = sample_spline();
+    r.weights = vec![1.0, 3.0, 0.5, 2.0, 1.0];
+    let (a, b) = r.domain();
+    for i in 1..200 {
+        let t = a + (b - a) * (i as f64 + 0.37) / 200.0;
+        let h = 1e-6;
+        let (p0, p1) = (r.eval(t - h).0, r.eval(t + h).0);
+        let d = r.eval(t).1;
+        assert!(((p1[0] - p0[0]) / (2.0 * h) - d[0]).abs() < 1e-5 && ((p1[1] - p0[1]) / (2.0 * h) - d[1]).abs() < 1e-5, "{t}");
+    }
 }

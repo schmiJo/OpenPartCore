@@ -1,6 +1,6 @@
 //! Finds the closed regions of a sketch: the areas a kernel profile can be made from.
 //!
-//! Lines, arcs, circles and ellipses that aren't construction geometry are cut wherever they cross or touch,
+//! Lines, arcs, circles, ellipses and splines that aren't construction geometry are cut wherever they cross or touch,
 //! at crossings and T-junctions alike. Every area those pieces enclose is a region, with an id that
 //! survives solving and dragging. Pieces that enclose nothing, such as open curves and spurs, are
 //! reported as ignored rather than refused. A connected group of curves inside a region is a hole in
@@ -12,8 +12,10 @@
 
 use crate::model::*;
 use crate::solve::{ErrorKind, SketchError};
+use crate::spline::SplineShape;
 use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
+use std::sync::Arc;
 
 /// Points this close count as one junction, and a curve's end this close to another curve lands on it.
 /// Within the kernel's tolerance, and far above the solver's.
@@ -22,7 +24,7 @@ const JOIN: f64 = 1e-7;
 /// A walk enclosing less than this is treated as having no area.
 const MIN_AREA: f64 = 1e-9;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SegKind {
     Line { a: P2, b: P2 },
     /// Runs from angle `a0` to `a1` in radians: counter-clockwise if `a1 > a0`, clockwise if not.
@@ -31,10 +33,12 @@ pub enum SegKind {
     /// Part or all of an ellipse, by eccentric angle measured from the unit vector `x` along the major
     /// axis, with the same directions as an arc.
     Ellipse { center: P2, x: P2, major: f64, minor: f64, a0: f64, a1: f64 },
+    /// Part of a spline, from parameter `t0` to `t1`, in whichever direction.
+    Spline { shape: Arc<SplineShape>, t0: f64, t1: f64 },
 }
 
 /// A piece of a loop, and the entity it came from.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Seg {
     pub entity: EntityId,
     pub kind: SegKind,
@@ -45,7 +49,8 @@ impl Seg {
         match self.kind {
             SegKind::Line { a, .. } => a,
             SegKind::Arc { center, radius, a0, .. } => [center[0] + radius * a0.cos(), center[1] + radius * a0.sin()],
-            SegKind::Ellipse { a0, .. } => point_at(self.kind, a0),
+            SegKind::Ellipse { a0, .. } => point_at(&self.kind, a0),
+            SegKind::Spline { t0, .. } => point_at(&self.kind, t0),
         }
     }
 
@@ -53,7 +58,8 @@ impl Seg {
         match self.kind {
             SegKind::Line { b, .. } => b,
             SegKind::Arc { center, radius, a1, .. } => [center[0] + radius * a1.cos(), center[1] + radius * a1.sin()],
-            SegKind::Ellipse { a1, .. } => point_at(self.kind, a1),
+            SegKind::Ellipse { a1, .. } => point_at(&self.kind, a1),
+            SegKind::Spline { t1, .. } => point_at(&self.kind, t1),
         }
     }
 
@@ -62,6 +68,7 @@ impl Seg {
             SegKind::Line { a, b } => SegKind::Line { a: b, b: a },
             SegKind::Arc { center, radius, a0, a1 } => SegKind::Arc { center, radius, a0: a1, a1: a0 },
             SegKind::Ellipse { center, x, major, minor, a0, a1 } => SegKind::Ellipse { center, x, major, minor, a0: a1, a1: a0 },
+            SegKind::Spline { ref shape, t0, t1 } => SegKind::Spline { shape: shape.clone(), t0: t1, t1: t0 },
         };
         Seg { entity: self.entity, kind }
     }
@@ -74,7 +81,8 @@ impl Seg {
                 let (s, c) = ((a0 + a1) / 2.0).sin_cos();
                 [center[0] + radius * c, center[1] + radius * s]
             }
-            SegKind::Ellipse { a0, a1, .. } => point_at(self.kind, (a0 + a1) / 2.0),
+            SegKind::Ellipse { a0, a1, .. } => point_at(&self.kind, (a0 + a1) / 2.0),
+            SegKind::Spline { t0, t1, .. } => point_at(&self.kind, (t0 + t1) / 2.0),
         }
     }
 
@@ -91,7 +99,7 @@ impl Seg {
                 }
             }
             SegKind::Ellipse { major, minor, a0, a1, .. } => {
-                let d = velocity_at(self.kind, a0);
+                let d = velocity_at(&self.kind, a0);
                 let speed = d[0].hypot(d[1]);
                 let bend = major * minor / (speed * speed * speed);
                 if a1 >= a0 {
@@ -99,6 +107,18 @@ impl Seg {
                 } else {
                     ((-d[1]).atan2(-d[0]), -bend)
                 }
+            }
+            SegKind::Spline { t0, t1, .. } => {
+                let d = velocity_at(&self.kind, t0);
+                // The bend from how the direction changes a short way along.
+                let step = (t1 - t0) * 1e-4;
+                let e = velocity_at(&self.kind, t0 + step);
+                let (s0, s1) = (d[0].hypot(d[1]).max(1e-300), e[0].hypot(e[1]).max(1e-300));
+                let turn = (d[0] * e[1] - d[1] * e[0]) / (s0 * s1);
+                let moved = step.abs() * s0;
+                let bend = if moved > 0.0 { turn / moved } else { 0.0 };
+                let sign = if t1 >= t0 { 1.0 } else { -1.0 };
+                ((d[1] * sign).atan2(d[0] * sign), bend)
             }
         }
     }
@@ -126,6 +146,7 @@ impl Loop {
                     let (cx, cy) = (center[0] * x[1] - center[1] * x[0], center[0] * y[1] - center[1] * y[0]);
                     major * minor * (a1 - a0) + major * cx * (a1.cos() - a0.cos()) + minor * cy * (a1.sin() - a0.sin())
                 }
+                SegKind::Spline { ref shape, t0, t1 } => shape.twice_area(t0, t1),
             };
         }
         sum / 2.0
@@ -159,9 +180,9 @@ impl Loop {
                         }
                     }
                 }
-                SegKind::Ellipse { a0, a1, .. } => {
+                SegKind::Spline { t0: a0, t1: a1, .. } | SegKind::Ellipse { a0, a1, .. } => {
                     // Chords, split finer wherever the point is close enough to be between chord and curve.
-                    fn piece(kind: SegKind, p: P2, t0: f64, t1: f64, depth: u32, turn: &dyn Fn(P2, P2) -> f64) -> f64 {
+                    fn piece(kind: &SegKind, p: P2, t0: f64, t1: f64, depth: u32, turn: &dyn Fn(P2, P2) -> f64) -> f64 {
                         let (q0, q1, m) = (point_at(kind, t0), point_at(kind, t1), point_at(kind, (t0 + t1) / 2.0));
                         let reach = dist(q0, m).max(dist(q1, m));
                         if dist(p, m) > 1.5 * reach || depth == 0 {
@@ -170,10 +191,10 @@ impl Loop {
                             piece(kind, p, t0, (t0 + t1) / 2.0, depth - 1, turn) + piece(kind, p, (t0 + t1) / 2.0, t1, depth - 1, turn)
                         }
                     }
-                    let pieces = 8;
+                    let pieces = 16;
                     for k in 0..pieces {
                         let (b0, b1) = (a0 + (a1 - a0) * k as f64 / pieces as f64, a0 + (a1 - a0) * (k + 1) as f64 / pieces as f64);
-                        winding += piece(s.kind, p, b0, b1, 40, &turn);
+                        winding += piece(&s.kind, p, b0, b1, 40, &turn);
                     }
                 }
             }
@@ -286,8 +307,9 @@ fn dist(a: P2, b: P2) -> f64 {
 }
 
 /// The point at a curve's parameter: a fraction on a line, an angle on an arc or ellipse.
-fn point_at(kind: SegKind, t: f64) -> P2 {
-    match kind {
+fn point_at(kind: &SegKind, t: f64) -> P2 {
+    match *kind {
+        SegKind::Spline { ref shape, .. } => shape.eval(t).0,
         SegKind::Line { a, b } => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t],
         SegKind::Arc { center, radius, .. } => [center[0] + radius * t.cos(), center[1] + radius * t.sin()],
         SegKind::Ellipse { center, x, major, minor, .. } => {
@@ -298,8 +320,9 @@ fn point_at(kind: SegKind, t: f64) -> P2 {
 }
 
 /// How fast `point_at` moves with its parameter, going up.
-fn velocity_at(kind: SegKind, t: f64) -> P2 {
-    match kind {
+fn velocity_at(kind: &SegKind, t: f64) -> P2 {
+    match *kind {
+        SegKind::Spline { ref shape, .. } => shape.eval(t).1,
         SegKind::Line { a, b } => [b[0] - a[0], b[1] - a[1]],
         SegKind::Arc { radius, .. } => [-radius * t.sin(), radius * t.cos()],
         SegKind::Ellipse { x, major, minor, .. } => {
@@ -316,8 +339,53 @@ fn line_param(a: P2, b: P2, p: P2) -> f64 {
 
 /// Where along a curve a point lies, if it's within `JOIN` of the curve: a fraction on a line and an
 /// angle on an arc.
-fn param_on(kind: SegKind, p: P2) -> Option<f64> {
-    match kind {
+fn param_on(kind: &SegKind, p: P2) -> Option<f64> {
+    match *kind {
+        SegKind::Spline { ref shape, t0, t1 } => {
+            // A scan along each knot interval, then Newton from every dip in the distance, since two strands
+            // of a curve can pass close together and the nearest sample may be on the wrong one.
+            let mut stops = vec![t0];
+            for k in shape.breaks() {
+                if k > t0 && k < t1 {
+                    stops.push(k);
+                }
+            }
+            stops.push(t1);
+            let mut samples: Vec<(f64, f64)> = Vec::new();
+            for w in stops.windows(2) {
+                for i in 0..48 {
+                    let t = w[0] + (w[1] - w[0]) * i as f64 / 48.0;
+                    samples.push((t, dist(shape.eval(t).0, p)));
+                }
+            }
+            samples.push((t1, dist(shape.eval(t1).0, p)));
+            let (mut t, mut d) = (t0, f64::INFINITY);
+            for i in 0..samples.len() {
+                let before = if i > 0 { samples[i - 1].1 } else { f64::INFINITY };
+                let after = if i + 1 < samples.len() { samples[i + 1].1 } else { f64::INFINITY };
+                if samples[i].1 > before || samples[i].1 > after {
+                    continue;
+                }
+                let mut u = samples[i].0;
+                for _ in 0..16 {
+                    let (q, v) = shape.eval(u);
+                    let speed = v[0] * v[0] + v[1] * v[1];
+                    if speed <= 0.0 {
+                        break;
+                    }
+                    let step = ((p[0] - q[0]) * v[0] + (p[1] - q[1]) * v[1]) / speed;
+                    u = (u + step).clamp(t0, t1);
+                    if step.abs() < 1e-14 * (t1 - t0) {
+                        break;
+                    }
+                }
+                let here = dist(shape.eval(u).0, p);
+                if here < d {
+                    (t, d) = (u, here);
+                }
+            }
+            (d <= JOIN).then_some(t)
+        }
         SegKind::Line { a, b } => {
             let f = line_param(a, b, p);
             let foot = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
@@ -367,9 +435,10 @@ fn param_on(kind: SegKind, p: P2) -> Option<f64> {
 
 /// Where two curves meet when no closed form is at hand: wherever pieces of them come close, Newton's
 /// method from there on the two parameters, in a form that still settles where the curves only touch.
-fn crossings_numeric(s: SegKind, t: SegKind) -> Vec<P2> {
-    fn stations(kind: SegKind) -> (f64, f64, usize) {
-        match kind {
+fn crossings_numeric(s: &SegKind, t: &SegKind) -> Vec<P2> {
+    fn stations(kind: &SegKind) -> (f64, f64, usize) {
+        match *kind {
+            SegKind::Spline { ref shape, t0, t1 } => (t0, t1, (shape.breaks().len() * 24).max(32)),
             SegKind::Line { .. } => (0.0, 1.0, 64),
             SegKind::Arc { a0, a1, .. } => (a0, a1, (((a1 - a0).abs() * 16.0) as usize).max(8)),
             SegKind::Ellipse { a0, a1, major, minor, .. } => {
@@ -399,7 +468,20 @@ fn crossings_numeric(s: SegKind, t: SegKind) -> Vec<P2> {
             {
                 continue;
             }
-            let (mut u, mut v) = (along(s0, s1, ns, i) + (s1 - s0) / ns as f64 / 2.0, along(t0, t1, nt, j) + (t1 - t0) / nt as f64 / 2.0);
+            // Start where the chords cross, if they do, and from the middles if not. Newton stays near
+            // these pieces, since a far-off root would be found from its own pieces anyway.
+            let (ds, dt) = ((s1 - s0) / ns as f64, (t1 - t0) / nt as f64);
+            let (ua, va) = (along(s0, s1, ns, i), along(t0, t1, nt, j));
+            let (eu, ev) = ([b[0] - a[0], b[1] - a[1]], [d[0] - c[0], d[1] - c[1]]);
+            let denominator = eu[0] * ev[1] - eu[1] * ev[0];
+            let w = [c[0] - a[0], c[1] - a[1]];
+            let (fu, fv) = if denominator != 0.0 {
+                let (fu, fv) = ((w[0] * ev[1] - w[1] * ev[0]) / denominator, (w[0] * eu[1] - w[1] * eu[0]) / denominator);
+                ((fu.clamp(0.0, 1.0)), (fv.clamp(0.0, 1.0)))
+            } else {
+                (0.5, 0.5)
+            };
+            let (mut u, mut v) = (ua + ds * fu, va + dt * fv);
             for _ in 0..40 {
                 let (p, q) = (point_at(s, u), point_at(t, v));
                 let r = [p[0] - q[0], p[1] - q[1]];
@@ -413,8 +495,11 @@ fn crossings_numeric(s: SegKind, t: SegKind) -> Vec<P2> {
                     break;
                 }
                 let (step_u, step_v) = (((bb + damp) * g0 - ab * g1) / det, ((aa + damp) * g1 - ab * g0) / det);
-                u -= step_u;
-                v -= step_v;
+                u -= step_u.clamp(-ds.abs(), ds.abs());
+                v -= step_v.clamp(-dt.abs(), dt.abs());
+                if (u - ua).abs() > 3.0 * ds.abs() || (v - va).abs() > 3.0 * dt.abs() {
+                    break;
+                }
                 if step_u.abs() * aa.sqrt() + step_v.abs() * bb.sqrt() < 1e-13 {
                     break;
                 }
@@ -430,10 +515,10 @@ fn crossings_numeric(s: SegKind, t: SegKind) -> Vec<P2> {
 
 /// Where two curves cross or touch, leaving out where they run together: the ends of an overlap are
 /// found by testing each curve's ends against the other curve.
-fn crossings(s: SegKind, t: SegKind) -> Vec<P2> {
+fn crossings(s: &SegKind, t: &SegKind) -> Vec<P2> {
     match (s, t) {
-        (SegKind::Ellipse { .. }, _) | (_, SegKind::Ellipse { .. }) => crossings_numeric(s, t),
-        (SegKind::Line { a, b }, SegKind::Line { a: c, b: d }) => {
+        (SegKind::Ellipse { .. } | SegKind::Spline { .. }, _) | (_, SegKind::Ellipse { .. } | SegKind::Spline { .. }) => crossings_numeric(s, t),
+        (&SegKind::Line { a, b }, &SegKind::Line { a: c, b: d }) => {
             let (u, v) = ([b[0] - a[0], b[1] - a[1]], [d[0] - c[0], d[1] - c[1]]);
             let cross = u[0] * v[1] - u[1] * v[0];
             if cross.abs() <= 1e-12 * dist(a, b) * dist(c, d) {
@@ -443,7 +528,7 @@ fn crossings(s: SegKind, t: SegKind) -> Vec<P2> {
             let f = (w[0] * v[1] - w[1] * v[0]) / cross;
             vec![[a[0] + u[0] * f, a[1] + u[1] * f]]
         }
-        (SegKind::Line { a, b }, SegKind::Arc { center, radius, .. }) | (SegKind::Arc { center, radius, .. }, SegKind::Line { a, b }) => {
+        (&SegKind::Line { a, b }, &SegKind::Arc { center, radius, .. }) | (&SegKind::Arc { center, radius, .. }, &SegKind::Line { a, b }) => {
             let f = line_param(a, b, center);
             let foot = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
             let d = dist(foot, center);
@@ -455,7 +540,7 @@ fn crossings(s: SegKind, t: SegKind) -> Vec<P2> {
             let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
             vec![[foot[0] + u[0] * h, foot[1] + u[1] * h], [foot[0] - u[0] * h, foot[1] - u[1] * h]]
         }
-        (SegKind::Arc { center: c0, radius: r0, .. }, SegKind::Arc { center: c1, radius: r1, .. }) => {
+        (&SegKind::Arc { center: c0, radius: r0, .. }, &SegKind::Arc { center: c1, radius: r1, .. }) => {
             let d = dist(c0, c1);
             if d <= JOIN || d > r0 + r1 + JOIN || d < (r0 - r1).abs() - JOIN {
                 return Vec::new();
@@ -469,8 +554,54 @@ fn crossings(s: SegKind, t: SegKind) -> Vec<P2> {
     }
 }
 
-fn bounds(kind: SegKind) -> [f64; 4] {
-    match kind {
+/// Where a spline crosses itself, as the two parameters of each crossing. Nothing else here can.
+fn self_crossings(kind: &SegKind) -> Vec<(f64, f64)> {
+    let SegKind::Spline { ref shape, t0, t1 } = *kind else {
+        return Vec::new();
+    };
+    let n = (shape.breaks().len() * 24).max(48);
+    let at = |i: usize| t0 + (t1 - t0) * i as f64 / n as f64;
+    let points: Vec<P2> = (0..=n).map(|i| point_at(kind, at(i))).collect();
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for i in 0..n {
+        let (a, b) = (points[i], points[i + 1]);
+        for j in i + 2..n {
+            let (c, d) = (points[j], points[j + 1]);
+            let margin = (dist(a, b) + dist(c, d)) * 0.2 + JOIN;
+            if a[0].max(b[0]) + margin < c[0].min(d[0])
+                || c[0].max(d[0]) + margin < a[0].min(b[0])
+                || a[1].max(b[1]) + margin < c[1].min(d[1])
+                || c[1].max(d[1]) + margin < a[1].min(b[1])
+            {
+                continue;
+            }
+            let (mut u, mut v) = ((at(i) + at(i + 1)) / 2.0, (at(j) + at(j + 1)) / 2.0);
+            for _ in 0..30 {
+                let (p, q) = (shape.eval(u), shape.eval(v));
+                let r = [p.0[0] - q.0[0], p.0[1] - q.0[1]];
+                let det = -p.1[0] * q.1[1] + p.1[1] * q.1[0];
+                if det.abs() < 1e-300 {
+                    break;
+                }
+                let (du, dv) = ((-r[0] * q.1[1] + r[1] * q.1[0]) / det, (p.1[0] * r[1] - p.1[1] * r[0]) / det);
+                u = (u - du).clamp(t0, t1);
+                v = (v - dv).clamp(t0, t1);
+                if du.abs() + dv.abs() < 1e-14 * (t1 - t0) {
+                    break;
+                }
+            }
+            let apart = (u - v).abs() > (t1 - t0) / n as f64;
+            if apart && dist(shape.eval(u).0, shape.eval(v).0) <= JOIN && !out.iter().any(|o| (o.0 - u).abs() + (o.1 - v).abs() < 1e-9 * (t1 - t0)) {
+                out.push((u.min(v), u.max(v)));
+            }
+        }
+    }
+    out
+}
+
+fn bounds(kind: &SegKind) -> [f64; 4] {
+    match *kind {
+        SegKind::Spline { ref shape, .. } => shape.bounds(),
         SegKind::Line { a, b } => [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])],
         SegKind::Arc { center, radius, .. } => [center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius],
         SegKind::Ellipse { center, major, minor, .. } => {
@@ -519,7 +650,7 @@ struct Piece {
 /// Half-edge `h` walks piece `h / 2`, forward if `h` is even.
 fn walked(pieces: &[Piece], h: usize) -> Seg {
     if h % 2 == 0 {
-        pieces[h / 2].seg
+        pieces[h / 2].seg.clone()
     } else {
         pieces[h / 2].seg.reversed()
     }
@@ -648,6 +779,11 @@ impl Sketch {
                 continue;
             }
             let curve = match e.geometry {
+                Geometry::Spline(ref shape) => {
+                    let (t0, t1) = shape.domain();
+                    (shape.check().is_ok() && dist(shape.eval(t0).0, shape.eval((t0 + t1) / 2.0).0).max(dist(shape.eval(t0).0, shape.eval(t1).0)) > JOIN)
+                        .then(|| (SegKind::Spline { shape: shape.clone(), t0, t1 }, false))
+                }
                 Geometry::Point { .. } => continue,
                 Geometry::Line { start, end } => {
                     (dist(start, end) > JOIN && dist(start, end).is_finite()).then_some((SegKind::Line { a: start, b: end }, false))
@@ -692,14 +828,15 @@ impl Sketch {
         let mut points: Vec<P2> = Vec::new();
         let mut marks: Vec<Vec<(f64, usize)>> = vec![Vec::new(); curves.len()];
         let mut ends: Vec<Vec<usize>> = vec![Vec::new(); curves.len()];
-        for (i, &(entity, kind, closed)) in curves.iter().enumerate() {
-            if closed {
+        for (i, (entity, kind, closed)) in curves.iter().enumerate() {
+            if *closed {
                 continue;
             }
-            let seg = Seg { entity, kind };
-            let (first, last) = match kind {
+            let seg = Seg { entity: *entity, kind: kind.clone() };
+            let (first, last) = match *kind {
                 SegKind::Line { .. } => (0.0, 1.0),
                 SegKind::Arc { a0, a1, .. } | SegKind::Ellipse { a0, a1, .. } => (a0, a1),
+                SegKind::Spline { t0, t1, .. } => (t0, t1),
             };
             for (p, t) in [(seg.start(), first), (seg.end(), last)] {
                 points.push(p);
@@ -707,14 +844,21 @@ impl Sketch {
                 marks[i].push((t, points.len() - 1));
             }
         }
-        let boxes: Vec<[f64; 4]> = curves.iter().map(|c| bounds(c.1)).collect();
+        for (i, c) in curves.iter().enumerate() {
+            for (u, v) in self_crossings(&c.1) {
+                points.push(point_at(&c.1, u));
+                marks[i].push((u, points.len() - 1));
+                marks[i].push((v, points.len() - 1));
+            }
+        }
+        let boxes: Vec<[f64; 4]> = curves.iter().map(|c| bounds(&c.1)).collect();
         for i in 0..curves.len() {
             for j in i + 1..curves.len() {
                 let (a, b) = (boxes[i], boxes[j]);
                 if a[2] + JOIN < b[0] || b[2] + JOIN < a[0] || a[3] + JOIN < b[1] || b[3] + JOIN < a[1] {
                     continue;
                 }
-                let (s, t) = (curves[i].1, curves[j].1);
+                let (s, t) = (&curves[i].1, &curves[j].1);
                 for p in crossings(s, t) {
                     if let (Some(u), Some(v)) = (param_on(s, p), param_on(t, p)) {
                         points.push(p);
@@ -739,10 +883,16 @@ impl Sketch {
         // Cut each curve at its junctions.
         let mut pieces: Vec<Piece> = Vec::new();
         let mut free_circles: Vec<usize> = Vec::new();
-        for (c, &(entity, kind, closed)) in curves.iter().enumerate() {
+        for (c, (entity, kind, closed)) in curves.iter().enumerate() {
+            let (entity, closed) = (*entity, *closed);
             let mut list = std::mem::take(&mut marks[c]);
             list.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let speed = match kind {
+            let speed = match *kind {
+                // The slowest it goes, roughly: its length over its range, which a stop near another is measured by.
+                SegKind::Spline { ref shape, t0, t1 } => {
+                    let d = shape.eval((t0 + t1) / 2.0).1;
+                    d[0].hypot(d[1]).max(1e-9)
+                }
                 SegKind::Line { a, b } => dist(a, b),
                 SegKind::Arc { radius, .. } => radius,
                 SegKind::Ellipse { major, minor, .. } => major.min(minor),
@@ -765,7 +915,7 @@ impl Sketch {
                     stops.pop();
                 }
                 stops.push((stops[0].0 + TAU, stops[0].1));
-            } else if let (SegKind::Arc { a1, .. } | SegKind::Ellipse { a1, .. }, Some(last)) = (kind, stops.last_mut()) {
+            } else if let (&SegKind::Arc { a1, .. } | &SegKind::Ellipse { a1, .. } | &SegKind::Spline { t1: a1, .. }, Some(last)) = (kind, stops.last_mut()) {
                 last.0 = a1;
             } else if let Some(last) = stops.last_mut() {
                 last.0 = 1.0;
@@ -776,7 +926,8 @@ impl Sketch {
             }
             for w in stops.windows(2) {
                 let ((t0, n0), (t1, n1)) = (w[0], w[1]);
-                let seg_kind = match kind {
+                let seg_kind = match *kind {
+                    SegKind::Spline { ref shape, .. } => SegKind::Spline { shape: shape.clone(), t0, t1 },
                     SegKind::Line { .. } => SegKind::Line { a: points[n0], b: points[n1] },
                     SegKind::Arc { center, radius, .. } => SegKind::Arc { center, radius, a0: t0, a1: t1 },
                     SegKind::Ellipse { center, x, major, minor, .. } => SegKind::Ellipse { center, x, major, minor, a0: t0, a1: t1 },
@@ -926,16 +1077,16 @@ impl Sketch {
         }
         // A circle nothing touches is a group of its own: one walk each way round.
         for &c in &free_circles {
-            let (entity, kind, _) = curves[c];
+            let (entity, kind, _) = curves[c].clone();
             let group = parent.len();
             parent.push(group);
             let seg = Seg { entity, kind };
-            let area = Loop { segs: vec![seg] }.signed_area();
+            let area = Loop { segs: vec![seg.clone()] }.signed_area();
             if area < MIN_AREA {
                 ignored.push(Ignored { entity, whole: true, why: WhyIgnored::NoArea, pieces: vec![seg] });
                 continue;
             }
-            outers.push(Walk { segs: vec![seg], steps: vec![(entity.0, true)], starts: vec![0.0], group, area });
+            outers.push(Walk { segs: vec![seg.clone()], steps: vec![(entity.0, true)], starts: vec![0.0], group, area });
             inners.push(Walk { segs: vec![seg.reversed()], steps: vec![(entity.0, false)], starts: vec![0.0], group, area: -area });
         }
 
@@ -1022,8 +1173,8 @@ impl Sketch {
             let p = &pieces[i];
             let whole = remaining[p.curve] == 0;
             match ignored.iter_mut().find(|g| g.entity == p.seg.entity && g.why == why) {
-                Some(group) => group.pieces.push(p.seg),
-                None => ignored.push(Ignored { entity: p.seg.entity, whole, why, pieces: vec![p.seg] }),
+                Some(group) => group.pieces.push(p.seg.clone()),
+                None => ignored.push(Ignored { entity: p.seg.entity, whole, why, pieces: vec![p.seg.clone()] }),
             }
         }
         Arrangement { regions, ignored }

@@ -13,7 +13,12 @@ fn main() {
     // SPLINES=1 runs the spline categories instead.
     let categories: &[Category] = if std::env::var("SPLINES").is_ok() { &SPLINE_CATEGORIES } else { &ALL_CATEGORIES };
     println!("{:<20} {:>6} {:>8} {:>8} {:>10}", "category", "cases", "refused", "wrong", "time");
+    // ONLY_CATEGORY=name runs just that one.
+    let only = std::env::var("ONLY_CATEGORY").ok();
     for &category in categories {
+        if only.as_deref().is_some_and(|o| o != format!("{category:?}")) {
+            continue;
+        }
         let t = Instant::now();
         let mut handles = Vec::new();
         for w in 0..threads as u64 {

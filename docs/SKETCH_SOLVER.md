@@ -71,7 +71,30 @@ method on both parameters, in a damped form that still settles where they only t
 **Tested** by 5,000 random sketches in this solver's own fuzz with no refusals or wrong answers, and 300 against PlaneGCS. PlaneGCS accepted all 294 it could
 build without moving them, with the same freedom on all and no wrong answers on either side. The other 6 raised an error when building the
 FreeCAD geometry. In 19 of 261 drags this solver stopped short where PlaneGCS got there, by at most 0.32 mm and with every constraint holding, which is
-more often than elsewhere and isn't explained yet. PlaneGCS's own drags broke a constraint in 8 of them. Regions with ellipses are tested against the raster.
+more often than elsewhere and isn't explained yet. PlaneGCS's own drags broke a constraint in 8 of them. Regions with ellipses are tested against the raster below.
+
+## Splines
+
+A spline is its control points, 2 lengths each, with its weights and knots staying as they are. It keeps the sketch's rule that every variable is a length, so
+"move as little as possible" still means something.
+
+| Works with | How |
+|---|---|
+| `7.start`, `7.end`, `7.p2` | Points like any other, for `coincident`, `distance`, `horizontal`, `fix` and the rest. A clamped spline passes through its first and last |
+| `tangent` | At an end it shares with a line, arc, circle, ellipse or spline. That's along its first or last control leg, whatever its weights, so the leg acts as a line in the equation |
+| `fix` | The whole thing, with all its control points in order |
+| `drag` | By any control point. By the edge, it moves the whole thing |
+
+`SplineShape::through(points)`, or `"through"` in a file, makes the smooth cubic through some points by chord length. Only the control points stay in the sketch, so moving one
+later doesn't keep the curve on those points.
+
+**In regions** a spline is cut at its crossings with anything, and with itself, and these checks found two real bugs on the way to passing: a curve crossing itself
+wasn't cut at all, and where two strands of one curve pass close together, the search for a contact could land on the wrong strand and lose it.
+
+**Into the kernel,** each piece of a spline in a region becomes a kernel spline, and sweeps into `Surface::Extruded` or `Surface::Revolved`. Faces keep their entity's name.
+
+**Tested** by 5,000 random sketches in this solver's own fuzz with no refusals or wrong answers, including rational ones, and against the raster on 1,113 random sketches with
+9,302 pockets and 6,858 regions, with no disagreements.
 
 ## Regions
 
@@ -98,9 +121,9 @@ as `picked_regions`. If a picked region stops existing, `regions` refuses and li
 turn into something else. Regions sharing an edge and both in use merge into one solid when extruded.
 
 **Tested** against a raster that shares nothing with the walk: draw the curves on a 0.1 mm grid, flood-fill from outside, and
-every pocket left must lie in a region, with the pockets in a region adding up to its area. On 1,092 random sketches of lines,
-arcs, circles, ellipses and elliptical arcs, with 6,396 pockets and 5,085 regions, there were no disagreements. 14 pockets were reported at first only
-because walls a cell wide closed real gaps, and a finer grid confirmed each of those. 1,408 further random sketches were left out of this comparison
+every pocket left must lie in a region, with the pockets in a region adding up to its area. On 1,113 random sketches of lines,
+arcs, circles, ellipses, elliptical arcs and splines, with 9,302 pockets and 6,858 regions, there were no disagreements. 36 pockets were reported at first only
+because walls a cell wide closed real gaps, and a finer grid confirmed each of those. 1,387 further random sketches were left out of this comparison
 because an end stops less than 0.4 mm from another curve, which a raster can't tell from touching. Those gaps have their own worked tests.
 
 **Speed.** 202 lines crossing into 10,000 regions takes about 0.7 s in a debug build. It's quadratic in the number of curves
@@ -283,8 +306,13 @@ The one slow frame at 505 entities is 100 ms.
   or a dimension to place something exactly.
 - **A curve's end has to land within 1e-7 mm of another curve to join it.** A larger gap is a real gap, and the piece
   beyond it is listed as ignored. Solved sketches sit far inside this, but hand-placed geometry may not.
-- **Not there yet:** splines. On an ellipse: a distance to its curve, and `normal`. Use its center or `7.major`, and `tangent`.
+- **On an ellipse, not there yet:** a distance to its curve, and `normal`. Use its center or `7.major`, and `tangent`.
 - **A curve tangent to an ellipse needs a shared point.** A line doesn't: its tangency has a closed form.
+- **On a spline, not there yet:** a point on the curve between its ends, a tangency anywhere but an end, a distance to its curve, and `normal`. These are
+  refused by name. Use its ends and control points. A constraint can hold any of those.
+- **Splines aren't compared with PlaneGCS.** Reaching a control point in FreeCAD goes through weight circles with freedoms of their own, and that mapping
+  isn't written. What the solver does with a spline is point equations already compared there, with the end tangency as an ordinary parallel or
+  perpendicular between lines. It's still checked by this solver's own fuzz, whose check evaluates the curve itself.
 - **A conflict set of more than 64 constraints** isn't shrunk to a smallest one. The message says where it stalled.
 - **Solving is `f64` with tolerances.** Near-degenerate sketches, such as a line nearly parallel to one it must be
   perpendicular to, are where failures concentrate.

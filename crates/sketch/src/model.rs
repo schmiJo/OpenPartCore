@@ -4,6 +4,8 @@
 //! can refer to it through any edit.
 
 use crate::expr::Expr;
+use crate::spline::SplineShape;
+use std::sync::Arc;
 
 /// An entity's permanent id. Sketches hand out ids from 1. The reference geometry has
 /// reserved ids and names of its own.
@@ -46,6 +48,11 @@ impl EntityId {
     pub fn major(self) -> Ref {
         Ref { entity: self, part: Part::Major }
     }
+
+    /// One of a spline's control points, counting from 0.
+    pub fn control(self, i: u32) -> Ref {
+        Ref { entity: self, part: Part::Control(i) }
+    }
 }
 
 /// Which part of an entity a constraint refers to.
@@ -60,10 +67,12 @@ pub enum Part {
     Radius,
     /// The end of an ellipse's major axis.
     Major,
+    /// One of a spline's control points, counting from 0.
+    Control(u32),
 }
 
 /// A reference to an entity or a part of one, written `7`, `7.start`, `7.end`, `7.center`, `7.major`,
-/// `origin`, `x_axis` or `y_axis`.
+/// `7.p2` for a spline's control point, `origin`, `x_axis` or `y_axis`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ref {
     pub entity: EntityId,
@@ -85,17 +94,21 @@ impl Ref {
             Part::Center => format!("{base}.center"),
             Part::Radius => format!("{base}.radius"),
             Part::Major => format!("{base}.major"),
+            Part::Control(i) => format!("{base}.p{i}"),
         }
     }
 
     pub fn parse(text: &str) -> Result<Ref, String> {
-        let bad = || format!("\"{text}\" is not a reference; they look like 7, 7.start, 7.end, 7.center, 7.major, origin, x_axis or y_axis");
+        let bad = || format!("\"{text}\" is not a reference; they look like 7, 7.start, 7.end, 7.center, 7.major, 7.p2, origin, x_axis or y_axis");
         let (base, part) = match text.split_once('.') {
             None => (text, Part::Whole),
             Some((b, "start")) => (b, Part::Start),
             Some((b, "end")) => (b, Part::End),
             Some((b, "center")) => (b, Part::Center),
             Some((b, "major")) => (b, Part::Major),
+            Some((b, c)) if c.len() > 1 && c.starts_with('p') && c[1..].bytes().all(|d| d.is_ascii_digit()) => {
+                (b, Part::Control(c[1..].parse().map_err(|_| bad())?))
+            }
             Some(_) => return Err(bad()),
         };
         let entity = match base {
@@ -125,9 +138,8 @@ pub type P2 = [f64; 2];
 /// The shape of an entity.
 ///
 /// Every number here is a length, which keeps the solver's "move as little as possible"
-/// meaningful. A later spline (control points) fits the same pattern: add a variant here and its
-/// variable layout in `system.rs`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// meaningful.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Geometry {
     Point { at: P2 },
     Line { start: P2, end: P2 },
@@ -139,6 +151,8 @@ pub enum Geometry {
     Ellipse { center: P2, major: P2, minor: f64 },
     /// Part of an ellipse, running counter-clockwise from `start` to `end`.
     EllipticalArc { center: P2, major: P2, minor: f64, start: P2, end: P2 },
+    /// A rational B-spline. Its control points move, and its weights and knots stay as they are.
+    Spline(Arc<SplineShape>),
 }
 
 impl Geometry {
@@ -150,6 +164,7 @@ impl Geometry {
             Geometry::Arc { .. } => "arc",
             Geometry::Ellipse { .. } => "ellipse",
             Geometry::EllipticalArc { .. } => "elliptical_arc",
+            Geometry::Spline(_) => "spline",
         }
     }
 }
@@ -377,6 +392,16 @@ impl Sketch {
         self.add(Geometry::EllipticalArc { center, major, minor, start: at(degrees0), end: at(degrees1) })
     }
 
+    /// A rational B-spline.
+    pub fn spline(&mut self, shape: SplineShape) -> EntityId {
+        self.add(Geometry::Spline(Arc::new(shape)))
+    }
+
+    /// A smooth cubic spline through these points. See [`SplineShape::through`].
+    pub fn spline_through(&mut self, points: &[P2]) -> Result<EntityId, String> {
+        Ok(self.spline(SplineShape::through(points)?))
+    }
+
     /// An arc from `degrees0` to `degrees1`, counter-clockwise.
     pub fn arc(&mut self, center: P2, radius: f64, degrees0: f64, degrees1: f64) -> EntityId {
         let at = |d: f64| {
@@ -456,7 +481,16 @@ impl Sketch {
     fn current_values(&self, what: Ref) -> Result<Vec<f64>, String> {
         let e = self.entity(what.entity).ok_or_else(|| format!("there is no entity {}", what.name()))?;
         let bad = || format!("{} is not something that can be fixed", what.name());
-        Ok(match (e.geometry, what.part) {
+        if let Geometry::Spline(ref shape) = e.geometry {
+            return match what.part {
+                Part::Whole => Ok(shape.points.iter().flatten().copied().collect()),
+                Part::Start => Ok(shape.points[0].to_vec()),
+                Part::End => Ok(shape.points[shape.points.len() - 1].to_vec()),
+                Part::Control(i) => shape.points.get(i as usize).map(|q| q.to_vec()).ok_or_else(bad),
+                _ => Err(bad()),
+            };
+        }
+        Ok(match (e.geometry.clone(), what.part) {
             (Geometry::Point { at }, Part::Whole) => at.to_vec(),
             (Geometry::Line { start, .. }, Part::Start) => start.to_vec(),
             (Geometry::Line { end, .. }, Part::End) => end.to_vec(),
@@ -546,6 +580,7 @@ impl Sketch {
                     see(start);
                     see(end);
                 }
+                Geometry::Spline(ref shape) => shape.points.iter().for_each(|q| see(*q)),
             }
         }
         largest

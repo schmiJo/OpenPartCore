@@ -430,6 +430,12 @@ impl Grid {
                     }
                     self.draw(|t| ellipse_point(center, x, a, minor, a0 + (a1 - a0) * t), (a1 - a0) * a.max(minor));
                 }
+                Geometry::Spline(ref shape) => {
+                    let (t0, t1) = shape.domain();
+                    let length: f64 = shape.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+                    // The control polygon is at least as long as the curve.
+                    self.draw(|t| shape.eval(t0 + (t1 - t0) * t).0, length * 2.0);
+                }
                 Geometry::Point { .. } => {}
             }
         }
@@ -531,11 +537,23 @@ fn has_near_miss(s: &Sketch) -> bool {
                 (q[0] - p[0]).hypot(q[1] - p[1])
             }).fold(f64::INFINITY, f64::min)
         }
+        Geometry::Spline(ref shape) => {
+            let (t0, t1) = shape.domain();
+            (0..=1000).map(|i| {
+                let q = shape.eval(t0 + (t1 - t0) * i as f64 / 1000.0).0;
+                (q[0] - p[0]).hypot(q[1] - p[1])
+            }).fold(f64::INFINITY, f64::min)
+        }
         Geometry::Point { .. } => f64::INFINITY,
     };
     s.entities.iter().any(|e| {
+        let spline_ends;
         let ends: &[[f64; 2]] = match &e.geometry {
             Geometry::Line { start, end } | Geometry::Arc { start, end, .. } | Geometry::EllipticalArc { start, end, .. } => &[*start, *end],
+            Geometry::Spline(shape) => {
+                spline_ends = [shape.points[0], shape.points[shape.points.len() - 1]];
+                &spline_ends
+            }
             _ => &[],
         };
         ends.iter().any(|&p| s.entities.iter().any(|o| o.id != e.id && (1e-6..0.4).contains(&gap(&o.geometry, p))))
@@ -556,7 +574,24 @@ fn random_sketch(rng: &mut Rng) -> Sketch {
                 [rng.range(-span, span), rng.range(-span, span)]
             }
         };
-        match rng.int(0, 7) {
+        match rng.int(0, 9) {
+            8 | 9 => {
+                let count = rng.int(3, 6);
+                let mut through = vec![pick(rng, &spots)];
+                let mut ok = true;
+                for _ in 0..count {
+                    let last: [f64; 2] = through[through.len() - 1];
+                    let next = [last[0] + rng.range(-20.0, 20.0), last[1] + rng.range(-20.0, 20.0)];
+                    ok &= (next[0] - last[0]).hypot(next[1] - last[1]) > 3.0;
+                    through.push(next);
+                }
+                if ok {
+                    if s.spline_through(&through).is_ok() {
+                        spots.push(through[0]);
+                        spots.push(through[through.len() - 1]);
+                    }
+                }
+            }
             6 => {
                 let c = pick(rng, &spots);
                 let (a, t, b) = (rng.range(5.0, 25.0), rng.range(0.0, TAU), rng.range(2.0, 14.0));
@@ -631,6 +666,7 @@ fn every_region_matches_a_pocket_of_a_raster() {
                 Geometry::Ellipse { center, major, minor } | Geometry::EllipticalArc { center, major, minor, .. } => {
                     center[0].abs().max(center[1].abs()) + minor.max((major[0] - center[0]).hypot(major[1] - center[1]))
                 }
+                Geometry::Spline(ref shape) => shape.points.iter().flatten().fold(0.0f64, |m, v| m.max(v.abs())),
             })
         }) + 2.0;
         let n = (2.0 * reach / cell).ceil() as usize;
@@ -684,6 +720,12 @@ fn seg_length(s: &Seg) -> f64 {
         SegKind::Line { a, b } => (a[0] - b[0]).hypot(a[1] - b[1]),
         SegKind::Arc { radius, a0, a1, .. } => radius * (a1 - a0).abs(),
         SegKind::Ellipse { major, minor, a0, a1, .. } => major.max(minor) * (a1 - a0).abs(),
+        SegKind::Spline { ref shape, t0, t1 } => {
+            (0..64).map(|i| {
+                let (p, q) = (shape.eval(t0 + (t1 - t0) * i as f64 / 64.0).0, shape.eval(t0 + (t1 - t0) * (i + 1) as f64 / 64.0).0);
+                (p[0] - q[0]).hypot(p[1] - q[1])
+            }).sum::<f64>()
+        }
     }
 }
 
@@ -755,4 +797,61 @@ fn an_ellipse_touching_a_line_cuts_nothing_off() {
     let a = s.arrangement();
     assert!(close(&areas(&a), &[50.0 * PI]), "{:?}", areas(&a));
     assert!(a.ignored.iter().all(|i| i.entity == l), "{:?}", a.ignored);
+}
+
+// ----- Splines -----
+
+#[test]
+fn a_spline_that_crosses_itself_makes_a_loop() {
+    let mut s = Sketch::new();
+    s.spline_through(&[[-10.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0], [0.0, -10.0]]).unwrap();
+    let a = s.arrangement();
+    assert_eq!(a.regions.len(), 1, "{:?}", areas(&a));
+    assert!(a.region_at([5.0, 5.0]).is_some());
+    assert_eq!(a.ignored.len(), 2, "the two tails are left over: {:?}", a.ignored);
+    assert!(a.ignored.iter().all(|i| !i.whole));
+}
+
+#[test]
+fn a_spline_closed_by_a_line_is_a_region_with_the_right_area() {
+    let mut s = Sketch::new();
+    let shape = SplineShape::uniform(3, vec![[0.0, 0.0], [5.0, 12.0], [15.0, 12.0], [20.0, 0.0]]).unwrap();
+    let k = s.spline(shape);
+    s.line([0.0, 0.0], [20.0, 0.0]);
+    let a = s.arrangement();
+    // A single cubic: y = 36 t (1 - t) and x = 15 t + 15 t^2 - 10 t^3, so the integral of y dx is 126.
+    let got = areas(&a);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!((got[0] - 126.0).abs() < 1e-9, "{got:?}");
+    assert!(a.regions[0].outer.segs.iter().any(|g| g.entity == k));
+    assert!(a.ignored.is_empty());
+}
+
+#[test]
+fn a_line_across_a_closed_spline_splits_it() {
+    let mut s = Sketch::new();
+    let top = SplineShape::through(&[[-10.0, 0.0], [0.0, 8.0], [10.0, 0.0]]).unwrap();
+    let bottom = SplineShape::through(&[[10.0, 0.0], [0.0, -8.0], [-10.0, 0.0]]).unwrap();
+    s.spline(top);
+    s.spline(bottom);
+    let whole: f64 = s.arrangement().regions.iter().map(Region::area).sum();
+    assert_eq!(s.arrangement().regions.len(), 1);
+    s.line([0.0, -20.0], [0.0, 20.0]);
+    let a = s.arrangement();
+    assert_eq!(a.regions.len(), 2, "{:?}", areas(&a));
+    let split: f64 = a.regions.iter().map(Region::area).sum();
+    assert!((split - whole).abs() < 1e-6, "{split} vs {whole}");
+    // The stubs past the curve are left over.
+    assert_eq!(a.ignored.len(), 2, "{:?}", a.ignored);
+}
+
+#[test]
+fn two_splines_crossing_make_their_lens() {
+    let mut s = Sketch::new();
+    s.spline_through(&[[0.0, 0.0], [10.0, 6.0], [20.0, 0.0]]).unwrap();
+    s.spline_through(&[[0.0, 3.0], [10.0, -3.0], [20.0, 3.0]]).unwrap();
+    let a = s.arrangement();
+    assert_eq!(a.regions.len(), 1, "{:?}", areas(&a));
+    assert!(a.region_at([10.0, 0.0]).is_some());
+    assert_eq!(a.ignored.len(), 4, "the ends past the crossings are left over: {:?}", a.ignored);
 }

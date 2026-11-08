@@ -26,6 +26,7 @@ pub mod model;
 pub mod regions;
 pub mod rng;
 pub mod solve;
+pub mod spline;
 pub mod workloads;
 
 mod dual;
@@ -37,3 +38,4 @@ pub use drag::{DragReport, DragSession, Grab};
 pub use model::*;
 pub use regions::{Arrangement, Ignored, Loop, Region, RegionId, Seg, SegKind, WhyIgnored};
 pub use solve::{Analysis, ErrorKind, Redundancy, SketchError, Solved};
+pub use spline::SplineShape;

@@ -915,6 +915,10 @@ pub(crate) fn collapsed(sketch: &Sketch) -> Vec<EntityId> {
     let mut out = Vec::new();
     for e in &sketch.entities {
         let gone = match e.geometry {
+            Geometry::Spline(ref shape) => {
+                let (a, b) = (shape.points[0], shape.points[shape.points.len() - 1]);
+                shape.points.iter().all(|q| (q[0] - a[0]).hypot(q[1] - a[1]) < COLLAPSED) && (a[0] - b[0]).hypot(a[1] - b[1]) < COLLAPSED
+            }
             Geometry::Point { .. } => false,
             Geometry::Line { start, end } => (end[0] - start[0]).hypot(end[1] - start[1]) < COLLAPSED,
             Geometry::Circle { radius, .. } => radius < COLLAPSED,

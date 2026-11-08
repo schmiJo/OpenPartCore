@@ -54,7 +54,15 @@ impl Sketch {
             (Y_AXIS, Part::End) => return Some([0.0, 1.0]),
             _ => {}
         }
-        match (self.entity(r.entity)?.geometry, r.part) {
+        if let Geometry::Spline(ref shape) = self.entity(r.entity)?.geometry {
+            return match r.part {
+                Part::Start => shape.points.first().copied(),
+                Part::End => shape.points.last().copied(),
+                Part::Control(i) => shape.points.get(i as usize).copied(),
+                _ => None,
+            };
+        }
+        match (self.entity(r.entity)?.geometry.clone(), r.part) {
             (Geometry::Point { at }, Part::Whole) => Some(at),
             (Geometry::Line { start, .. } | Geometry::Arc { start, .. } | Geometry::EllipticalArc { start, .. }, Part::Start) => Some(start),
             (Geometry::Line { end, .. } | Geometry::Arc { end, .. } | Geometry::EllipticalArc { end, .. }, Part::End) => Some(end),
@@ -111,11 +119,11 @@ impl Sketch {
             Rule::VerticalDistance { a, b, .. } => self.point_at(*a).zip(self.point_at(*b)).map(|(p, q)| q[1] - p[1]),
             Rule::Radius { of, .. } => self.circle_of(*of).map(|c| c.1),
             Rule::Diameter { of, .. } => self.circle_of(*of).map(|c| c.1 * 2.0),
-            Rule::MajorRadius { of, .. } => match self.entity(*of).map(|e| e.geometry) {
+            Rule::MajorRadius { of, .. } => match self.entity(*of).map(|e| e.geometry.clone()) {
                 Some(Geometry::Ellipse { center, major, .. } | Geometry::EllipticalArc { center, major, .. }) => Some(dist(center, major)),
                 _ => None,
             },
-            Rule::MinorRadius { of, .. } => match self.entity(*of).map(|e| e.geometry) {
+            Rule::MinorRadius { of, .. } => match self.entity(*of).map(|e| e.geometry.clone()) {
                 Some(Geometry::Ellipse { minor, .. } | Geometry::EllipticalArc { minor, .. }) => Some(minor),
                 _ => None,
             },
@@ -123,7 +131,7 @@ impl Sketch {
                 let (u, v) = ([a1[0] - a0[0], a1[1] - a0[1]], [b1[0] - b0[0], b1[1] - b0[1]]);
                 signed_degrees((u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1]))
             }),
-            Rule::Angle { a, b: None, .. } => match self.entity(*a).map(|e| e.geometry) {
+            Rule::Angle { a, b: None, .. } => match self.entity(*a).map(|e| e.geometry.clone()) {
                 Some(Geometry::Arc { center, start, end, .. }) => {
                     let (u, v) = ([start[0] - center[0], start[1] - center[1]], [end[0] - center[0], end[1] - center[1]]);
                     Some((u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1]).to_degrees().rem_euclid(360.0))

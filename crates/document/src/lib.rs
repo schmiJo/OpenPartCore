@@ -1465,9 +1465,9 @@ fn wire_from_loop(l: &coreshape_sketch::Loop) -> Wire {
     let n = l.segs.len();
     let joint = |i: usize| -> Vec2 {
         let (s, next) = (&l.segs[i], &l.segs[(i + 1) % n]);
-        let p = match (s.kind, next.kind) {
-            (SegKind::Arc { .. } | SegKind::Ellipse { .. }, _) => s.end(),
-            (_, SegKind::Arc { .. } | SegKind::Ellipse { .. }) => next.start(),
+        let p = match (&s.kind, &next.kind) {
+            (SegKind::Arc { .. } | SegKind::Ellipse { .. } | SegKind::Spline { .. }, _) => s.end(),
+            (_, SegKind::Arc { .. } | SegKind::Ellipse { .. } | SegKind::Spline { .. }) => next.start(),
             _ => s.end(),
         };
         v2(p[0], p[1])
@@ -1488,6 +1488,19 @@ fn wire_from_loop(l: &coreshape_sketch::Loop) -> Wire {
                     segs.push(Seg { geom: SegGeom::Arc { center, radius, a0: middle, a1 }, id });
                 } else {
                     segs.push(Seg { geom: SegGeom::Arc { center, radius, a0, a1 }, id });
+                }
+            }
+            SegKind::Spline { ref shape, t0, t1 } => {
+                let points = shape.points.iter().map(|q| v3(q[0], q[1], 0.0)).collect();
+                let whole = Spline::new(shape.degree, shape.knots.clone(), points, shape.weights.clone());
+                let part = whole.and_then(|c| if t1 >= t0 { c.sub(t0, t1) } else { c.sub(t1, t0).map(|p| p.reversed()) });
+                match part {
+                    Ok(part) => segs.push(Seg { geom: SegGeom::Spline(Arc::new(part)), id }),
+                    // A spline whose control points have come together. It's refused with a reason when it's used.
+                    Err(_) => {
+                        let (a, b) = (s.start(), s.end());
+                        segs.push(Seg { geom: SegGeom::Line { a: v2(a[0], a[1]), b: v2(b[0], b[1]) }, id })
+                    }
                 }
             }
             // An ellipse is exactly a rational spline, which is how the kernel sweeps one.

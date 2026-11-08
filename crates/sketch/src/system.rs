@@ -456,6 +456,10 @@ impl System {
             let base = sys.x0.len() as u32;
             sys.base.insert(e.id, base);
             match e.geometry {
+                Geometry::Spline(ref shape) => {
+                    let last = base + 2 * (shape.points.len() as u32 - 1);
+                    sys.spans.push([base, base + 1, last, last + 1]);
+                }
                 Geometry::Line { .. } => sys.spans.push([base, base + 1, base + 2, base + 3]),
                 Geometry::Arc { .. } => sys.spans.push([base + 3, base + 4, base + 5, base + 6]),
                 Geometry::Ellipse { .. } => sys.spans.push([base, base + 1, base + 2, base + 3]),
@@ -466,6 +470,10 @@ impl System {
                 _ => {}
             }
             let values: Vec<f64> = match e.geometry {
+                Geometry::Spline(ref shape) => {
+                    shape.check().map_err(|why| invalid(None, format!("entity {}: {why}", e.id.0)))?;
+                    shape.points.iter().flatten().copied().collect()
+                }
                 Geometry::Point { at } => at.to_vec(),
                 Geometry::Line { start, end } => vec![start[0], start[1], end[0], end[1]],
                 Geometry::Circle { center, radius } => {
@@ -621,7 +629,16 @@ impl System {
         let mut out = vec![None; self.x0.len()];
         for e in &sketch.entities {
             let b = self.base[&e.id] as usize;
+            if let Geometry::Spline(ref shape) = e.geometry {
+                for i in 0..shape.points.len() {
+                    let part = Ref { entity: e.id, part: Part::Control(i as u32) };
+                    out[b + 2 * i] = Some(part);
+                    out[b + 2 * i + 1] = Some(part);
+                }
+                continue;
+            }
             let parts: &[(usize, Part)] = match e.geometry {
+                Geometry::Spline(_) => &[],
                 Geometry::Point { .. } => &[(0, Part::Whole), (1, Part::Whole)],
                 Geometry::Line { .. } => &[(0, Part::Start), (1, Part::Start), (2, Part::End), (3, Part::End)],
                 Geometry::Circle { .. } => &[(0, Part::Center), (1, Part::Center), (2, Part::Radius)],
@@ -661,6 +678,13 @@ impl System {
             let b = self.base[&e.id] as usize;
             let p = |i: usize| [x[b + i], x[b + i + 1]];
             e.geometry = match e.geometry {
+                Geometry::Spline(ref shape) => {
+                    let mut moved = (**shape).clone();
+                    for (i, q) in moved.points.iter_mut().enumerate() {
+                        *q = p(2 * i);
+                    }
+                    Geometry::Spline(std::sync::Arc::new(moved))
+                }
                 Geometry::Point { .. } => Geometry::Point { at: p(0) },
                 Geometry::Line { .. } => Geometry::Line { start: p(0), end: p(2) },
                 Geometry::Circle { .. } => Geometry::Circle { center: p(0), radius: x[b + 2] },
@@ -696,7 +720,7 @@ impl Builder<'_> {
             return Ok(None);
         }
         match self.sketch.entity(id) {
-            Some(e) => Ok(Some(e.geometry)),
+            Some(e) => Ok(Some(e.geometry.clone())),
             None => Err(format!("there is no entity {}", id.0)),
         }
     }
@@ -711,6 +735,9 @@ impl Builder<'_> {
             (X_AXIS | Y_AXIS, Part::End) => 2,
             (ORIGIN | X_AXIS | Y_AXIS, _) => return Err(bad()),
             _ => match (self.geometry(r.entity)?.ok_or_else(bad)?, r.part) {
+                (Geometry::Spline(_), Part::Start) => 0,
+                (Geometry::Spline(shape), Part::End) => 2 * (shape.points.len() as u32 - 1),
+                (Geometry::Spline(shape), Part::Control(i)) if (i as usize) < shape.points.len() => 2 * i,
                 (Geometry::Point { .. }, Part::Whole) => 0,
                 (Geometry::Line { .. }, Part::Start) => 0,
                 (Geometry::Line { .. }, Part::End) => 2,
@@ -738,6 +765,28 @@ impl Builder<'_> {
 
     fn is_curve(&self, id: EntityId) -> bool {
         matches!(self.geometry(id), Ok(Some(Geometry::Circle { .. } | Geometry::Arc { .. })))
+    }
+
+    fn is_spline(&self, id: EntityId) -> bool {
+        matches!(self.geometry(id), Ok(Some(Geometry::Spline(_))))
+    }
+
+    /// The line a spline leaves or arrives along at this end: its first or last control leg, in which
+    /// direction doesn't matter. A clamped spline is tangent to that leg at the end, whatever its weights.
+    fn end_leg(&self, id: EntityId, at: [u32; 2]) -> Result<[u32; 4], String> {
+        let Ok(Some(Geometry::Spline(shape))) = self.geometry(id) else {
+            return Err(format!("{} is not a spline", id.whole().name()));
+        };
+        let b = self.sys.base[&id];
+        let last = shape.points.len() as u32 - 1;
+        let (start, end) = ([b, b + 1], [b + 2 * last, b + 2 * last + 1]);
+        if self.root(at[0]) == self.root(start[0]) {
+            Ok([start[0], start[1], b + 2, b + 3])
+        } else if self.root(at[0]) == self.root(end[0]) {
+            Ok([end[0] - 2, end[1] - 2, end[0], end[1]])
+        } else {
+            Err(format!("a tangency with spline {} has to be at one of its ends for now", id.0))
+        }
     }
 
     fn is_ellipse(&self, id: EntityId) -> bool {
@@ -816,7 +865,7 @@ impl Builder<'_> {
 
     fn endpoints(&self, id: EntityId) -> Vec<[u32; 2]> {
         match self.geometry(id) {
-            Ok(Some(Geometry::Line { .. } | Geometry::Arc { .. } | Geometry::EllipticalArc { .. })) => {
+            Ok(Some(Geometry::Line { .. } | Geometry::Arc { .. } | Geometry::EllipticalArc { .. } | Geometry::Spline(_))) => {
                 [id.start(), id.end()].iter().filter_map(|&r| self.point(r).ok()).collect()
             }
             _ => Vec::new(),
@@ -892,6 +941,8 @@ impl Builder<'_> {
                     let e = self.ellipse(b.entity)?;
                     let scale = self.ellipse_scale(e);
                     self.push(row(Some(i), Eq::PointEllipse { scale }, &[p[0], p[1], e.0[0], e.0[1], e.1[0], e.1[1], e.2]));
+                } else if self.is_spline(b.entity) && b.part == Part::Whole {
+                    return Err(format!("a point on spline {} isn't available yet: join to its ends or control points", b.entity.0));
                 } else {
                     return Err(format!("{} is not a point, line, circle, arc or ellipse", b.name()));
                 }
@@ -1034,6 +1085,8 @@ impl Builder<'_> {
             } else if r.part == Part::Whole && this.is_curve(r.entity) {
                 let (c, radius) = this.curve(r.entity)?;
                 Ok(Thing::Curve(c, radius))
+            } else if r.part == Part::Whole && this.is_spline(r.entity) {
+                Err(format!("a distance to the spline {} isn't supported yet: use its control points, such as {}", r.name(), r.entity.start().name()))
             } else if r.part == Part::Whole && this.is_ellipse(r.entity) {
                 Err(format!("a distance to the ellipse {} isn't supported yet: use its center or {}", r.name(), r.entity.major().name()))
             } else {
@@ -1087,6 +1140,39 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// A tangency with at least one spline, at an end of it, since that's where the direction is known
+    /// without a search: along the first or last control leg. The leg then behaves as a line.
+    fn tangent_spline(&mut self, i: usize, a: EntityId, b: EntityId) -> Result<(), String> {
+        let (spline, other) = if self.is_spline(a) { (a, b) } else { (b, a) };
+        let Some(p) = self.shared_point(a, b) else {
+            return Err(format!(
+                "a tangency with spline {} needs an end of it joined to {}: make them coincident first",
+                spline.0,
+                other.whole().name()
+            ));
+        };
+        let leg = self.end_leg(spline, p)?;
+        if self.is_spline(other) {
+            let leg2 = self.end_leg(other, p)?;
+            let scale = self.length([leg[0], leg[1]], [leg[2], leg[3]]).max(self.length([leg2[0], leg2[1]], [leg2[2], leg2[3]])).max(1e-3);
+            self.push(row(Some(i), Eq::Parallel { scale }, &[leg[0], leg[1], leg[2], leg[3], leg2[0], leg2[1], leg2[2], leg2[3]]));
+        } else if self.is_line(other) {
+            let l = self.line(other)?;
+            let scale = self.length([leg[0], leg[1]], [leg[2], leg[3]]).max(self.length([l[0], l[1]], [l[2], l[3]])).max(1e-3);
+            self.push(row(Some(i), Eq::Parallel { scale }, &[leg[0], leg[1], leg[2], leg[3], l[0], l[1], l[2], l[3]]));
+        } else if self.is_curve(other) {
+            let center = self.curve(other)?.0;
+            self.push(row(Some(i), Eq::PerpendicularToLine, &[center[0], center[1], p[0], p[1], leg[0], leg[1], leg[2], leg[3]]));
+        } else if self.is_ellipse(other) {
+            let e = self.ellipse(other)?;
+            let scale = self.ellipse_scale(e);
+            self.push(row(Some(i), Eq::LineTangentEllipseAt { scale }, &[p[0], p[1], e.0[0], e.0[1], e.1[0], e.1[1], e.2, leg[0], leg[1], leg[2], leg[3]]));
+        } else {
+            return Err(format!("{} can't be tangent to a spline", other.whole().name()));
+        }
+        Ok(())
+    }
+
     /// A tangency with at least one ellipse.
     fn tangent_ellipse(&mut self, i: usize, a: EntityId, b: EntityId) -> Result<(), String> {
         let shared = self.shared_point(a, b);
@@ -1120,6 +1206,9 @@ impl Builder<'_> {
     }
 
     fn tangent(&mut self, i: usize, a: EntityId, b: EntityId) -> Result<(), String> {
+        if self.is_spline(a) || self.is_spline(b) {
+            return self.tangent_spline(i, a, b);
+        }
         if self.is_ellipse(a) || self.is_ellipse(b) {
             return self.tangent_ellipse(i, a, b);
         }
@@ -1161,6 +1250,9 @@ impl Builder<'_> {
     }
 
     fn normal(&mut self, i: usize, a: EntityId, b: EntityId) -> Result<(), String> {
+        if self.is_spline(a) || self.is_spline(b) {
+            return Err("normal isn't available for a spline yet".to_string());
+        }
         if self.is_ellipse(a) || self.is_ellipse(b) {
             return Err("normal isn't available for an ellipse yet: use tangent, or constrain its center and major axis".to_string());
         }
@@ -1253,6 +1345,13 @@ impl Builder<'_> {
                     let n = dx.hypot(dy).max(1e-12);
                     let (ux, uy) = (dx / n, dy / n);
                     self.push(linear(i, 0.0, &[(point, uy), (point + 1, -ux), (e.0[0], -uy), (e.0[1], ux)]));
+                }
+            }
+            Some(Geometry::Spline(ref shape)) => {
+                need(2 * shape.points.len())?;
+                let b = self.sys.base[&what.entity];
+                for (k, v) in at.iter().enumerate() {
+                    self.push(linear(i, *v, &[(b + k as u32, 1.0)]));
                 }
             }
             _ => return Err(format!("{} can't be fixed", what.name())),

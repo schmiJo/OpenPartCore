@@ -6,6 +6,7 @@
 use crate::expr::Expr;
 use crate::json::{self, Value};
 use crate::model::*;
+use crate::spline::SplineShape;
 use crate::regions::{Arrangement, Ignored, Loop, Region, RegionId, Seg, SegKind, WhyIgnored};
 use crate::solve::*;
 
@@ -266,6 +267,14 @@ pub fn read_rule(v: &Value, extra: &[&str]) -> R<Rule> {
 pub fn geometry_value(g: &Geometry) -> Vec<(&'static str, Value)> {
     let mut items = vec![("type", Value::str(g.kind()))];
     match *g {
+        Geometry::Spline(ref shape) => {
+            items.push(("degree", Value::Num(shape.degree as f64)));
+            items.push(("points", Value::Arr(shape.points.iter().map(|q| p2_value(*q)).collect())));
+            items.push(("knots", Value::Arr(shape.knots.iter().map(|k| Value::Num(*k)).collect())));
+            if shape.weights.iter().any(|w| *w != 1.0) {
+                items.push(("weights", Value::Arr(shape.weights.iter().map(|w| Value::Num(*w)).collect())));
+            }
+        }
         Geometry::Point { at } => items.push(("at", p2_value(at))),
         Geometry::Line { start, end } => {
             items.push(("start", p2_value(start)));
@@ -344,7 +353,60 @@ pub fn read_geometry(v: &Value, extra: &[&str]) -> R<Geometry> {
                 end: point(field(v, "end", w)?)?,
             }
         }
-        other => return Err(format!("unknown entity \"{other}\"; expected point, line, circle, arc, ellipse or elliptical_arc")),
+        "spline" => {
+            check(&["degree", "points", "knots", "weights", "through"])?;
+            let numbers = |key: &str| -> R<Option<Vec<f64>>> {
+                match v.get(key) {
+                    None => Ok(None),
+                    Some(list) => list
+                        .as_array()
+                        .ok_or_else(|| format!("a spline's \"{key}\" must be a list of numbers"))?
+                        .iter()
+                        .map(|n| n.as_f64().ok_or_else(|| format!("a spline's \"{key}\" must be a list of numbers")))
+                        .collect::<R<Vec<f64>>>()
+                        .map(Some),
+                }
+            };
+            let points_of = |key: &str| -> R<Option<Vec<P2>>> {
+                match v.get(key) {
+                    None => Ok(None),
+                    Some(list) => list
+                        .as_array()
+                        .ok_or_else(|| format!("a spline's \"{key}\" must be a list of points"))?
+                        .iter()
+                        .map(point)
+                        .collect::<R<Vec<P2>>>()
+                        .map(Some),
+                }
+            };
+            // Hand-written files can just say what it goes through.
+            let shape = if let Some(through) = points_of("through")? {
+                if v.get("points").is_some() || v.get("knots").is_some() {
+                    return Err("a spline has either \"through\" or \"points\", not both".to_string());
+                }
+                SplineShape::through(&through)?
+            } else {
+                let points = points_of("points")?.ok_or("a spline needs \"points\" or \"through\"")?;
+                let degree = match v.get("degree") {
+                    Some(d) => d.as_f64().filter(|d| d.fract() == 0.0 && *d >= 0.0 && *d < 100.0).ok_or("a spline's degree must be a whole number")? as usize,
+                    None => 3.min(points.len().saturating_sub(1)),
+                };
+                let mut shape = match numbers("knots")? {
+                    Some(knots) => {
+                        let n = points.len();
+                        SplineShape::new(degree, knots, points, vec![1.0; n])?
+                    }
+                    None => SplineShape::uniform(degree, points)?,
+                };
+                if let Some(weights) = numbers("weights")? {
+                    shape.weights = weights;
+                    shape.check()?;
+                }
+                shape
+            };
+            Geometry::Spline(std::sync::Arc::new(shape))
+        }
+        other => return Err(format!("unknown entity \"{other}\"; expected point, line, circle, arc, ellipse, elliptical_arc or spline")),
     })
 }
 
@@ -566,6 +628,15 @@ fn seg_value(s: &Seg) -> Value {
             items.push(("minor", Value::Num(minor)));
             items.push(("a0", Value::Num(a0)));
             items.push(("a1", Value::Num(a1)));
+        }
+        SegKind::Spline { ref shape, t0, t1 } => {
+            items.push(("type", Value::str("spline")));
+            items.push(("degree", Value::Num(shape.degree as f64)));
+            items.push(("points", Value::Arr(shape.points.iter().map(|q| p2_value(*q)).collect())));
+            items.push(("knots", Value::Arr(shape.knots.iter().map(|k| Value::Num(*k)).collect())));
+            items.push(("weights", Value::Arr(shape.weights.iter().map(|w| Value::Num(*w)).collect())));
+            items.push(("t0", Value::Num(t0)));
+            items.push(("t1", Value::Num(t1)));
         }
     }
     Value::obj(items)
