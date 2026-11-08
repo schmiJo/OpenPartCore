@@ -11,7 +11,12 @@ fn main() {
     std::panic::set_hook(Box::new(|_| {}));
     println!("{:<13} {:>6} {:>8} {:>6} {:>10}", "category", "cases", "refused", "wrong", "time");
     let (mut total_refused, mut total_wrong, mut total_cases) = (0, 0, 0);
+    // ONLY_CATEGORY=name runs just that one.
+    let only = std::env::var("ONLY_CATEGORY").ok();
     for category in ALL_CATEGORIES {
+        if only.as_deref().is_some_and(|o| o != category.name()) {
+            continue;
+        }
         let t = Instant::now();
         let handles: Vec<_> = (0..threads)
             .map(|w| {

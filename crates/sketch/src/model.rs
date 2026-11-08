@@ -175,8 +175,10 @@ pub enum Rule {
     /// x, y for a point; both ends for a line; x, y, radius for a circle; those then the
     /// start and end points for an arc.
     Fix { what: Ref, at: Vec<f64> },
-    /// Between two points, a point and a line (`b` is the whole line), or a line's length
-    /// (`b` absent).
+    /// A line's length (`b` absent), or between any two of a point, a line and a circle or arc.
+    /// To a circle or arc, it's the gap to the curve, on whichever side things are now, with an arc
+    /// counting as its full circle. Between two lines, it's from the middle of `a` to `b`, which is
+    /// the distance between them when they're parallel. It doesn't make them parallel.
     Distance { a: Ref, b: Option<Ref>, value: Expr },
     /// `b.x - a.x`, which may be negative.
     HorizontalDistance { a: Ref, b: Ref, value: Expr },
@@ -259,7 +261,7 @@ impl Rule {
         }
     }
 
-    fn value_mut(&mut self) -> Option<&mut Expr> {
+    pub(crate) fn value_mut(&mut self) -> Option<&mut Expr> {
         match self {
             Rule::Distance { value, .. }
             | Rule::HorizontalDistance { value, .. }
@@ -276,6 +278,9 @@ impl Rule {
 pub struct Constraint {
     pub id: ConstraintId,
     pub rule: Rule,
+    /// A reference dimension reports what the geometry measures and doesn't drive it. Solving ignores
+    /// it, then writes the measured value into it.
+    pub reference: bool,
 }
 
 /// A sketch: plain data, and a value. Solving returns a new sketch and never changes this one,
@@ -351,8 +356,50 @@ impl Sketch {
     pub fn constrain(&mut self, rule: Rule) -> ConstraintId {
         let id = ConstraintId(self.next_constraint);
         self.next_constraint += 1;
-        self.constraints.push(Constraint { id, rule });
+        self.constraints.push(Constraint { id, rule, reference: false });
         id
+    }
+
+    /// Adds a reference dimension: one that reports what the geometry measures and doesn't drive it.
+    /// The rule's value is replaced with the measurement, so any number will do there.
+    pub fn add_reference(&mut self, rule: Rule) -> Result<ConstraintId, String> {
+        if rule.value().is_none() {
+            return Err(format!("a {} constraint has no value, so it can't be a reference dimension", rule.kind()));
+        }
+        let id = self.constrain(rule);
+        self.set_reference(id, true)?;
+        Ok(id)
+    }
+
+    /// Makes a dimension a reference, or back into one that drives. A reference made driving starts
+    /// from the value it last measured.
+    pub fn set_reference(&mut self, id: ConstraintId, reference: bool) -> Result<(), String> {
+        let c = self.constraints.iter_mut().find(|c| c.id == id).ok_or_else(|| format!("there is no constraint c{}", id.0))?;
+        if c.rule.value().is_none() {
+            return Err(format!("c{} is a {} constraint, which has no value", id.0, c.rule.kind()));
+        }
+        c.reference = reference;
+        if reference {
+            self.refresh_references();
+        }
+        Ok(())
+    }
+
+    /// Writes what the geometry measures into every reference dimension. One that doesn't fit its
+    /// geometry keeps its old value; solving reports the same problem for a driving one.
+    pub(crate) fn refresh_references(&mut self) {
+        let measured: Vec<(usize, f64)> = self
+            .constraints
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.reference)
+            .filter_map(|(i, c)| self.measure_rule(&c.rule).ok().map(|v| (i, v)))
+            .collect();
+        for (i, v) in measured {
+            if let Some(value) = self.constraints[i].rule.value_mut() {
+                *value = v.into();
+            }
+        }
     }
 
     /// Fixes a point or a whole entity where it is now.
@@ -386,6 +433,9 @@ impl Sketch {
     pub fn set_value(&mut self, id: ConstraintId, value: impl Into<Expr>) -> Result<(), String> {
         let c = self.constraints.iter_mut().find(|c| c.id == id).ok_or_else(|| format!("there is no constraint c{}", id.0))?;
         let kind = c.rule.kind();
+        if c.reference {
+            return Err(format!("c{} is a reference dimension: it reports the geometry and can't be set", id.0));
+        }
         match c.rule.value_mut() {
             Some(v) => {
                 *v = value.into();

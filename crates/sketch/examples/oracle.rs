@@ -52,7 +52,12 @@ fn pick_drag(s: &Sketch, free: &[Ref], rng: &mut Rng) -> Option<(Ref, P2)> {
 fn export(dir: &str, cases: u64, first: u64) {
     std::fs::create_dir_all(dir).unwrap();
     let mut text = String::new();
+    // ONLY_CATEGORY=name runs just that one.
+    let only = std::env::var("ONLY_CATEGORY").ok();
     for category in ALL_CATEGORIES {
+        if only.as_deref().is_some_and(|o| o != category.name()) {
+            continue;
+        }
         // PlaneGCS takes seconds on each of these, so they get fewer.
         let count = if category == Category::Large { (cases / 20).max(1) } else { cases };
         for seed in first..first + count {

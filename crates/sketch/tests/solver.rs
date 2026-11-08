@@ -687,3 +687,198 @@ fn the_solved_result_serializes() {
     let e = Sketch::load_text("{}").unwrap_err().to_json().to_text();
     assert!(e.contains("invalid"), "{e}");
 }
+
+// ----- Distances to curves, between lines, and reference dimensions -----
+
+#[test]
+fn a_point_keeps_its_side_of_a_circle() {
+    let mut s = Sketch::new();
+    let c = s.circle([0.0, 0.0], 10.0);
+    s.fix(c).unwrap();
+    let outside = s.point(15.0, 0.0);
+    let inside = s.point(4.0, 3.0);
+    s.constrain(Rule::Horizontal { a: outside.whole(), b: Some(c.center()) });
+    s.constrain(Rule::Horizontal { a: inside.whole(), b: Some(c.center()) });
+    let d0 = s.constrain(Rule::Distance { a: outside.whole(), b: Some(c.whole()), value: 7.0.into() });
+    let d1 = s.constrain(Rule::Distance { a: c.whole(), b: Some(inside.whole()), value: 2.0.into() });
+    let solved = s.solve().unwrap();
+    assert_eq!(solved.analysis.dof, 0);
+    let at = |id: EntityId| match solved.sketch.entity(id).unwrap().geometry {
+        Geometry::Point { at } => at,
+        _ => panic!(),
+    };
+    assert!((at(outside)[0] - 17.0).abs() < 1e-9, "{:?}", at(outside));
+    assert!((at(inside)[0] - 8.0).abs() < 1e-9, "{:?}", at(inside));
+    assert!((solved.sketch.measure(d0).unwrap() - 7.0).abs() < 1e-9);
+    assert!((solved.sketch.measure(d1).unwrap() - 2.0).abs() < 1e-9);
+    // Asking for more than the radius from inside can only be met from outside.
+    let mut far = s.clone();
+    far.set_value(d1, 12.0).unwrap();
+    let solved = far.solve().unwrap();
+    assert!((solved.sketch.measure(d1).unwrap() - 12.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_line_and_a_circle_and_two_circles() {
+    let mut s = Sketch::new();
+    let c = s.circle([0.0, 0.0], 10.0);
+    s.fix(c).unwrap();
+    let l = s.line([-20.0, 14.0], [20.0, 14.0]);
+    s.constrain(Rule::Horizontal { a: l.whole(), b: None });
+    s.constrain(Rule::Distance { a: l.whole(), b: Some(c.whole()), value: 6.0.into() });
+    let outside = s.circle([20.0, 0.0], 3.0);
+    s.constrain(Rule::Radius { of: outside, value: 3.0.into() });
+    s.constrain(Rule::Horizontal { a: outside.center(), b: Some(c.center()) });
+    s.constrain(Rule::Distance { a: c.whole(), b: Some(outside.whole()), value: 5.0.into() });
+    let nested = s.circle([1.0, 0.0], 2.0);
+    s.constrain(Rule::Radius { of: nested, value: 2.0.into() });
+    s.constrain(Rule::Horizontal { a: nested.center(), b: Some(c.center()) });
+    s.constrain(Rule::Distance { a: nested.whole(), b: Some(c.whole()), value: 3.0.into() });
+    let solved = s.solve().unwrap();
+    let k = &solved.sketch;
+    match k.entity(l).unwrap().geometry {
+        Geometry::Line { start, .. } => assert!((start[1] - 16.0).abs() < 1e-9, "{start:?}"),
+        _ => panic!(),
+    }
+    match k.entity(outside).unwrap().geometry {
+        Geometry::Circle { center, .. } => assert!((center[0] - 18.0).abs() < 1e-9, "{center:?}"),
+        _ => panic!(),
+    }
+    match k.entity(nested).unwrap().geometry {
+        // 10 - 2 - 3 from the center.
+        Geometry::Circle { center, .. } => assert!((center[0] - 5.0).abs() < 1e-9, "{center:?}"),
+        _ => panic!(),
+    }
+    assert!(fuzz::violations(k, 1e-9).is_empty(), "{:?}", fuzz::violations(k, 1e-9));
+}
+
+#[test]
+fn a_distance_to_an_arc_measures_to_its_full_circle() {
+    let mut s = Sketch::new();
+    let a = s.arc([0.0, 0.0], 10.0, 0.0, 90.0);
+    s.fix(a).unwrap();
+    // Opposite the arc, off its ends: it's the circle that counts, as everywhere else.
+    let p = s.point(-15.0, 0.0);
+    s.constrain(Rule::Horizontal { a: p.whole(), b: Some(a.center()) });
+    s.constrain(Rule::Distance { a: p.whole(), b: Some(a.whole()), value: 3.0.into() });
+    let solved = s.solve().unwrap();
+    match solved.sketch.entity(p).unwrap().geometry {
+        Geometry::Point { at } => assert!((at[0] + 13.0).abs() < 1e-9, "{at:?}"),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn parallel_lines_have_a_distance_with_no_point_picked() {
+    let mut s = Sketch::new();
+    let a = s.line([0.0, 0.0], [20.0, 0.0]);
+    s.fix(a).unwrap();
+    let b = s.line([3.0, 8.0], [15.0, 9.0]);
+    s.constrain(Rule::Parallel { a, b });
+    s.constrain(Rule::Distance { a: b.whole(), b: Some(a.whole()), value: 12.0.into() });
+    let solved = s.solve().unwrap();
+    assert_eq!(solved.analysis.dof, 2, "b can still slide along and change length");
+    match solved.sketch.entity(b).unwrap().geometry {
+        Geometry::Line { start, end } => {
+            assert!((start[1] - 12.0).abs() < 1e-9 && (end[1] - 12.0).abs() < 1e-9, "{start:?} {end:?}");
+        }
+        _ => panic!(),
+    }
+    assert!(solved.analysis.redundant.is_empty());
+    // Against an axis too.
+    let mut t = Sketch::new();
+    let l = t.line([0.0, 5.0], [10.0, 6.0]);
+    t.constrain(Rule::Parallel { a: l, b: X_AXIS });
+    t.constrain(Rule::Distance { a: X_AXIS.whole(), b: Some(l.whole()), value: 4.0.into() });
+    let solved = t.solve().unwrap();
+    match solved.sketch.entity(l).unwrap().geometry {
+        Geometry::Line { start, end } => assert!((start[1] - 4.0).abs() < 1e-9 && (end[1] - 4.0).abs() < 1e-9),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn a_reference_dimension_reports_and_drives_nothing() {
+    let mut s = Sketch::new();
+    let l = s.line([0.0, 0.0], [30.0, 40.0]);
+    let free = s.solve().unwrap().analysis.dof;
+    let length = s.add_reference(Rule::Distance { a: l.whole(), b: None, value: 1.0.into() }).unwrap();
+    assert_eq!(s.measure(length).unwrap(), 50.0);
+    assert_eq!(s.constraint(length).unwrap().rule.value().unwrap().as_number(), Some(50.0), "measured as soon as it's added");
+    assert_eq!(s.solve().unwrap().analysis.dof, free, "it takes no freedom away");
+
+    // It follows the geometry through a solve and a drag.
+    s.constrain(Rule::Coincident { a: l.start(), b: ORIGIN.whole() });
+    let h = s.constrain(Rule::Horizontal { a: l.whole(), b: None });
+    let span = s.constrain(Rule::HorizontalDistance { a: l.start(), b: l.end(), value: 25.0.into() });
+    let solved = s.solve().unwrap();
+    assert_eq!(solved.analysis.dof, 0);
+    assert!((solved.sketch.reference_values()[0].1 - 25.0).abs() < 1e-9);
+    assert_eq!(solved.sketch.constraint(length).unwrap().rule.value().unwrap().as_number().map(|v| (v - 25.0).abs() < 1e-9), Some(true));
+
+    // A reference can't conflict with anything, unlike the same dimension driving.
+    let mut driving = s.clone();
+    driving.set_reference(length, false).unwrap();
+    driving.set_value(length, 99.0).unwrap();
+    assert_eq!(driving.solve().unwrap_err().kind, ErrorKind::Conflict);
+    assert!(s.solve().is_ok());
+
+    // Its value can't be set, and only dimensions can be references.
+    assert!(s.set_value(length, 3.0).is_err());
+    assert!(s.add_reference(Rule::Vertical { a: l.whole(), b: None }).is_err());
+    assert!(s.set_reference(h, true).is_err());
+    let _ = span;
+}
+
+#[test]
+fn a_reference_dimension_is_saved_and_needs_no_value_in_a_file() {
+    let mut s = Sketch::new();
+    let l = s.line([0.0, 0.0], [3.0, 4.0]);
+    let c = s.add_reference(Rule::Distance { a: l.whole(), b: None, value: 0.0.into() }).unwrap();
+    let back = Sketch::load_text(&s.save_text()).unwrap();
+    assert_eq!(back, s);
+    assert!(back.constraint(c).unwrap().reference);
+    // Hand-written, with no value.
+    let text = r#"{"format":"coreshape-sketch","version":1,"entities":[{"id":1,"type":"line","start":[0,0],"end":[3,4]}],
+        "constraints":[{"id":1,"type":"distance","a":"1","reference":true}]}"#;
+    let k = Sketch::load_text(text).unwrap();
+    assert_eq!(k.measure(ConstraintId(1)).unwrap(), 5.0);
+    assert_eq!(k.reference_values(), vec![(ConstraintId(1), 5.0)]);
+    // A reference must be a dimension, and a driving dimension still needs a value.
+    assert!(Sketch::load_text(&text.replace("distance", "horizontal")).is_err());
+    assert!(Sketch::load_text(&text.replace(r#","reference":true"#, "")).is_err());
+}
+
+#[test]
+fn measuring_every_kind_of_dimension() {
+    let mut s = Sketch::new();
+    let l = s.line([0.0, 0.0], [10.0, 0.0]);
+    let m = s.line([0.0, 5.0], [0.0, 15.0]);
+    let c = s.circle([20.0, 0.0], 4.0);
+    let d = s.circle([40.0, 0.0], 6.0);
+    let a = s.arc([0.0, 0.0], 2.0, 0.0, 90.0);
+    let p = s.point(20.0, 10.0);
+    let near = |rule: Rule, want: f64| {
+        let got = s.measure_rule(&rule).unwrap();
+        assert!((got - want).abs() < 1e-9, "{rule:?}: {got} vs {want}");
+    };
+    let zero = || 0.0.into();
+    near(Rule::Distance { a: l.whole(), b: None, value: zero() }, 10.0);
+    near(Rule::Distance { a: l.start(), b: Some(l.end()), value: zero() }, 10.0);
+    near(Rule::Distance { a: p.whole(), b: Some(l.whole()), value: zero() }, 10.0);
+    near(Rule::Distance { a: p.whole(), b: Some(c.whole()), value: zero() }, 6.0);
+    near(Rule::Distance { a: c.center(), b: Some(d.center()), value: zero() }, 20.0);
+    near(Rule::Distance { a: c.whole(), b: Some(d.whole()), value: zero() }, 10.0);
+    near(Rule::Distance { a: l.whole(), b: Some(c.whole()), value: zero() }, 4.0);
+    near(Rule::Distance { a: l.whole(), b: Some(X_AXIS.whole()), value: zero() }, 0.0);
+    near(Rule::HorizontalDistance { a: l.start(), b: c.center(), value: zero() }, 20.0);
+    near(Rule::VerticalDistance { a: p.whole(), b: l.end(), value: zero() }, -10.0);
+    near(Rule::Radius { of: d, value: zero() }, 6.0);
+    near(Rule::Diameter { of: a, value: zero() }, 4.0);
+    near(Rule::Angle { a: l, b: Some(m), value: zero() }, 90.0);
+    near(Rule::Angle { a: m, b: Some(l), value: zero() }, -90.0);
+    near(Rule::Angle { a: m, b: None, value: zero() }, 90.0);
+    near(Rule::Angle { a, b: None, value: zero() }, 90.0);
+    assert!(s.measure_rule(&Rule::Vertical { a: l.whole(), b: None }).is_err());
+    assert!(s.measure_rule(&Rule::Radius { of: l, value: zero() }).is_err());
+}

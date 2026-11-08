@@ -19,6 +19,33 @@ A sketch is plain data: entities and constraints with permanent ids, written to 
 Solving returns a new sketch and never changes the one it was given, so a failure can't leave anything
 half done.
 
+## Distances and reference dimensions
+
+`distance` works between any two of a point, a line and a circle or arc:
+
+| Between | Measures | Which side |
+|---|---|---|
+| Point and circle or arc | The gap to the curve. An arc counts as its full circle | The side the point is on now, unless the circle is too small for that |
+| Line and circle or arc | The gap from the line to the curve. If the line cuts the circle, it's to the side of the curve nearer the line | The same |
+| Two circles or arcs | The gap between the curves, outside each other or one inside the other | As they are now. Circles crossing each other go to outside each other |
+| Two lines | From the middle of `a` to `b`, with no point to pick | Either |
+
+Two lines measured this way are the distance between them when they're parallel. The dimension doesn't make them parallel, so
+add a `parallel` too. Without one, it means just what it says: the middle of `a` to the line through `b`.
+
+**Reference dimensions** report what the geometry measures and take no part in solving. They use no freedom, can't conflict with
+anything, and aren't listed as redundant. `add_reference(rule)` adds one, with any value in the rule, and `set_reference` turns a
+dimension into one or back. Solving and dragging write the measured value into it, so a saved or returned sketch shows it.
+`measure(id)` and `reference_values()` read any dimension at the geometry as it stands. In JSON it's `"reference": true`, and the
+`value` may be left out.
+
+**Tested** by 5,000 random sketches of these forms in this solver's own fuzz, with no refusals or wrong answers, and 1,000 against
+PlaneGCS. PlaneGCS accepted every answer without moving it, with the same freedom on all, and no wrong answers on either side. It
+refused 16 that this solver solved. In 16 of 1,000 drags this solver stopped short where PlaneGCS got there, by at most 0.18 mm and
+with every constraint still holding, which is a higher rate than the other categories' and isn't explained yet. FreeCAD has no form
+of a distance between two lines without picking a point, so in that comparison PlaneGCS measures from one line's start point.
+That's the same thing only because those lines are also constrained parallel. Measuring is checked directly against worked values.
+
 ## Regions
 
 `arrangement` cuts every curve that isn't construction geometry at each crossing, T-junction and touching point, then
@@ -229,8 +256,7 @@ The one slow frame at 505 entities is 100 ms.
   or a dimension to place something exactly.
 - **A curve's end has to land within 1e-7 mm of another curve to join it.** A larger gap is a real gap, and the piece
   beyond it is listed as ignored. Solved sketches sit far inside this, but hand-placed geometry may not.
-- **Not there yet:** ellipses and splines; a distance to a circle; a distance between two parallel lines without
-  picking a point; reference dimensions that report without driving.
+- **Not there yet:** ellipses and splines.
 - **A conflict set of more than 64 constraints** isn't shrunk to a smallest one. The message says where it stalled.
 - **Solving is `f64` with tolerances.** Near-degenerate sketches, such as a line nearly parallel to one it must be
   perpendicular to, are where failures concentrate.

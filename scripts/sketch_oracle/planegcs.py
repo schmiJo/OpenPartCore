@@ -52,7 +52,8 @@ def build_case(sketch):
     def entity(text):
         return ref(text)[0]
 
-    cs = sketch["constraints"]
+    # A reference dimension takes no part in solving.
+    cs = [c for c in sketch["constraints"] if not c.get("reference")]
     # A tangency with a shared end replaces that end's coincidence, as FreeCAD's own tools do.
     used = set()
     tangent_at = {}
@@ -127,9 +128,17 @@ def build_case(sketch):
                 out.append((("Distance", entity(c["a"]), c["value"]), cid))
             elif is_point(c["a"]) and is_point(c["b"]):
                 out.append((("Distance",) + ref(c["a"]) + ref(c["b"]) + (c["value"],), cid))
-            else:
+            elif is_point(c["a"]) or is_point(c["b"]):
                 p, e = (c["a"], c["b"]) if is_point(c["a"]) else (c["b"], c["a"])
                 out.append((("Distance",) + ref(p) + (entity(e), c["value"]), cid))
+            elif kinds[int(str(c["a"]))] == "line" and kinds[int(str(c["b"]))] == "line":
+                # The lines are parallel in these sketches, so any point of one will do. FreeCAD has no
+                # form of this without picking a point.
+                out.append((("Distance", entity(c["a"]), 1, entity(c["b"]), c["value"]), cid))
+            else:
+                # Between a line and a circle, or two circles. FreeCAD needs the circle first.
+                a, b = (c["b"], c["a"]) if kinds[int(str(c["a"]))] == "line" else (c["a"], c["b"])
+                out.append((("Distance", entity(a), entity(b), c["value"]), cid))
         elif t == "horizontal_distance":
             out.append((("DistanceX",) + ref(c["a"]) + ref(c["b"]) + (c["value"],), cid))
         elif t == "vertical_distance":

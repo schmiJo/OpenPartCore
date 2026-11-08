@@ -57,6 +57,7 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| Solver dimensions | `coreshape_sketch::Constraint` gained `reference` | Reading it is unaffected. `Sketch::constrain` is still the way to add one. Code building a `Constraint` by hand has to set it. Sketch JSON is unchanged unless a dimension is a reference |
 | Sketch regions | `coreshape_sketch::Region` gained `id` and `depth` | Reading it is unaffected. Code that builds a `Region` by hand has to set them |
 | Sketch regions | `Sketch::regions` no longer refuses open curves, branches or crossings. It refuses only if no region results, or a picked one has gone | A sketch that used to fail may now build. `Sketch::arrangement` and `Document::sketch_arrangement` report what was left out |
 | 9d13746 | Chamfers follow tangent edges by default, like fillets, including in saved files. `"propagate": false` turns it off | A saved chamfer on a smooth chain may now cover more edges |
@@ -70,8 +71,7 @@ Variable-radius fillets, general vertex blends, assemblies, and drawings.
 From OpenShape's list, in its order:
 
 1. Sketch regions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
-2. Solver dimensions: distance to a circle or arc, distance between parallel lines without picking a point, and reference
-   dimensions that report without driving.
+2. Solver dimensions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 3. Ellipses and elliptical arcs in the solver, regions and kernel profiles.
 4. Splines, as decided in [NURBS_DESIGN.md](NURBS_DESIGN.md): in sketches, extruded and revolved. OpenShape also wants lofts and
    free-form surfaces from imported files. Both are phase 3 of that note, which isn't decided yet.

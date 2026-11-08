@@ -21,6 +21,7 @@ pub mod drag;
 pub mod expr;
 pub mod fuzz;
 pub mod json;
+pub mod measure;
 pub mod model;
 pub mod regions;
 pub mod rng;

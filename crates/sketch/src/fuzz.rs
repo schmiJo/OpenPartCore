@@ -27,9 +27,11 @@ pub enum Category {
     Redundant,
     Conflict,
     Impossible,
+    /// Last, because a category's number seeds its cases and the others must keep theirs.
+    Distances,
 }
 
-pub const ALL_CATEGORIES: [Category; 12] = [
+pub const ALL_CATEGORIES: [Category; 13] = [
     Category::Rectilinear,
     Category::Polygons,
     Category::Rectangles,
@@ -38,6 +40,7 @@ pub const ALL_CATEGORIES: [Category; 12] = [
     Category::Circles,
     Category::Symmetry,
     Category::Mixed,
+    Category::Distances,
     Category::Large,
     Category::Redundant,
     Category::Conflict,
@@ -55,6 +58,7 @@ impl Category {
             Category::Circles => "circles",
             Category::Symmetry => "symmetry",
             Category::Mixed => "mixed",
+            Category::Distances => "distances",
             Category::Large => "large",
             Category::Redundant => "redundant",
             Category::Conflict => "conflict",
@@ -280,18 +284,35 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
                 }
                 Some(b) => {
                     let (first, second) = (point_of(s, *a), point_of(s, *b));
-                    match (first, second) {
-                        (Some(p), Some(q)) => (dist(p, q) - v).abs(),
-                        (Some(p), None) => {
-                            let (u, w) = line_of(s, b.entity)?;
-                            (signed_distance(p, u, w).abs() - v).abs()
+                    let curve = |r: Ref| curve_of(s, r.entity);
+                    let line = |r: Ref| line_of(s, r.entity);
+                    let gap = match (first, second) {
+                        (Some(p), Some(q)) => dist(p, q),
+                        (Some(p), None) | (None, Some(p)) => {
+                            let other = if first.is_some() { *b } else { *a };
+                            match (line(other), curve(other)) {
+                                (Some((u, w)), _) => signed_distance(p, u, w).abs(),
+                                (_, Some((c, r))) => (dist(p, c) - r).abs(),
+                                _ => return None,
+                            }
                         }
-                        (None, Some(p)) => {
-                            let (u, w) = line_of(s, a.entity)?;
-                            (signed_distance(p, u, w).abs() - v).abs()
-                        }
-                        _ => return None,
-                    }
+                        _ => match (line(*a), curve(*a), line(*b), curve(*b)) {
+                            (Some((u, w)), _, _, Some((c, r))) | (_, Some((c, r)), Some((u, w)), _) => (signed_distance(c, u, w).abs() - r).abs(),
+                            (_, Some((c0, r0)), _, Some((c1, r1))) => {
+                                let d = dist(c0, c1);
+                                if d >= r0 + r1 {
+                                    d - r0 - r1
+                                } else if d <= (r0 - r1).abs() {
+                                    (r0 - r1).abs() - d
+                                } else {
+                                    0.0
+                                }
+                            }
+                            (Some((p, q)), _, Some((u, w)), _) => signed_distance([(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0], u, w).abs(),
+                            _ => return None,
+                        },
+                    };
+                    (gap - v).abs()
                 }
             }
         }
@@ -327,7 +348,7 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
 /// its circle.
 pub fn violations(s: &Sketch, tol: f64) -> Vec<String> {
     let mut out = Vec::new();
-    for c in &s.constraints {
+    for c in s.constraints.iter().filter(|c| !c.reference) {
         // An endpoint tangency says more than the distance check above: the radius at the shared
         // point must be square to the line. It is checked here since it needs the shared point.
         let extra = match c.rule {
@@ -582,6 +603,86 @@ impl Gen<'_> {
         vec![bottom, right, top, left]
     }
 
+    /// Dimensions to circles and arcs, between parallel lines, and reference dimensions.
+    fn distances(&mut self, c: P2) -> Vec<EntityId> {
+        let r0 = self.rng.range(8.0, 16.0);
+        let a = self.s.circle(c, r0);
+        self.on(Rule::Radius { of: a, value: r0.into() });
+        let mut made = vec![a];
+        // A point outside the circle, and one inside it.
+        if self.rng.chance(0.7) {
+            let gap = self.rng.range(1.0, 10.0);
+            let p = polar(c, r0 + gap, self.rng.range(0.0, TAU));
+            let e = self.s.point(p[0], p[1]);
+            self.on(Rule::Distance { a: e.whole(), b: Some(a.whole()), value: gap.into() });
+        }
+        if self.rng.chance(0.5) {
+            let gap = self.rng.range(1.0, r0 * 0.7);
+            let p = polar(c, r0 - gap, self.rng.range(0.0, TAU));
+            let e = self.s.point(p[0], p[1]);
+            self.on(Rule::Distance { a: a.whole(), b: Some(e.whole()), value: gap.into() });
+        }
+        // A line clear of the circle.
+        if self.rng.chance(0.7) {
+            let (gap, t) = (self.rng.range(1.0, 10.0), self.rng.range(0.0, TAU));
+            let foot = polar(c, r0 + gap, t);
+            let dir = [-t.sin(), t.cos()];
+            let (m, n) = (self.rng.range(2.0, 20.0), self.rng.range(2.0, 20.0));
+            let l = self.s.line([foot[0] - dir[0] * m, foot[1] - dir[1] * m], [foot[0] + dir[0] * n, foot[1] + dir[1] * n]);
+            self.on(Rule::Distance { a: l.whole(), b: Some(a.whole()), value: gap.into() });
+            made.push(l);
+        }
+        // A circle clear of it, and one inside it.
+        if self.rng.chance(0.7) {
+            let (r1, gap, t) = (self.rng.range(2.0, 8.0), self.rng.range(1.0, 10.0), self.rng.range(0.0, TAU));
+            let b = self.s.circle(polar(c, r0 + r1 + gap, t), r1);
+            self.on(Rule::Distance { a: a.whole(), b: Some(b.whole()), value: gap.into() });
+            made.push(b);
+        }
+        if self.rng.chance(0.5) {
+            let r1 = self.rng.range(1.0, r0 * 0.4);
+            let gap = self.rng.range(0.5, r0 - r1 - 0.5);
+            let b = self.s.circle(polar(c, r0 - r1 - gap, self.rng.range(0.0, TAU)), r1);
+            self.on(Rule::Distance { a: b.whole(), b: Some(a.whole()), value: gap.into() });
+            made.push(b);
+        }
+        // An arc, which counts as its full circle.
+        if self.rng.chance(0.6) {
+            let far = polar(c, r0 + 45.0, self.rng.range(0.0, TAU));
+            let r1 = self.rng.range(5.0, 12.0);
+            let d0 = self.rng.range(0.0, 200.0);
+            let arc = self.s.arc(far, r1, d0, d0 + self.rng.range(40.0, 140.0));
+            self.on(Rule::Radius { of: arc, value: r1.into() });
+            let (gap, t) = (self.rng.range(1.0, 6.0), self.rng.range(0.0, TAU));
+            let p = polar(far, r1 + gap, t);
+            let e = self.s.point(p[0], p[1]);
+            self.on(Rule::Distance { a: e.whole(), b: Some(arc.whole()), value: gap.into() });
+            made.push(arc);
+        }
+        // Two parallel lines, with no point picked. The length keeps the first from collapsing.
+        let t = self.rng.range(0.0, TAU);
+        let (dir, side) = ([t.cos(), t.sin()], [-t.sin(), t.cos()]);
+        let at = polar(c, r0 + 70.0, self.rng.range(0.0, TAU));
+        let (len, gap, slide) = (self.rng.range(5.0, 30.0), self.rng.range(1.0, 15.0), self.rng.range(-10.0, 10.0));
+        let (s0, e0) = (at, [at[0] + dir[0] * len, at[1] + dir[1] * len]);
+        let s1 = [at[0] + side[0] * gap + dir[0] * slide, at[1] + side[1] * gap + dir[1] * slide];
+        let e1 = [s1[0] + dir[0] * len * 0.7, s1[1] + dir[1] * len * 0.7];
+        let (l0, l1) = (self.s.line(s0, e0), self.s.line(s1, e1));
+        self.on(Rule::Parallel { a: l0, b: l1 });
+        self.on(Rule::Distance { a: l0.whole(), b: Some(l1.whole()), value: gap.into() });
+        self.length_of(l0);
+        self.length_of(l1);
+        made.push(l0);
+        made.push(l1);
+        // Reference dimensions, whose values mean nothing until they're measured.
+        if self.rng.chance(0.7) {
+            let _ = self.s.add_reference(Rule::Distance { a: l0.start(), b: Some(l1.end()), value: 1234.5.into() });
+            let _ = self.s.add_reference(Rule::Diameter { of: a, value: 1234.5.into() });
+            let _ = self.s.add_reference(Rule::Angle { a: l0, b: None, value: 1234.5.into() });
+        }
+        made
+    }
+
     fn circles(&mut self, c: P2) -> Vec<EntityId> {
         let r0 = self.rng.range(6.0, 16.0);
         let a = self.s.circle(c, r0);
@@ -795,6 +896,10 @@ pub fn generate_sized(category: Category, seed: u64, entities: usize) -> Case {
         Category::Symmetry => {
             let c = [gen.rng.range(-20.0, 20.0), gen.rng.range(-20.0, 20.0)];
             gen.symmetry(c);
+        }
+        Category::Distances => {
+            let c = [gen.rng.range(-20.0, 20.0), gen.rng.range(-20.0, 20.0)];
+            gen.distances(c);
         }
         Category::Mixed => {
             let blocks = gen.rng.int(2, 5);

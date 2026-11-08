@@ -21,14 +21,14 @@ pub(crate) enum Eq {
     Linear { coef: [f64; 4], value: f64 },
     /// a, b: `|b - a| - value`.
     Dist { value: f64 },
-    /// a, b, r: `|b - a| - r`.
-    DistToRadius,
+    /// a, b, r: `|b - a| - r - gap`.
+    DistToRadius { gap: f64 },
     /// a0, a1, b0, b1: `|a1 - a0| - |b1 - b0|`.
     EqualLength,
     /// p, a, b: the signed distance from p to line ab, or its size, minus `value`.
     PointLine { value: f64, unsigned: bool },
-    /// p, a, b, r: `|distance from p to line ab| - r`.
-    PointLineRadius,
+    /// p, a, b, r: `|distance from p to line ab| - r - gap`.
+    PointLineRadius { gap: f64 },
     /// a0, a1, b0, b1: the sine of the angle between the directions, at `scale`.
     Parallel { scale: f64 },
     /// a0, a1, b0, b1: the cosine of the angle between the directions, at `scale`.
@@ -37,12 +37,12 @@ pub(crate) enum Eq {
     Angle { theta: f64, scale: f64 },
     /// c, s, e: the angle from cs to ce minus `theta`, wrapped, at `scale`.
     ArcSpan { theta: f64, scale: f64 },
-    /// c0, c1, r0, r1: `|c1 - c0| - s0 r0 - s1 r1`.
-    CircleTangent { s0: f64, s1: f64 },
+    /// c0, c1, r0, r1: `|c1 - c0| - s0 r0 - s1 r1 - gap`.
+    CircleTangent { s0: f64, s1: f64, gap: f64 },
     /// c0, c1, r0, r1: `|c1 - c0| - sqrt(r0^2 + r1^2)`.
     CircleNormal,
-    /// p, q, a, b: the signed distance from the midpoint of pq to line ab.
-    MidpointOnLine,
+    /// p, q, a, b: the distance from the midpoint of pq to line ab, signed or its size, minus `value`.
+    MidpointLine { value: f64, unsigned: bool },
     /// p, q, a, b: `(q - p) · direction of ab`.
     PerpendicularToLine,
 }
@@ -85,12 +85,12 @@ impl Row {
                 set(g, 2, u);
                 n - value
             }
-            Eq::DistToRadius => {
+            Eq::DistToRadius { gap } => {
                 let (n, u) = length_and_unit(p(0), p(2));
                 set(g, 0, [-u[0], -u[1]]);
                 set(g, 2, u);
                 g[4] = -1.0;
-                n - v(4)
+                n - v(4) - gap
             }
             Eq::EqualLength => {
                 let (n0, u0) = length_and_unit(p(0), p(2));
@@ -112,16 +112,16 @@ impl Row {
                     s - value
                 }
             }
-            Eq::PointLineRadius => {
+            Eq::PointLineRadius { gap } => {
                 let s = point_line(p(0), p(2), p(4), g, 0, 2, 4, 1.0);
                 g[6] = -1.0;
                 if s < 0.0 {
                     for gi in g.iter_mut().take(6) {
                         *gi = -*gi;
                     }
-                    -s - v(6)
+                    -s - v(6) - gap
                 } else {
-                    s - v(6)
+                    s - v(6) - gap
                 }
             }
             Eq::Parallel { scale } => {
@@ -180,13 +180,13 @@ impl Row {
                 set(g, 4, dv);
                 wrap(angle - theta) * scale
             }
-            Eq::CircleTangent { s0, s1 } => {
+            Eq::CircleTangent { s0, s1, gap } => {
                 let (n, u) = length_and_unit(p(0), p(2));
                 set(g, 0, [-u[0], -u[1]]);
                 set(g, 2, u);
                 g[4] = -s0;
                 g[5] = -s1;
-                n - s0 * v(4) - s1 * v(5)
+                n - s0 * v(4) - s1 * v(5) - gap
             }
             Eq::CircleNormal => {
                 let (n, u) = length_and_unit(p(0), p(2));
@@ -198,20 +198,21 @@ impl Row {
                 g[5] = -r1 / h;
                 n - h
             }
-            Eq::MidpointOnLine => {
+            Eq::MidpointLine { value, unsigned } => {
                 let (a, b) = (p(4), p(6));
                 let m = [(v(0) + v(2)) / 2.0, (v(1) + v(3)) / 2.0];
                 let mut h = [0.0; MAX_VARS];
                 let s = point_line(m, a, b, &mut h, 0, 2, 4, 1.0);
-                g[0] = h[0] / 2.0;
-                g[1] = h[1] / 2.0;
-                g[2] = h[0] / 2.0;
-                g[3] = h[1] / 2.0;
-                g[4] = h[2];
-                g[5] = h[3];
-                g[6] = h[4];
-                g[7] = h[5];
-                s
+                let sign = if unsigned && s < 0.0 { -1.0 } else { 1.0 };
+                g[0] = sign * h[0] / 2.0;
+                g[1] = sign * h[1] / 2.0;
+                g[2] = sign * h[0] / 2.0;
+                g[3] = sign * h[1] / 2.0;
+                g[4] = sign * h[2];
+                g[5] = sign * h[3];
+                g[6] = sign * h[4];
+                g[7] = sign * h[5];
+                sign * s - value
             }
             Eq::PerpendicularToLine => {
                 let w = diff(p(0), p(2));
@@ -397,7 +398,7 @@ impl System {
             if let Geometry::Arc { .. } = e.geometry {
                 let b = sys.base[&e.id];
                 for point in [b + 3, b + 5] {
-                    sys.rows.push(row(None, Eq::DistToRadius, &[b, b + 1, point, point + 1, b + 2]));
+                    sys.rows.push(row(None, Eq::DistToRadius { gap: 0.0 }, &[b, b + 1, point, point + 1, b + 2]));
                 }
             }
         }
@@ -406,7 +407,10 @@ impl System {
             builder.note_contacts(c)?;
         }
         for (i, c) in sketch.constraints.iter().enumerate() {
-            builder.add(i, c).map_err(|m| invalid(Some(c), m))?;
+            // A reference dimension reports. It takes no part in solving.
+            if !c.reference {
+                builder.add(i, c).map_err(|m| invalid(Some(c), m))?;
+            }
         }
         Ok(builder.sys)
     }
@@ -523,6 +527,7 @@ impl System {
                 Geometry::Arc { .. } => Geometry::Arc { center: p(0), radius: x[b + 2], start: p(3), end: p(5) },
             };
         }
+        out.refresh_references();
         out
     }
 }
@@ -709,7 +714,7 @@ impl Builder<'_> {
                     self.push(row(Some(i), Eq::PointLine { value: 0.0, unsigned: false }, &[p[0], p[1], l[0], l[1], l[2], l[3]]));
                 } else if self.is_curve(b.entity) && b.part == Part::Whole {
                     let (center, r) = self.curve(b.entity)?;
-                    self.push(row(Some(i), Eq::DistToRadius, &[center[0], center[1], p[0], p[1], r]));
+                    self.push(row(Some(i), Eq::DistToRadius { gap: 0.0 }, &[center[0], center[1], p[0], p[1], r]));
                 } else {
                     return Err(format!("{} is not a point, line, circle or arc", b.name()));
                 }
@@ -757,7 +762,7 @@ impl Builder<'_> {
                 let (p, q) = (self.point(*a)?, self.point(*b)?);
                 if about.part == Part::Whole && self.is_line(about.entity) {
                     let l = self.line(about.entity)?;
-                    self.push(row(Some(i), Eq::MidpointOnLine, &[p[0], p[1], q[0], q[1], l[0], l[1], l[2], l[3]]));
+                    self.push(row(Some(i), Eq::MidpointLine { value: 0.0, unsigned: false }, &[p[0], p[1], q[0], q[1], l[0], l[1], l[2], l[3]]));
                     self.push(row(Some(i), Eq::PerpendicularToLine, &[p[0], p[1], q[0], q[1], l[0], l[1], l[2], l[3]]));
                 } else {
                     let m = self.point(*about)?;
@@ -775,19 +780,7 @@ impl Builder<'_> {
                         let l = self.line(first.entity)?;
                         self.push(row(Some(i), Eq::Dist { value: v }, &[l[0], l[1], l[2], l[3]]));
                     }
-                    Some(s) => {
-                        let (pr, lr) = if self.is_point(first) { (first, s) } else { (s, first) };
-                        let p = self.point(pr).map_err(|_| "a distance needs a point or a line".to_string())?;
-                        if self.is_point(lr) {
-                            let q = self.point(lr)?;
-                            self.push(row(Some(i), Eq::Dist { value: v }, &[p[0], p[1], q[0], q[1]]));
-                        } else if lr.part == Part::Whole && self.is_line(lr.entity) {
-                            let l = self.line(lr.entity)?;
-                            self.push(row(Some(i), Eq::PointLine { value: v, unsigned: true }, &[p[0], p[1], l[0], l[1], l[2], l[3]]));
-                        } else {
-                            return Err(format!("a distance to {} isn't supported: use two points, or a point and a line", lr.name()));
-                        }
-                    }
+                    Some(s) => self.distance(i, first, s, v)?,
                 }
             }
             Rule::HorizontalDistance { a, b, value } | Rule::VerticalDistance { a, b, value } => {
@@ -833,6 +826,74 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// A distance between any two of a point, a line and a circle or arc. To a circle or arc, it's
+    /// the gap to the curve, on whichever side things are now. An arc counts as its full circle, and a
+    /// line as infinite, as they do for other constraints.
+    fn distance(&mut self, i: usize, a: Ref, b: Ref, v: f64) -> Result<(), String> {
+        enum Thing {
+            Point([u32; 2]),
+            Line([u32; 4]),
+            Curve([u32; 2], u32),
+        }
+        let thing = |this: &Self, r: Ref| -> Result<Thing, String> {
+            if let Ok(p) = this.point(r) {
+                Ok(Thing::Point(p))
+            } else if r.part == Part::Whole && this.is_line(r.entity) {
+                Ok(Thing::Line(this.line(r.entity)?))
+            } else if r.part == Part::Whole && this.is_curve(r.entity) {
+                let (c, radius) = this.curve(r.entity)?;
+                Ok(Thing::Curve(c, radius))
+            } else {
+                Err(format!("a distance to {} isn't supported: use points, lines, circles or arcs", r.name()))
+            }
+        };
+        let (ta, tb) = (thing(self, a)?, thing(self, b)?);
+        match (ta, tb) {
+            (Thing::Point(p), Thing::Point(q)) => {
+                self.push(row(Some(i), Eq::Dist { value: v }, &[p[0], p[1], q[0], q[1]]));
+            }
+            (Thing::Point(p), Thing::Line(l)) | (Thing::Line(l), Thing::Point(p)) => {
+                self.push(row(Some(i), Eq::PointLine { value: v, unsigned: true }, &[p[0], p[1], l[0], l[1], l[2], l[3]]));
+            }
+            (Thing::Point(p), Thing::Curve(c, r)) | (Thing::Curve(c, r), Thing::Point(p)) => {
+                // Stay on the side it's on, unless the circle is too small for that.
+                let inside = self.length(p, c) < self.at(r) && v < self.at(r);
+                let gap = if inside { -v } else { v };
+                self.push(row(Some(i), Eq::DistToRadius { gap }, &[c[0], c[1], p[0], p[1], r]));
+            }
+            (Thing::Line(l), Thing::Curve(c, r)) | (Thing::Curve(c, r), Thing::Line(l)) => {
+                let (la, lb, center) = ([self.at(l[0]), self.at(l[1])], [self.at(l[2]), self.at(l[3])], [self.at(c[0]), self.at(c[1])]);
+                let length = diff(la, lb);
+                let from = diff(la, center);
+                let across = (length[0] * from[1] - length[1] * from[0]).abs() / norm2(length).sqrt().max(TINY);
+                let inside = across < self.at(r) && v < self.at(r);
+                let gap = if inside { -v } else { v };
+                self.push(row(Some(i), Eq::PointLineRadius { gap }, &[c[0], c[1], l[0], l[1], l[2], l[3], r]));
+            }
+            (Thing::Curve(c0, r0), Thing::Curve(c1, r1)) => {
+                let (d, v0, v1) = (self.length(c0, c1), self.at(r0), self.at(r1));
+                let (s0, s1, gap) = if d <= (v0 - v1).abs() && v < v0.max(v1) {
+                    // One inside the other.
+                    if v0 >= v1 {
+                        (1.0, -1.0, -v)
+                    } else {
+                        (-1.0, 1.0, -v)
+                    }
+                } else {
+                    (1.0, 1.0, v)
+                };
+                self.push(row(Some(i), Eq::CircleTangent { s0, s1, gap }, &[c0[0], c0[1], c1[0], c1[1], r0, r1]));
+            }
+            (Thing::Line(la), Thing::Line(lb)) => {
+                // From the middle of one line to the other, which is the distance between them when
+                // they're parallel. A reference axis has no middle worth measuring from.
+                let (from, to) = if a.entity.is_reference() { (lb, la) } else { (la, lb) };
+                self.push(row(Some(i), Eq::MidpointLine { value: v, unsigned: true }, &[from[0], from[1], from[2], from[3], to[0], to[1], to[2], to[3]]));
+            }
+        }
+        Ok(())
+    }
+
     fn tangent(&mut self, i: usize, a: EntityId, b: EntityId) -> Result<(), String> {
         let (al, bl) = (self.is_line(a), self.is_line(b));
         if al && bl {
@@ -848,7 +909,7 @@ impl Builder<'_> {
                 // solution, because a point on both already fixes that distance to first order.
                 self.push(row(Some(i), Eq::PerpendicularToLine, &[center[0], center[1], p[0], p[1], l[0], l[1], l[2], l[3]]));
             } else {
-                self.push(row(Some(i), Eq::PointLineRadius, &[center[0], center[1], l[0], l[1], l[2], l[3], r]));
+                self.push(row(Some(i), Eq::PointLineRadius { gap: 0.0 }, &[center[0], center[1], l[0], l[1], l[2], l[3], r]));
             }
             return Ok(());
         }
@@ -866,7 +927,7 @@ impl Builder<'_> {
             } else {
                 (-1.0, 1.0)
             };
-            self.push(row(Some(i), Eq::CircleTangent { s0, s1 }, &[c0[0], c0[1], c1[0], c1[1], r0, r1]));
+            self.push(row(Some(i), Eq::CircleTangent { s0, s1, gap: 0.0 }, &[c0[0], c0[1], c1[0], c1[1], r0, r1]));
         }
         Ok(())
     }
@@ -959,18 +1020,22 @@ mod tests {
         let cases: Vec<(Eq, usize)> = vec![
             (Eq::Linear { coef: [1.5, -2.0, 0.5, 3.0], value: 7.0 }, 4),
             (Eq::Dist { value: 3.0 }, 4),
-            (Eq::DistToRadius, 5),
+            (Eq::DistToRadius { gap: 0.0 }, 5),
+            (Eq::DistToRadius { gap: 1.5 }, 5),
             (Eq::EqualLength, 8),
             (Eq::PointLine { value: 2.0, unsigned: false }, 6),
             (Eq::PointLine { value: 2.0, unsigned: true }, 6),
-            (Eq::PointLineRadius, 7),
+            (Eq::PointLineRadius { gap: 0.0 }, 7),
+            (Eq::PointLineRadius { gap: -1.5 }, 7),
             (Eq::Parallel { scale: 12.0 }, 8),
             (Eq::Perpendicular { scale: 12.0 }, 8),
             (Eq::Angle { theta: 0.7, scale: 9.0 }, 8),
             (Eq::ArcSpan { theta: 1.3, scale: 5.0 }, 6),
-            (Eq::CircleTangent { s0: 1.0, s1: -1.0 }, 6),
+            (Eq::CircleTangent { s0: 1.0, s1: -1.0, gap: 0.0 }, 6),
+            (Eq::CircleTangent { s0: 1.0, s1: 1.0, gap: 2.0 }, 6),
             (Eq::CircleNormal, 6),
-            (Eq::MidpointOnLine, 8),
+            (Eq::MidpointLine { value: 0.0, unsigned: false }, 8),
+            (Eq::MidpointLine { value: 3.0, unsigned: true }, 8),
             (Eq::PerpendicularToLine, 8),
         ];
         for (eq, count) in cases {

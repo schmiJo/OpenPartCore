@@ -349,6 +349,9 @@ impl Sketch {
             .map(|c| {
                 let mut items = vec![("id", Value::Num(c.id.0 as f64))];
                 items.extend(rule_value(&c.rule));
+                if c.reference {
+                    items.push(("reference", Value::Bool(true)));
+                }
                 Value::obj(items)
             })
             .collect();
@@ -410,14 +413,29 @@ impl Sketch {
             if s.constraints.iter().any(|c| c.id == id) {
                 return Err(format!("constraint id {} appears twice", id.0));
             }
-            let rule = read_rule(item, &["id"])?;
+            let reference = match item.get("reference") {
+                None => false,
+                Some(r) => r.as_bool().ok_or("\"reference\" must be true or false")?,
+            };
+            // A reference dimension is measured, so a file needn't say what it comes to.
+            let rule = match item {
+                Value::Obj(fields) if reference && item.get("value").is_none() => {
+                    let mut with_value = fields.clone();
+                    with_value.push(("value".to_string(), Value::Num(0.0)));
+                    read_rule(&Value::Obj(with_value), &["id", "reference"])?
+                }
+                _ => read_rule(item, &["id", "reference"])?,
+            };
+            if reference && rule.value().is_none() {
+                return Err(format!("c{} is a {} constraint, which has no value, so it can't be a reference dimension", id.0, rule.kind()));
+            }
             for e in rule.entities() {
                 if !e.is_reference() && !s.entities.iter().any(|x| x.id == e) {
                     return Err(format!("c{} refers to entity {}, which doesn't exist", id.0, e.0));
                 }
             }
             s.next_constraint = s.next_constraint.max(id.0 + 1);
-            s.constraints.push(Constraint { id, rule });
+            s.constraints.push(Constraint { id, rule, reference });
         }
         // Ids are never reused, so these must stay above every id ever handed out.
         let keep = |key: &str, floor: u32| {
@@ -430,6 +448,7 @@ impl Sketch {
         };
         s.next_entity = keep("next_entity", s.next_entity);
         s.next_constraint = keep("next_constraint", s.next_constraint);
+        s.refresh_references();
         if let Some(list) = v.get("picked_regions") {
             let list = list.as_array().ok_or("\"picked_regions\" must be a list of region ids")?;
             for item in list {
