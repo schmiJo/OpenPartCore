@@ -806,8 +806,31 @@ impl Spline {
             .collect()
     }
 
-    /// Whether a curve in the plane crosses itself. It's checked on a fine polyline, so a crossing has to
-    /// be bigger than the polyline's error to be seen.
+    /// Points along the curve, for checking whether an outline crosses itself. They get closer and closer
+    /// toward both ends, since a curve can leave a corner on the wrong side of its neighbour and cross back
+    /// by a tiny amount, and the neighbour has to be tested right up to the corner.
+    pub fn graded_polyline(&self, per_span: usize) -> Vec<Vec3> {
+        let (u0, u1) = self.domain();
+        let mut ts: Vec<f64> = Vec::with_capacity(self.spans.len() * per_span + 64);
+        for s in &self.spans {
+            for i in 0..per_span {
+                ts.push(s.t0 + (s.t1 - s.t0) * i as f64 / per_span as f64);
+            }
+        }
+        ts.push(u1);
+        let first = self.spans[0].t1 - self.spans[0].t0;
+        let last = self.spans[self.spans.len() - 1].t1 - self.spans[self.spans.len() - 1].t0;
+        let mut step = 1.0 / per_span as f64;
+        for _ in 0..24 {
+            step *= 0.5;
+            ts.push(u0 + first * step);
+            ts.push(u1 - last * step);
+        }
+        ts.sort_by(f64::total_cmp);
+        ts.iter().map(|&t| self.eval(t)).collect()
+    }
+
+    /// Evenly spaced points along the curve, by knot interval.
     pub fn polyline(&self, per_span: usize) -> Vec<Vec3> {
         let mut out = Vec::with_capacity(self.spans.len() * per_span + 1);
         for s in &self.spans {

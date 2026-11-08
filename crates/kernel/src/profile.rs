@@ -236,7 +236,7 @@ impl Wire {
         let mut out = Vec::new();
         for (i, s) in self.segs.iter().enumerate() {
             if let SegGeom::Spline(ref c) = s.geom {
-                for w in c.polyline(FLAT_PER_SPAN).windows(2) {
+                for w in c.graded_polyline(FLAT_PER_SPAN).windows(2) {
                     out.push((v2(w[0].x, w[0].y), v2(w[1].x, w[1].y), i));
                 }
                 continue;

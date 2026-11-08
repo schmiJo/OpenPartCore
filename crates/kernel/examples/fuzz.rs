@@ -10,8 +10,10 @@ fn main() {
     let first: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
 
+    // SPLINES=1 runs the spline categories instead.
+    let categories: &[Category] = if std::env::var("SPLINES").is_ok() { &SPLINE_CATEGORIES } else { &ALL_CATEGORIES };
     println!("{:<20} {:>6} {:>8} {:>8} {:>10}", "category", "cases", "refused", "wrong", "time");
-    for category in ALL_CATEGORIES {
+    for &category in categories {
         let t = Instant::now();
         let mut handles = Vec::new();
         for w in 0..threads as u64 {

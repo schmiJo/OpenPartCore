@@ -507,10 +507,19 @@ fn refine(
     params: &TessParams,
 ) {
     const MAX_POINTS: usize = 40_000;
+    // A triangle that needed nothing last pass needs nothing this pass, if it's still there. On a surface
+    // where each distance costs a search, looking again at every triangle on every pass was most of the time.
+    let mut settled: crate::hash::HashSet<[u32; 3]> = crate::hash::HashSet::default();
+    let mut normals: HashMap<u32, Vec3> = HashMap::default();
     for _pass in 0..24 {
         let tris: Vec<([u32; 3], [bool; 3])> = cdt.inside_triangles().collect();
         let mut wanted: Vec<[i64; 2]> = Vec::new();
         for (v, constrained) in &tris {
+            let mut key = *v;
+            key.sort_unstable();
+            if settled.contains(&key) {
+                continue;
+            }
             let grid = [cdt.pts[v[0] as usize], cdt.pts[v[1] as usize], cdt.pts[v[2] as usize]];
             let world = [point_of[&v[0]], point_of[&v[1]], point_of[&v[2]]];
             let mut worst = 0.0;
@@ -531,7 +540,9 @@ fn refine(
                 // comparing against the chart midpoint would also count sliding
                 // along the surface, which is not an error at all.
                 let sag = surface.sdf((world[a] + world[b]) * 0.5).abs();
-                let turn = surface.normal(world[a]).dot(surface.normal(world[b])).clamp(-1.0, 1.0).acos();
+                let na = *normals.entry(v[a]).or_insert_with(|| surface.normal(world[a]));
+                let nb = *normals.entry(v[b]).or_insert_with(|| surface.normal(world[b]));
+                let turn = na.dot(nb).clamp(-1.0, 1.0).acos();
                 let score = (sag / params.chord).max(turn / params.angle);
                 if score > 1.0 && score > worst {
                     worst = score;
@@ -547,8 +558,12 @@ fn refine(
                     candidate = Some(c);
                 }
             }
-            if let Some(q) = candidate {
-                wanted.push(q);
+            match candidate {
+                Some(q) => wanted.push(q),
+                // Which edges are constrained can't change, so this result holds as long as the triangle does.
+                None => {
+                    settled.insert(key);
+                }
             }
         }
         if wanted.is_empty() || cdt.pts.len() > MAX_POINTS {

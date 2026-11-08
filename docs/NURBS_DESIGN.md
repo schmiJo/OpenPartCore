@@ -1,7 +1,7 @@
 # NURBS: a design note
 
-Written before any NURBS code, because the kernel's robustness rests on something NURBS don't have. No code in this repository
-depends on this note yet. It ends with the decisions that need making.
+Written before any NURBS code, because the kernel's robustness rests on something NURBS don't have. Phases 1 and 2 are now built.
+See [What was built](#what-was-built) at the end, which also says where this note turned out wrong.
 
 ## What the kernel relies on today
 
@@ -120,3 +120,37 @@ stop being a small kernel. It's a reasonable place to stop and reassess.
 2. **Is a refusal acceptable for spline fillets?** I'd keep refusing at first. Approximate fillets would be the first results in this kernel that are
    neither exact nor refused, and they deserve their own decision.
 3. **Volumes with an error bar.** Are numerically integrated volumes acceptable on spline faces, reported with their bound?
+
+## What was built
+
+Decided: build through phase 2, refuse spline fillets at first, report volumes with an error estimate, and decide on phase 3 later.
+
+**Phase 0 wasn't needed, and this note was wrong to put it first.** Its point was to move every caller of `sdf` behind an interface that
+doesn't promise a distance. But in phases 1 and 2 the surfaces still have a true signed distance, so every caller stays as it was.
+Phase 3 would still need that interface.
+
+**The certificate carries over.** The distance from a point to a rational curve has an exact polynomial form: the stationary points are
+the roots of `(A - p w) . (A' w - A w')`, whose Bernstein coefficients are linear in `p`. Sign changes among them bound the roots, so every
+local minimum is isolated with certainty, at the cost of a few dozen multiplications per knot interval. Each face's curve turns less
+than 150 degrees and carries on along its end tangents, which makes it a graph over one direction. That divides the plane in two, so
+the signed distance is 1-Lipschitz everywhere, as tested directly. A revolved curve's distance is the same thing in the half-plane through the
+point, and stays 1-Lipschitz through the change to those coordinates.
+
+**What exists:**
+
+| Piece | What it does |
+|---|---|
+| `Spline` | Rational B-splines up to degree 7: evaluate, closest point, sub-curves, reversal, affine maps, cubic through points, exact elliptical arcs |
+| `Surface::Extruded`, `Surface::Revolved` | A curve swept along a line or around an axis. A curve may end on the axis, where the chart is polar about the tip |
+| Exact sections | A plane across an extrusion gives a spline, including at a slant, since a rational spline follows an affine map exactly. A plane along the sweep, or a parallel cylinder or extrusion, gives straight rulings. Coaxial surfaces give circles. A plane through the axis of a revolution gives the curve itself |
+| Everything else | The existing contour tracer, unchanged, which needs only a true distance and a chart |
+| Mass properties | Integrated along edges with the inner integral in closed form, with `volume_error` from comparing two rules |
+| STEP | `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, rational `B_SPLINE_CURVE_WITH_KNOTS` |
+
+**Analytic stays analytic.** A straight stretch of a spline becomes a plane, or a cone or cylinder when revolved, and not a spline surface.
+
+**Refused:** fillets, chamfers, offset, shell and draft on spline faces, and two different splines sharing part of their length. A spline can
+touch a revolve axis only at its ends.
+
+**Phase 3 is still open.** OpenShape has now asked for lofts and for free-form surfaces from imported files, in that order, after extruded
+splines. Both are phase 3, and this note's warning stands: that's where this stops being a small kernel.

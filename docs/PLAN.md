@@ -57,6 +57,9 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| Spline surfaces | `Surface` is no longer `Copy`, and gained `Extruded` and `Revolved` | Use `face.surface.clone()` or borrow it. An exhaustive `match` needs the new arms. `Surface::name` gives `extrusion` and `revolution` |
+| Spline surfaces | `Curve` gained `Spline`. `SegGeom` gained `Spline`, and it and `Seg` are no longer `Copy` | An exhaustive `match` needs the new arm |
+| Spline surfaces | `MassProps` gained `volume_error` | Reading it is unaffected. It's zero unless the body has spline faces or traced edges |
 | Solver dimensions | `coreshape_sketch::Constraint` gained `reference` | Reading it is unaffected. `Sketch::constrain` is still the way to add one. Code building a `Constraint` by hand has to set it. Sketch JSON is unchanged unless a dimension is a reference |
 | Sketch regions | `coreshape_sketch::Region` gained `id` and `depth` | Reading it is unaffected. Code that builds a `Region` by hand has to set them |
 | Sketch regions | `Sketch::regions` no longer refuses open curves, branches or crossings. It refuses only if no region results, or a picked one has gone | A sketch that used to fail may now build. `Sketch::arrangement` and `Document::sketch_arrangement` report what was left out |
@@ -72,8 +75,8 @@ From OpenShape's list, in its order:
 
 1. Sketch regions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 2. Solver dimensions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
-3. Ellipses and elliptical arcs in the solver, regions and kernel profiles.
-4. Splines, as decided in [NURBS_DESIGN.md](NURBS_DESIGN.md): in sketches, extruded and revolved. OpenShape also wants lofts and
-   free-form surfaces from imported files. Both are phase 3 of that note, which isn't decided yet.
+3. Ellipses and elliptical arcs: kernel profiles done, as exact rational splines. Solver and regions next.
+4. Splines, as decided in [NURBS_DESIGN.md](NURBS_DESIGN.md): extruded and revolved in the kernel are done. Sketches next. OpenShape
+   also wants lofts and free-form surfaces from imported files. Both are phase 3 of that note, which isn't decided yet.
 5. STEP import: analytic surfaces first, refusing anything else and naming the surface type.
 6. Modelling: offset, shell and draft that survive topology changes, helix, loft, delete face and thicken.

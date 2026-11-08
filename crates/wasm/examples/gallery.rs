@@ -4,6 +4,44 @@ use coreshape::*;
 use coreshape_wasm::models;
 use std::fmt::Write;
 
+fn spline_extras() -> Vec<(&'static str, Result<Body>)> {
+    let ellipse = |a: f64, b: f64| {
+        let s = Spline::ellipse_arc(Vec3::ZERO, Vec3::X, Vec3::Y, a, b, 0.0, TAU).unwrap();
+        Wire { segs: vec![Seg { geom: SegGeom::Spline(std::sync::Arc::new(s)), id: 0 }] }
+    };
+    let wavy = || {
+        let points: Vec<Vec3> = [(30.0, 0.0), (20.0, 14.0), (5.0, 9.0), (-10.0, 18.0), (-30.0, 0.0)].iter().map(|p| v3(p.0, p.1, 0.0)).collect();
+        PathBuilder::new(v2(30.0, 0.0)).spline_to(Spline::through(&points).unwrap()).close()
+    };
+    let vase_profile = || {
+        let points: Vec<Vec3> = [(14.0, 0.0), (20.0, 12.0), (9.0, 28.0), (13.0, 44.0)].iter().map(|p| v3(p.0, p.1, 0.0)).collect();
+        PathBuilder::new(v2(14.0, 0.0)).spline_to(Spline::through(&points).unwrap()).line_to(v2(0.0, 44.0)).line_to(v2(0.0, 0.0)).close()
+    };
+    let dome = || {
+        let arc = Spline::ellipse_arc(Vec3::ZERO, Vec3::X, Vec3::Y, 12.0, 20.0, -PI / 2.0, PI / 2.0).unwrap();
+        PathBuilder::new(v2(0.0, -20.0)).spline_to(arc).close()
+    };
+    let slab_above = |height: f64, tilt: Vec3| {
+        let f = Frame::new(v3(0.0, 0.0, height), tilt, Vec3::X);
+        box_solid(&Frame { origin: f.point(-200.0, -200.0, 0.0), ..f }, 400.0, 400.0, 200.0, 9).unwrap()
+    };
+    vec![
+        ("spline_ellipse_rod", extrude(&Profile::new(ellipse(20.0, 9.0)), &Frame::WORLD, 15.0, 1)),
+        ("spline_ellipse_ring", extrude(&Profile::new(ellipse(20.0, 12.0)).with_hole(ellipse(9.0, 5.0)), &Frame::WORLD, 6.0, 1)),
+        ("spline_outline", extrude(&Profile::new(wavy()), &Frame::WORLD, 10.0, 1)),
+        ("spline_slanted_cut", subtract(&extrude(&Profile::new(ellipse(20.0, 12.0)), &Frame::WORLD, 20.0, 1).unwrap(), &slab_above(10.0, v3(0.3, 0.1, 1.0)))),
+        ("spline_drilled", subtract(&extrude(&Profile::new(wavy()), &Frame::WORLD, 10.0, 1).unwrap(), &cylinder(&Frame::translation(v3(5.0, 5.0, -1.0)), 3.0, 12.0, 2).unwrap())),
+        ("spline_notched", subtract(&extrude(&Profile::new(wavy()), &Frame::WORLD, 10.0, 1).unwrap(), &cylinder(&Frame::translation(v3(5.0, 9.0, -1.0)), 4.0, 12.0, 2).unwrap())),
+        ("spline_cross_drilled", subtract(&extrude(&Profile::new(ellipse(20.0, 12.0)), &Frame::WORLD, 20.0, 1).unwrap(), &cylinder(&Frame::new(v3(-30.0, 0.0, 10.0), Vec3::X, Vec3::Y), 4.0, 60.0, 2).unwrap())),
+        ("spline_vase", revolve(&Profile::new(vase_profile()), &Frame::WORLD, TAU, 1)),
+        ("spline_vase_part", revolve(&Profile::new(vase_profile()), &Frame::WORLD, 2.2, 1)),
+        ("spline_dome", revolve(&Profile::new(dome()), &Frame::WORLD, TAU, 1)),
+        ("spline_vase_hollow", subtract(&revolve(&Profile::new(vase_profile()), &Frame::WORLD, TAU, 1).unwrap(), &cylinder(&Frame::translation(v3(0.0, 0.0, 4.0)), 6.0, 50.0, 2).unwrap())),
+        ("spline_vase_halved", subtract(&revolve(&Profile::new(vase_profile()), &Frame::WORLD, TAU, 1).unwrap(), &box_solid(&Frame::translation(v3(0.0, -50.0, -10.0)), 100.0, 100.0, 80.0, 2).unwrap())),
+        ("spline_vase_side_hole", subtract(&revolve(&Profile::new(vase_profile()), &Frame::WORLD, TAU, 1).unwrap(), &cylinder(&Frame::new(v3(-40.0, 0.0, 20.0), Vec3::X, Vec3::Y), 3.0, 80.0, 2).unwrap())),
+    ]
+}
+
 fn extras() -> Vec<(&'static str, Result<Body>)> {
     let void = {
         let outer = box_solid(&Frame::translation(v3(0.0, 0.0, 0.0)), 40.0, 40.0, 40.0, 1).unwrap();
@@ -166,7 +204,7 @@ fn main() {
         assert!(outcome.failed.is_none(), "{}: {:?}", m.id, outcome.steps);
         bodies.push((m.id.to_string(), (*outcome.body.unwrap()).clone()));
     }
-    for (name, r) in extras() {
+    for (name, r) in extras().into_iter().chain(spline_extras()) {
         bodies.push((name.to_string(), r.unwrap()));
     }
     for (name, body) in &bodies {

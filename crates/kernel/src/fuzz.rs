@@ -16,7 +16,8 @@ use crate::boolean::{boolean, BoolOp};
 use crate::build::*;
 use crate::mass::mass_properties;
 use crate::math::*;
-use crate::profile::{Profile, Wire};
+use crate::profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
+use crate::spline::Spline;
 use crate::tess::{tessellate, TessParams};
 use crate::topo::Body;
 
@@ -32,7 +33,14 @@ pub enum Category {
     GeneralPrimitives,
     /// Primitives aligned with the axes on a grid: coaxial, flush and tangent.
     AlignedPrimitives,
+    /// A free-form spline or ellipse extruded, against a primitive or another of its kind. Last, because
+    /// a category's number seeds its cases and the others must keep theirs.
+    SplineExtrusions,
+    /// A spline profile revolved, against a primitive or another of its kind.
+    SplineRevolves,
 }
+
+pub const SPLINE_CATEGORIES: [Category; 2] = [Category::SplineExtrusions, Category::SplineRevolves];
 
 pub const ALL_CATEGORIES: [Category; 5] = [
     Category::GridBoxes,
@@ -59,9 +67,85 @@ fn grid(rng: &mut Rng, lo: i64, hi: i64) -> f64 {
     rng.int(lo, hi) as f64
 }
 
+/// A closed outline with spline sides, around the origin, roughly the given size.
+fn spline_outline(rng: &mut Rng, size: f64) -> Option<Wire> {
+    let whole = |s: Spline| Wire { segs: vec![Seg { geom: SegGeom::Spline(std::sync::Arc::new(s)), id: 0 }] };
+    match rng.int(0, 2) {
+        0 => {
+            let (a, b) = (rng.range(0.4, 1.0) * size, rng.range(0.4, 1.0) * size);
+            let turn = rng.range(0.0, TAU);
+            let (x, y) = (v3(turn.cos(), turn.sin(), 0.0), v3(-turn.sin(), turn.cos(), 0.0));
+            Spline::ellipse_arc(Vec3::ZERO, x, y, a, b, 0.0, TAU).ok().map(whole)
+        }
+        1 => {
+            // A flat bottom with a wavy top.
+            let (w, h) = (rng.range(0.8, 1.6) * size, rng.range(0.5, 1.2) * size);
+            let count = rng.int(3, 6);
+            let mut points = vec![v3(w, 0.0, 0.0)];
+            for i in 1..count {
+                let f = i as f64 / count as f64;
+                points.push(v3(w * (1.0 - 2.0 * f), h * rng.range(0.5, 1.2), 0.0));
+            }
+            points.push(v3(-w, 0.0, 0.0));
+            let top = Spline::through(&points).ok()?;
+            Some(PathBuilder::new(v2(w, 0.0)).spline_to(top).line_to(v2(w, 0.0)).close())
+        }
+        _ => {
+            // A blob: points all the way round, with a corner where it closes.
+            let count = rng.int(4, 8);
+            let start = rng.range(0.0, TAU);
+            let mut points = Vec::new();
+            for i in 0..count {
+                let a = start + TAU * i as f64 / count as f64;
+                let r = rng.range(0.6, 1.0) * size;
+                points.push(v3(r * a.cos(), r * a.sin(), 0.0));
+            }
+            points.push(points[0]);
+            Spline::through(&points).ok().map(whole)
+        }
+    }
+}
+
+/// A spline profile to revolve, on the positive side of the axis.
+fn revolve_profile(rng: &mut Rng, size: f64) -> Option<Profile> {
+    let count = rng.int(3, 5);
+    let h = rng.range(0.8, 2.0) * size;
+    let mut points = Vec::new();
+    for i in 0..=count {
+        let f = i as f64 / count as f64;
+        points.push(v3(rng.range(0.4, 1.0) * size, f * h, 0.0));
+    }
+    let bottom = points[0];
+    let top = points[points.len() - 1];
+    let curve = Spline::through(&points).ok()?;
+    let wire = match rng.int(0, 1) {
+        // Solid to the axis.
+        0 => PathBuilder::new(v2(bottom.x, 0.0)).spline_to(curve).line_to(v2(0.0, top.y)).line_to(v2(0.0, 0.0)).close(),
+        // A sleeve, not reaching the axis.
+        _ => {
+            let inner = 0.2 * size;
+            PathBuilder::new(v2(bottom.x, 0.0)).spline_to(curve).line_to(v2(inner, top.y)).line_to(v2(inner, 0.0)).close()
+        }
+    };
+    Some(Profile::new(wire))
+}
+
 /// A shape from a category, built from the given generator.
 pub fn make_shape(category: Category, rng: &mut Rng) -> Option<Body> {
     let body = match category {
+        Category::SplineExtrusions => {
+            let f = random_frame(rng, 3.0);
+            let size = rng.range(1.5, 4.0);
+            let wire = spline_outline(rng, size)?;
+            extrude(&Profile::new(wire), &f, rng.range(1.0, 6.0), 1)
+        }
+        Category::SplineRevolves => {
+            let f = random_frame(rng, 3.0);
+            let size = rng.range(1.5, 4.0);
+            let profile = revolve_profile(rng, size)?;
+            let angle = if rng.int(0, 2) == 0 { rng.range(1.0, 5.5) } else { TAU };
+            revolve(&profile, &f, angle, 1)
+        }
         Category::GridBoxes => {
             let f = Frame::translation(v3(grid(rng, 0, 3), grid(rng, 0, 3), grid(rng, 0, 3)));
             box_solid(&f, grid(rng, 1, 3), grid(rng, 1, 3), grid(rng, 1, 3), 1)
@@ -215,7 +299,11 @@ pub fn check_pair(a: &Body, b: &Body, rng: &mut Rng, membership_points: usize) -
 /// One replayable case.
 pub fn run_case(category: Category, seed: u64, membership_points: usize) -> Outcome {
     let mut rng = Rng::new(seed ^ ((category as u64 + 1) << 40));
-    let (Some(a), Some(b)) = (make_shape(category, &mut rng), make_shape(category, &mut rng)) else {
+    let a = make_shape(category, &mut rng);
+    // A spline shape meets a primitive more often than another spline.
+    let other = if SPLINE_CATEGORIES.contains(&category) && rng.int(0, 2) > 0 { Category::GeneralPrimitives } else { category };
+    let b = make_shape(other, &mut rng);
+    let (Some(a), Some(b)) = (a, b) else {
         return Outcome::default();
     };
     check_pair(&a, &b, &mut rng, membership_points)
