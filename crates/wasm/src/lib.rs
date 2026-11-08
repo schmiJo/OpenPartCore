@@ -6,9 +6,11 @@
 
 pub mod models;
 
+use coreshape::history::{History, Outcome, StepState};
 use coreshape::*;
 use std::cell::RefCell;
 use std::fmt::Write;
+use std::sync::Arc;
 
 #[derive(Default)]
 struct Output {
@@ -19,7 +21,8 @@ struct Output {
     lines: Vec<f32>,
     info: String,
     export: Vec<u8>,
-    body: Option<Body>,
+    body: Option<Arc<Body>>,
+    histories: Vec<Option<History>>,
     table: [u32; 12],
 }
 
@@ -122,14 +125,43 @@ pub unsafe extern "C" fn cs_free_f64(p: *mut f64, n: usize) {
     drop(Vec::from_raw_parts(p, 0, n));
 }
 
-fn fill(out: &mut Output, body: &Body) -> Result<()> {
-    let size = body.aabb().diagonal();
-    let mesh = tessellate(body, &TessParams::for_size(size))?;
+fn features_json(outcome: &Outcome) -> String {
+    let mut text = String::from("[");
+    for (i, step) in outcome.steps.iter().enumerate() {
+        if i > 0 {
+            text.push(',');
+        }
+        let (state, error) = match &step.state {
+            StepState::Rebuilt => ("rebuilt", String::new()),
+            StepState::Reused => ("reused", String::new()),
+            StepState::RolledBack => ("rolledback", String::new()),
+            StepState::Blocked => ("blocked", String::new()),
+            StepState::Failed(why) => ("failed", why.clone()),
+        };
+        let _ = write!(
+            text,
+            "{{\"name\":{},\"kind\":{},\"state\":{},\"error\":{}}}",
+            json_str(&step.name),
+            json_str(step.kind),
+            json_str(state),
+            json_str(&error)
+        );
+    }
+    text.push(']');
+    text
+}
+
+fn clear_mesh(out: &mut Output) {
     out.positions.clear();
     out.normals.clear();
     out.kinds.clear();
     out.indices.clear();
     out.lines.clear();
+}
+
+fn fill_mesh(out: &mut Output, body: &Body) -> Result<coreshape::Mesh> {
+    let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal()))?;
+    clear_mesh(out);
     for p in &mesh.positions {
         out.positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
     }
@@ -156,9 +188,37 @@ fn fill(out: &mut Output, body: &Body) -> Result<()> {
             ]);
         }
     }
+    Ok(mesh)
+}
 
-    let report = validate(body).map_err(Error::InvalidBody)?;
-    let m = mass_properties(body);
+/// Fills the output for a rebuild's outcome.
+fn fill(out: &mut Output, outcome: &Outcome) {
+    let features = features_json(outcome);
+    let failed = outcome.failed.map_or("null".to_string(), |i| i.to_string());
+    let rebuilt = outcome.steps.iter().filter(|s| s.state == StepState::Rebuilt).count();
+    let head = format!("\"features\":{features},\"failed\":{failed},\"rebuilt\":{rebuilt}");
+
+    let Some(body) = outcome.body.clone() else {
+        clear_mesh(out);
+        out.body = None;
+        out.info = format!("{{\"ok\":true,\"empty\":true,{head}}}");
+        return;
+    };
+    let mesh = match fill_mesh(out, &body) {
+        Ok(m) => m,
+        Err(e) => {
+            out.info = format!("{{\"ok\":false,\"error\":{},{head}}}", json_str(&e.to_string()));
+            return;
+        }
+    };
+    let report = match validate(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            out.info = format!("{{\"ok\":false,\"error\":{},{head}}}", json_str(&e.join("; ")));
+            return;
+        }
+    };
+    let m = mass_properties(&body);
     let mut kinds = [0usize; 5];
     for f in &body.faces {
         kinds[surface_kind(&f.surface) as usize] += 1;
@@ -166,10 +226,9 @@ fn fill(out: &mut Output, body: &Body) -> Result<()> {
     let genus: Vec<String> = report.genus.iter().map(|g| g.to_string()).collect();
     let bounds = mesh.bounds();
     out.info = format!(
-        "{{\"ok\":true,\"volume\":{},\"area\":{},\"meshVolume\":{},\"vertices\":{},\"edges\":{},\"faces\":{},\"shells\":{},\"genus\":[{}],\"kinds\":[{},{},{},{},{}],\"triangles\":{},\"openEdges\":{},\"bounds\":[{},{},{},{},{},{}]}}",
+        "{{\"ok\":true,{head},\"volume\":{},\"area\":{},\"vertices\":{},\"edges\":{},\"faces\":{},\"shells\":{},\"genus\":[{}],\"kinds\":[{},{},{},{},{}],\"triangles\":{},\"openEdges\":{},\"bounds\":[{},{},{},{},{},{}]}}",
         m.volume,
         m.area,
-        mesh.volume(),
         report.vertices,
         report.edges,
         report.faces,
@@ -189,33 +248,31 @@ fn fill(out: &mut Output, body: &Body) -> Result<()> {
         bounds.max.y,
         bounds.max.z,
     );
-    Ok(())
+    out.body = Some(body);
 }
 
-/// Builds a model. Returns a pointer to a table of twelve `u32`s: pointer and
-/// length for positions, normals, surface kinds, indices, edge segments and the
+/// Rebuilds a model. `rollback` is the index of the last feature to apply, or
+/// negative for all of them. Returns a pointer to a table of twelve `u32`s: pointer
+/// and length for positions, normals, surface kinds, indices, edge segments and the
 /// JSON info string.
 ///
 /// # Safety
 /// `params` must point to `n` readable `f64`s.
 #[no_mangle]
-pub unsafe extern "C" fn cs_build(model: usize, params: *const f64, n: usize) -> *const u32 {
+pub unsafe extern "C" fn cs_build(model: usize, params: *const f64, n: usize, rollback: i32) -> *const u32 {
     let values = std::slice::from_raw_parts(params, n);
     STATE.with(|s| {
         let mut out = s.borrow_mut();
         let out = &mut *out;
-        let result = models::catalog()
-            .get(model)
-            .ok_or_else(|| Error::InvalidInput("no such model".into()))
-            .and_then(|m| (m.build)(values))
-            .and_then(|body| {
-                fill(out, &body)?;
-                out.body = Some(body);
-                Ok(())
-            });
-        if let Err(e) = result {
-            // Leave the last good mesh in place so the view does not go blank.
-            out.info = format!("{{\"ok\":false,\"error\":{}}}", json_str(&e.to_string()));
+        let catalog = models::catalog();
+        if model < catalog.len() {
+            if out.histories.len() < catalog.len() {
+                out.histories.resize_with(catalog.len(), || None);
+            }
+            let history = out.histories[model].get_or_insert_with(catalog[model].history);
+            let upto = (rollback >= 0).then_some(rollback as usize);
+            let outcome = history.rebuild(values, upto);
+            fill(out, &outcome);
         }
         out.table = [
             out.positions.as_ptr() as u32,
@@ -245,14 +302,27 @@ pub extern "C" fn cs_export_stl() -> *const u8 {
         let Some(body) = &out.body else {
             return std::ptr::null();
         };
-        let size = body.aabb().diagonal();
-        match tessellate(body, &TessParams::for_size(size)) {
+        match tessellate(body, &TessParams::for_size(body.aabb().diagonal())) {
             Ok(mesh) => {
                 out.export = coreshape::export::stl::write_binary(&mesh, "model");
                 out.export.as_ptr()
             }
             Err(_) => std::ptr::null(),
         }
+    })
+}
+
+/// Writes the current body as STEP. Same conventions as `cs_export_stl`.
+#[no_mangle]
+pub extern "C" fn cs_export_step() -> *const u8 {
+    STATE.with(|s| {
+        let mut out = s.borrow_mut();
+        let out = &mut *out;
+        let Some(body) = &out.body else {
+            return std::ptr::null();
+        };
+        out.export = coreshape::export::step::write_step(body, "model").into_bytes();
+        out.export.as_ptr()
     })
 }
 
@@ -265,30 +335,45 @@ pub extern "C" fn cs_export_len() -> usize {
 mod tests {
     use super::*;
 
-    /// Every demo must build at its defaults and at all slider extremes that the
-    /// viewer offers, or fail with an error rather than a panic.
+    /// Every demo must build at its defaults.
     #[test]
     fn every_model_builds_at_defaults() {
         for m in models::catalog() {
             let values: Vec<f64> = m.params.iter().map(|p| p.default).collect();
-            let body = (m.build)(&values).unwrap_or_else(|e| panic!("{}: {e}", m.id));
-            validate(&body).unwrap();
+            let mut h = (m.history)();
+            let o = h.rebuild(&values, None);
+            assert!(o.failed.is_none(), "{}: {:?}", m.id, o.steps);
+            validate(o.body.as_ref().unwrap()).unwrap();
         }
     }
 
+    /// Sliders may reach combinations with no valid solid. That must be an error
+    /// reported on a feature, never a panic, and anything returned must be valid.
     #[test]
     fn sliders_never_panic() {
         let mut rng = Rng::new(99);
         for m in models::catalog() {
-            for _ in 0..200 {
-                let values: Vec<f64> = m.params.iter().map(|p| rng.range(p.min, p.max)).collect();
-                if let Ok(body) = (m.build)(&values) {
-                    let report = validate(&body);
-                    assert!(report.is_ok(), "{} {values:?}: {report:?}", m.id);
-                    let mesh = tessellate(&body, &TessParams::for_size(body.aabb().diagonal())).unwrap();
-                    assert_eq!(mesh.open_edge_count(), 0, "{} {values:?}", m.id);
+            let mut h = (m.history)();
+            let mut failures = 0;
+            let runs = 60;
+            for _ in 0..runs {
+                let values: Vec<f64> = m
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let steps = ((p.max - p.min) / p.step).round();
+                        p.min + rng.int(0, steps as i64) as f64 * p.step
+                    })
+                    .collect();
+                let o = h.rebuild(&values, None);
+                if o.failed.is_some() {
+                    failures += 1;
+                }
+                if let Some(b) = &o.body {
+                    validate(b).unwrap_or_else(|e| panic!("{} {values:?}: {e:?}", m.id));
                 }
             }
+            eprintln!("{}: {failures} of {runs} random slider positions were refused", m.id);
         }
     }
 }

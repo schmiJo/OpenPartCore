@@ -12,7 +12,7 @@
 
 use crate::boolean::classify::{BodyLoc, FaceLoc, Index};
 use crate::boolean::ssi::coincident;
-use crate::boolean::{intersect, subtract, union};
+use crate::boolean::{boolean_with, BoolOp, Checks};
 use crate::build::{box_solid, extrude, revolve, sphere};
 use crate::curve::Curve;
 use crate::error::{Error, Result};
@@ -673,7 +673,7 @@ fn sweep(profile: &Profile, run: &Run, section: &Section, ends: [End; 2], featur
         if let End::Clip { plane, keep, reach } = end {
             let centre = *keep;
             let keep_side = half_space(plane, *keep, centre, reach * 4.0, feature)?;
-            tool = intersect(&tool, &keep_side)?;
+            tool = boolean_with(&tool, &keep_side, BoolOp::Intersect, Checks::Interim)?;
         }
     }
     Ok(tool)
@@ -749,12 +749,16 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
         }
     }
 
+    // Only the last step needs the full checks, and they apply to the final result.
+    let total = cuts.len() + adds.len();
     let mut out = body.clone();
-    for t in &cuts {
-        out = subtract(&out, t)?;
-    }
-    for t in &adds {
-        out = union(&out, t)?;
+    let steps = cuts
+        .iter()
+        .map(|t| (t, BoolOp::Subtract))
+        .chain(adds.iter().map(|t| (t, BoolOp::Union)));
+    for (i, (tool, op)) in steps.enumerate() {
+        let checks = if i + 1 == total { Checks::Full } else { Checks::Interim };
+        out = boolean_with(&out, tool, op, checks)?;
     }
     Ok(out)
 }
@@ -833,12 +837,12 @@ fn sphere_corner(
         let piece = half_space(&plane, keep, centre, span, feature)?;
         block = Some(match block {
             None => piece,
-            Some(b) => intersect(&b, &piece)?,
+            Some(b) => boolean_with(&b, &piece, BoolOp::Intersect, Checks::Interim)?,
         });
     }
     let block = block.unwrap();
     let ball = sphere(&Frame::new(centre, (corner_point - centre).normalized(), Vec3::X), r, feature)?;
-    Ok(Some(subtract(&block, &ball)?))
+    Ok(Some(boolean_with(&block, &ball, BoolOp::Subtract, Checks::Interim)?))
 }
 
 // ----- Picking edges -----

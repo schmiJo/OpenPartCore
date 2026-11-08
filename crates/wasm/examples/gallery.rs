@@ -79,7 +79,10 @@ fn main() {
     let mut bodies: Vec<(String, Body)> = Vec::new();
     for m in models::catalog() {
         let values: Vec<f64> = m.params.iter().map(|p| p.default).collect();
-        bodies.push((m.id.to_string(), (m.build)(&values).unwrap()));
+        let mut h = (m.history)();
+        let outcome = h.rebuild(&values, None);
+        assert!(outcome.failed.is_none(), "{}: {:?}", m.id, outcome.steps);
+        bodies.push((m.id.to_string(), (*outcome.body.unwrap()).clone()));
     }
     for (name, r) in extras() {
         bodies.push((name.to_string(), r.unwrap()));

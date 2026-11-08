@@ -139,7 +139,21 @@ enum Class {
     OnOpposite,
 }
 
+/// How much a Boolean verifies its own result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Checks {
+    /// Everything: topology, a watertight mesh and point membership.
+    Full,
+    /// For a step inside a longer operation whose final result gets `Full`: topology
+    /// and a smaller membership sample, but no mesh.
+    Interim,
+}
+
 pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body> {
+    boolean_with(a, b, op, Checks::Full)
+}
+
+pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Body> {
     let index = [Index::new(a), Index::new(b)];
     let bodies = [a, b];
 
@@ -335,8 +349,13 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body> {
     let body = assemble(&pieces, &selected, bodies, &arr)?;
     let body = simplify::simplify(body)?;
     validate(&body).map_err(Error::InvalidBody)?;
-    verify_meshable(&body)?;
-    verify_membership(&index, &body, op)?;
+    match checks {
+        Checks::Full => {
+            verify_meshable(&body)?;
+            verify_membership(&index, &body, op, 40)?;
+        }
+        Checks::Interim => verify_membership(&index, &body, op, 12)?,
+    }
     Ok(body)
 }
 
@@ -646,6 +665,14 @@ fn sampled_pieces(
 fn classify_piece(piece: &Piece, bodies: [&Body; 2], index: &[Index; 2], arr: &Arrangement) -> Result<Class> {
     let face = &bodies[piece.source].faces[piece.face];
     let other = 1 - piece.source;
+    // A face entirely outside the other body's bounding box needs no testing. In a
+    // chain of local operations this is most faces.
+    if !index[piece.source].face_boxes[piece.face]
+        .inflated(4.0 * TOL)
+        .overlaps(&index[other].bounds)
+    {
+        return Ok(Class::Out);
+    }
     let size = index[0].bounds.diagonal().max(index[1].bounds.diagonal());
     let mut answer: Option<Class> = None;
     let mut clean_samples = 0;
@@ -714,8 +741,7 @@ fn classify_piece(piece: &Piece, bodies: [&Body; 2], index: &[Index; 2], arr: &A
 /// exactly when it is in A or in B, and so on. This doesn't depend on anything the
 /// Boolean computed, so it catches errors the topology checks can't see. Half the
 /// points go where the two bodies overlap, since that is where mistakes happen.
-fn verify_membership(index: &[Index; 2], result: &Body, op: BoolOp) -> Result<()> {
-    const POINTS: usize = 40;
+fn verify_membership(index: &[Index; 2], result: &Body, op: BoolOp, points: usize) -> Result<()> {
     let out = Index::new(result);
     let mut all = index[0].bounds;
     all.union(&index[1].bounds);
@@ -726,7 +752,7 @@ fn verify_membership(index: &[Index; 2], result: &Body, op: BoolOp) -> Result<()
     };
     let usable = overlap.min.x < overlap.max.x && overlap.min.y < overlap.max.y && overlap.min.z < overlap.max.z;
     let mut rng = Rng::new(0xC0FFEE);
-    for i in 0..POINTS {
+    for i in 0..points {
         let bx = if usable && i % 2 == 0 { &overlap } else { &all };
         let p = v3(
             rng.range(bx.min.x, bx.max.x),

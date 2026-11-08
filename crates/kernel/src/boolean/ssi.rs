@@ -704,21 +704,12 @@ fn contour_at(
         let mut chain = vec![s];
         used.insert(s, true);
         let mut cur = s;
-        let mut closed = false;
-        loop {
-            let next = links[&cur].iter().find(|e| !used.contains_key(*e)).copied();
-            match next {
-                Some(n) => {
-                    used.insert(n, true);
-                    chain.push(n);
-                    cur = n;
-                }
-                None => {
-                    closed = chain.len() > 2 && links[&cur].contains(&s);
-                    break;
-                }
-            }
+        while let Some(n) = links[&cur].iter().find(|e| !used.contains_key(*e)).copied() {
+            used.insert(n, true);
+            chain.push(n);
+            cur = n;
         }
+        let closed = chain.len() > 2 && links[&cur].contains(&s);
         chains.push((chain, closed));
     }
 

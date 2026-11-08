@@ -15,6 +15,7 @@ pub mod curve;
 pub mod error;
 pub mod export;
 pub mod fuzz;
+pub mod history;
 pub mod mass;
 pub mod math;
 pub mod profile;

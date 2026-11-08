@@ -219,6 +219,33 @@ impl Wire {
             .close()
     }
 
+    /// The same wire moved by an offset.
+    pub fn translated(&self, by: Vec2) -> Wire {
+        Wire {
+            segs: self
+                .segs
+                .iter()
+                .map(|s| Seg {
+                    geom: match s.geom {
+                        SegGeom::Line { a, b } => SegGeom::Line { a: a + by, b: b + by },
+                        SegGeom::Arc {
+                            center,
+                            radius,
+                            a0,
+                            a1,
+                        } => SegGeom::Arc {
+                            center: center + by,
+                            radius,
+                            a0,
+                            a1,
+                        },
+                    },
+                    id: s.id,
+                })
+                .collect(),
+        }
+    }
+
     fn flatten(&self) -> Vec<(Vec2, Vec2, usize)> {
         let mut out = Vec::new();
         for (i, s) in self.segs.iter().enumerate() {

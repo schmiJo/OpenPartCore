@@ -208,7 +208,7 @@ pub fn write_step(body: &Body, name: &str) -> String {
     // wants them written as an ordinary closed shell around the void, turned inside out.
     let is_void: Vec<bool> = (0..body.shells.len()).map(|s| shell_volume(body, s) < 0.0).collect();
 
-    let mut write_shell = |w: &mut Writer, shell: usize, invert: bool| -> usize {
+    let write_shell = |w: &mut Writer, shell: usize, invert: bool| -> usize {
         let mut faces = Vec::with_capacity(body.shells[shell].len());
         for &f in &body.shells[shell] {
             let face = &body.faces[f];
