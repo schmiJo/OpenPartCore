@@ -152,7 +152,7 @@ pub fn rule_value(rule: &Rule) -> Vec<(&'static str, Value)> {
             items.push(("b", self::r(*b)));
             items.push(("value", expr_value(value)));
         }
-        Rule::Radius { of, value } | Rule::Diameter { of, value } => {
+        Rule::Radius { of, value } | Rule::MajorRadius { of, value } | Rule::MinorRadius { of, value } | Rule::Diameter { of, value } => {
             items.push(("of", self::e(*of)));
             items.push(("value", expr_value(value)));
         }
@@ -235,13 +235,14 @@ pub fn read_rule(v: &Value, extra: &[&str]) -> R<Rule> {
                 Rule::VerticalDistance { a, b, value }
             }
         }
-        "radius" | "diameter" => {
+        "radius" | "diameter" | "major_radius" | "minor_radius" => {
             check(&["of", "value"])?;
             let (of, value) = (entity_field(v, "of", w)?, value_field(v, w)?);
-            if kind == "radius" {
-                Rule::Radius { of, value }
-            } else {
-                Rule::Diameter { of, value }
+            match kind {
+                "radius" => Rule::Radius { of, value },
+                "diameter" => Rule::Diameter { of, value },
+                "major_radius" => Rule::MajorRadius { of, value },
+                _ => Rule::MinorRadius { of, value },
             }
         }
         "angle" => {
@@ -255,7 +256,7 @@ pub fn read_rule(v: &Value, extra: &[&str]) -> R<Rule> {
         }
         other => {
             return Err(format!(
-                "unknown constraint \"{other}\"; expected coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, midpoint, concentric, symmetric, normal, fix, distance, horizontal_distance, vertical_distance, radius, diameter or angle"
+                "unknown constraint \"{other}\"; expected coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, midpoint, concentric, symmetric, normal, fix, distance, horizontal_distance, vertical_distance, radius, diameter, major_radius, minor_radius or angle"
             ))
         }
     })
@@ -277,6 +278,18 @@ pub fn geometry_value(g: &Geometry) -> Vec<(&'static str, Value)> {
         Geometry::Arc { center, radius, start, end } => {
             items.push(("center", p2_value(center)));
             items.push(("radius", Value::Num(radius)));
+            items.push(("start", p2_value(start)));
+            items.push(("end", p2_value(end)));
+        }
+        Geometry::Ellipse { center, major, minor } => {
+            items.push(("center", p2_value(center)));
+            items.push(("major", p2_value(major)));
+            items.push(("minor", Value::Num(minor)));
+        }
+        Geometry::EllipticalArc { center, major, minor, start, end } => {
+            items.push(("center", p2_value(center)));
+            items.push(("major", p2_value(major)));
+            items.push(("minor", Value::Num(minor)));
             items.push(("start", p2_value(start)));
             items.push(("end", p2_value(end)));
         }
@@ -317,7 +330,21 @@ pub fn read_geometry(v: &Value, extra: &[&str]) -> R<Geometry> {
                 end: point(field(v, "end", w)?)?,
             }
         }
-        other => return Err(format!("unknown entity \"{other}\"; expected point, line, circle or arc")),
+        "ellipse" => {
+            check(&["center", "major", "minor"])?;
+            Geometry::Ellipse { center: point(field(v, "center", w)?)?, major: point(field(v, "major", w)?)?, minor: number(v, "minor", w)? }
+        }
+        "elliptical_arc" => {
+            check(&["center", "major", "minor", "start", "end"])?;
+            Geometry::EllipticalArc {
+                center: point(field(v, "center", w)?)?,
+                major: point(field(v, "major", w)?)?,
+                minor: number(v, "minor", w)?,
+                start: point(field(v, "start", w)?)?,
+                end: point(field(v, "end", w)?)?,
+            }
+        }
+        other => return Err(format!("unknown entity \"{other}\"; expected point, line, circle, arc, ellipse or elliptical_arc")),
     })
 }
 
@@ -528,6 +555,15 @@ fn seg_value(s: &Seg) -> Value {
             items.push(("type", Value::str("arc")));
             items.push(("center", p2_value(center)));
             items.push(("radius", Value::Num(radius)));
+            items.push(("a0", Value::Num(a0)));
+            items.push(("a1", Value::Num(a1)));
+        }
+        SegKind::Ellipse { center, x, major, minor, a0, a1 } => {
+            items.push(("type", Value::str("ellipse")));
+            items.push(("center", p2_value(center)));
+            items.push(("x", p2_value(x)));
+            items.push(("major", Value::Num(major)));
+            items.push(("minor", Value::Num(minor)));
             items.push(("a0", Value::Num(a0)));
             items.push(("a1", Value::Num(a1)));
         }

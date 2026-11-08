@@ -272,6 +272,55 @@ fn a_crescent_from_a_circle_touching_the_wall_builds_or_says_why() {
 }
 
 #[test]
+fn an_ellipse_extrudes_and_keeps_its_name() {
+    let mut s = sk::Sketch::new();
+    let e = s.ellipse([0.0, 0.0], [10.0, 0.0], 4.0);
+    s.constrain(Rule::Coincident { a: e.center(), b: ORIGIN.whole() });
+    s.constrain(Rule::Horizontal { a: e.center(), b: Some(e.major()) });
+    s.constrain(Rule::MajorRadius { of: e, value: "size".into() });
+    s.constrain(Rule::MinorRadius { of: e, value: 4.0.into() });
+    let mut doc = Document::new();
+    doc.set_parameter("size", 12.0).unwrap();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    let x = doc.add(Op::extrude(f, 0.0, 2.0, Mode::Add)).unwrap();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - PI * 12.0 * 4.0 * 2.0).abs() < 1e-9, "{}", vol(&o));
+    let body = o.body.unwrap();
+    assert!(body.faces.iter().any(|g| g.tag == x.side(e.0).tag()));
+    validate(&body).unwrap();
+    // The dimension drives it.
+    doc.set_parameter("size", 20.0).unwrap();
+    let o = doc.rebuild(None);
+    assert!((vol(&o) - PI * 20.0 * 4.0 * 2.0).abs() < 1e-9, "{}", vol(&o));
+}
+
+#[test]
+fn a_d_shape_from_an_elliptical_arc_and_a_chord_extrudes() {
+    let mut s = sk::Sketch::new();
+    s.elliptical_arc([0.0, 0.0], [10.0, 0.0], 5.0, 0.0, 180.0);
+    s.line([-10.0, 0.0], [10.0, 0.0]);
+    let (o, _) = solid_of(s);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    assert!((vol(&o) - 25.0 * PI * 2.0).abs() < 1e-9, "{}", vol(&o));
+    validate(o.body.as_ref().unwrap()).unwrap();
+}
+
+#[test]
+fn an_ellipse_with_a_hole_revolves() {
+    // Away from the axis: an elliptical torus, whose volume Pappus gives.
+    let mut s = sk::Sketch::new();
+    s.ellipse([20.0, 0.0], [26.0, 0.0], 3.0);
+    let mut doc = Document::new();
+    let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
+    doc.add(Op::Revolve { sketch: f, degrees: 360.0.into(), mode: Mode::Add }).unwrap();
+    let o = doc.rebuild(None);
+    assert!(o.failed.is_none(), "{:?}", o.steps);
+    let want = TAU * 20.0 * PI * 6.0 * 3.0;
+    assert!((vol(&o) - want).abs() < 1e-7, "{} vs {want}", vol(&o));
+}
+
+#[test]
 fn a_conflict_fails_the_feature_with_its_reason_and_keeps_the_last_good_body() {
     let (mut doc, e, plate) = plate_doc();
     doc.add(Op::solid(Primitive::Sphere { radius: 2.0.into() }, Placement::at(point3(0.0, -50.0, 0.0)), Mode::Add)).unwrap();

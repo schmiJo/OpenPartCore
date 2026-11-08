@@ -5,13 +5,14 @@
 //! measured in millimetres of error at the size of the geometry involved, so one tolerance
 //! applies everywhere.
 
+use crate::dual::{D, V2};
 use crate::expr::{Env, Expr};
 use crate::model::*;
 use crate::solve::{ErrorKind, SketchError};
 use std::collections::HashMap;
 
 /// Most variables one equation uses.
-pub(crate) const MAX_VARS: usize = 8;
+pub(crate) const MAX_VARS: usize = 12;
 
 /// What one equation computes. The comments list its variables, in order, as points where
 /// that applies.
@@ -45,6 +46,18 @@ pub(crate) enum Eq {
     MidpointLine { value: f64, unsigned: bool },
     /// p, q, a, b: `(q - p) · direction of ab`.
     PerpendicularToLine,
+    /// p, then an ellipse's center, major end and minor radius: how far p is off the ellipse, to first
+    /// order and at `scale`, since an ellipse's true distance has no closed form.
+    PointEllipse { scale: f64 },
+    /// a, b, then an ellipse: the line through ab tangent to it. The distance from the center to the line,
+    /// against how far the ellipse reaches in that direction, which is exact.
+    LineTangentEllipse,
+    /// p, then an ellipse, then a, b: at a point on both, the line through ab square to the ellipse's normal.
+    LineTangentEllipseAt { scale: f64 },
+    /// p, then an ellipse, then a circle's center: at a point on both, the radius along the ellipse's normal.
+    CircleTangentEllipseAt { scale: f64 },
+    /// p, then two ellipses: at a point on both, their normals in line.
+    EllipsesTangentAt { scale: f64 },
 }
 
 /// One scalar equation.
@@ -231,8 +244,97 @@ impl Row {
                 set(g, 6, db);
                 f
             }
+            Eq::PointEllipse { scale } => {
+                let (q, c, a, b) = (V2::vars(v(0), v(1), 0), V2::vars(v(2), v(3), 2), V2::vars(v(4), v(5), 4), D::var(v(6), 6));
+                let (w, d) = (a.minus(c), q.minus(c));
+                if norm2([w.x.v, w.y.v]) < TINY * TINY || b.v.abs() < TINY {
+                    *g = [0.0; MAX_VARS];
+                    return 0.0;
+                }
+                let s = w.dot(w);
+                let (along, across) = (w.dot(d), w.cross(d));
+                let level = (along * along / (s * s) + across * across / (s * b * b)).sqrt();
+                if level.v < 1e-12 {
+                    // At the center, the direction to the curve is undefined. Head along the major axis.
+                    let n = s.v.sqrt();
+                    *g = [0.0; MAX_VARS];
+                    g[0] = w.x.v / s.v * scale;
+                    g[1] = w.y.v / s.v * scale;
+                    g[2] = -g[0];
+                    g[3] = -g[1];
+                    return (level.v - 1.0) * scale + 0.0 * n;
+                }
+                finish(g, (level - one()) * scale)
+            }
+            Eq::LineTangentEllipse => {
+                let (la, lb, c, a, b) = (V2::vars(v(0), v(1), 0), V2::vars(v(2), v(3), 2), V2::vars(v(4), v(5), 4), V2::vars(v(6), v(7), 6), D::var(v(8), 8));
+                let u = lb.minus(la);
+                let w = a.minus(c);
+                if norm2([u.x.v, u.y.v]) < TINY * TINY || norm2([w.x.v, w.y.v]) < TINY * TINY {
+                    *g = [0.0; MAX_VARS];
+                    return 0.0;
+                }
+                let n = u.perp().unit();
+                let s = n.dot(c.minus(la));
+                let (n1, n2) = (n.dot(w), n.dot(w.perp()));
+                let reach = (n1 * n1 + b * b * n2 * n2 / w.dot(w)).sqrt();
+                let side = if s.v < 0.0 { -1.0 } else { 1.0 };
+                finish(g, s * side - reach)
+            }
+            Eq::LineTangentEllipseAt { scale } => {
+                let n = ellipse_normal(p(0), p(2), p(4), v(6), 0, 2, 4, 6);
+                let (la, lb) = (V2::vars(v(7), v(8), 7), V2::vars(v(9), v(10), 9));
+                let u = lb.minus(la);
+                if norm2([u.x.v, u.y.v]) < TINY * TINY {
+                    *g = [0.0; MAX_VARS];
+                    return 0.0;
+                }
+                finish(g, u.unit().dot(n) * scale)
+            }
+            Eq::CircleTangentEllipseAt { scale } => {
+                let n = ellipse_normal(p(0), p(2), p(4), v(6), 0, 2, 4, 6);
+                let (at, center) = (V2::vars(v(0), v(1), 0), V2::vars(v(7), v(8), 7));
+                let r = at.minus(center);
+                if norm2([r.x.v, r.y.v]) < TINY * TINY {
+                    *g = [0.0; MAX_VARS];
+                    return 0.0;
+                }
+                finish(g, r.unit().cross(n) * scale)
+            }
+            Eq::EllipsesTangentAt { scale } => {
+                let n0 = ellipse_normal(p(0), p(2), p(4), v(6), 0, 2, 4, 6);
+                // The second ellipse's variables, with the shared point at the front of the same list.
+                let n1 = ellipse_normal(p(0), p(7), p(9), v(11), 0, 7, 9, 11);
+                finish(g, n0.cross(n1) * scale)
+            }
         }
     }
+}
+
+fn one() -> D {
+    D { v: 1.0, g: [0.0; MAX_VARS] }
+}
+
+fn finish(g: &mut [f64; MAX_VARS], value: D) -> f64 {
+    *g = value.g;
+    value.v
+}
+
+/// The unit normal of an ellipse at a point on it, for a center, major end and minor radius given with the
+/// slots of their variables.
+#[allow(clippy::too_many_arguments)]
+fn ellipse_normal(at: P2, center: P2, major: P2, minor: f64, s_at: usize, s_center: usize, s_major: usize, s_minor: usize) -> V2 {
+    let (q, c, a, b) = (V2::vars(at[0], at[1], s_at), V2::vars(center[0], center[1], s_center), V2::vars(major[0], major[1], s_major), D::var(minor, s_minor));
+    let (w, d) = (a.minus(c), q.minus(c));
+    let s = w.dot(w);
+    // The gradient of (along / a^2)^2 + (across / (a b))^2, with denominators cleared.
+    let along = w.dot(d);
+    let across = w.cross(d);
+    let normal = w.scaled(along * b * b).plus(w.perp().scaled(across * s));
+    if norm2([normal.x.v, normal.y.v]) < 1e-300 {
+        return normal;
+    }
+    normal.unit()
 }
 
 fn diff(a: P2, b: P2) -> P2 {
@@ -356,6 +458,11 @@ impl System {
             match e.geometry {
                 Geometry::Line { .. } => sys.spans.push([base, base + 1, base + 2, base + 3]),
                 Geometry::Arc { .. } => sys.spans.push([base + 3, base + 4, base + 5, base + 6]),
+                Geometry::Ellipse { .. } => sys.spans.push([base, base + 1, base + 2, base + 3]),
+                Geometry::EllipticalArc { .. } => {
+                    sys.spans.push([base, base + 1, base + 2, base + 3]);
+                    sys.spans.push([base + 5, base + 6, base + 7, base + 8]);
+                }
                 _ => {}
             }
             let values: Vec<f64> = match e.geometry {
@@ -374,6 +481,20 @@ impl System {
                     }
                     sys.radii.push(base + 2);
                     vec![center[0], center[1], radius, start[0], start[1], end[0], end[1]]
+                }
+                Geometry::Ellipse { center, major, minor } => {
+                    if !(minor > 0.0) {
+                        return Err(invalid(None, format!("ellipse {} needs a positive minor radius, not {minor}", e.id.0)));
+                    }
+                    sys.radii.push(base + 4);
+                    vec![center[0], center[1], major[0], major[1], minor]
+                }
+                Geometry::EllipticalArc { center, major, minor, start, end } => {
+                    if !(minor > 0.0) {
+                        return Err(invalid(None, format!("elliptical arc {} needs a positive minor radius, not {minor}", e.id.0)));
+                    }
+                    sys.radii.push(base + 4);
+                    vec![center[0], center[1], major[0], major[1], minor, start[0], start[1], end[0], end[1]]
                 }
             };
             if values.iter().any(|v| !v.is_finite() || v.abs() > 1e12) {
@@ -399,6 +520,13 @@ impl System {
                 let b = sys.base[&e.id];
                 for point in [b + 3, b + 5] {
                     sys.rows.push(row(None, Eq::DistToRadius { gap: 0.0 }, &[b, b + 1, point, point + 1, b + 2]));
+                }
+            }
+            if let Geometry::EllipticalArc { center, major, minor, .. } = e.geometry {
+                let b = sys.base[&e.id];
+                let scale = minor.min((major[0] - center[0]).hypot(major[1] - center[1])).max(1e-3);
+                for point in [b + 5, b + 7] {
+                    sys.rows.push(row(None, Eq::PointEllipse { scale }, &[point, point + 1, b, b + 1, b + 2, b + 3, b + 4]));
                 }
             }
         }
@@ -506,6 +634,18 @@ impl System {
                     (5, Part::End),
                     (6, Part::End),
                 ],
+                Geometry::Ellipse { .. } => &[(0, Part::Center), (1, Part::Center), (2, Part::Major), (3, Part::Major), (4, Part::Radius)],
+                Geometry::EllipticalArc { .. } => &[
+                    (0, Part::Center),
+                    (1, Part::Center),
+                    (2, Part::Major),
+                    (3, Part::Major),
+                    (4, Part::Radius),
+                    (5, Part::Start),
+                    (6, Part::Start),
+                    (7, Part::End),
+                    (8, Part::End),
+                ],
             };
             for &(offset, part) in parts {
                 out[b + offset] = Some(Ref { entity: e.id, part });
@@ -525,6 +665,8 @@ impl System {
                 Geometry::Line { .. } => Geometry::Line { start: p(0), end: p(2) },
                 Geometry::Circle { .. } => Geometry::Circle { center: p(0), radius: x[b + 2] },
                 Geometry::Arc { .. } => Geometry::Arc { center: p(0), radius: x[b + 2], start: p(3), end: p(5) },
+                Geometry::Ellipse { .. } => Geometry::Ellipse { center: p(0), major: p(2), minor: x[b + 4] },
+                Geometry::EllipticalArc { .. } => Geometry::EllipticalArc { center: p(0), major: p(2), minor: x[b + 4], start: p(5), end: p(7) },
             };
         }
         out.refresh_references();
@@ -576,6 +718,10 @@ impl Builder<'_> {
                 (Geometry::Arc { .. }, Part::Center) => 0,
                 (Geometry::Arc { .. }, Part::Start) => 3,
                 (Geometry::Arc { .. }, Part::End) => 5,
+                (Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. }, Part::Center) => 0,
+                (Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. }, Part::Major) => 2,
+                (Geometry::EllipticalArc { .. }, Part::Start) => 5,
+                (Geometry::EllipticalArc { .. }, Part::End) => 7,
                 _ => return Err(bad()),
             },
         };
@@ -592,6 +738,33 @@ impl Builder<'_> {
 
     fn is_curve(&self, id: EntityId) -> bool {
         matches!(self.geometry(id), Ok(Some(Geometry::Circle { .. } | Geometry::Arc { .. })))
+    }
+
+    fn is_ellipse(&self, id: EntityId) -> bool {
+        matches!(self.geometry(id), Ok(Some(Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. })))
+    }
+
+    /// An ellipse's center, major end and minor radius variables.
+    fn ellipse(&self, id: EntityId) -> Result<([u32; 2], [u32; 2], u32), String> {
+        if !self.is_ellipse(id) {
+            return Err(format!("{} is not an ellipse or elliptical arc", id.whole().name()));
+        }
+        let b = self.sys.base[&id];
+        Ok(([b, b + 1], [b + 2, b + 3], b + 4))
+    }
+
+    /// An error scale for an ellipse: its smaller radius, so that its equations read in millimetres.
+    fn ellipse_scale(&self, e: ([u32; 2], [u32; 2], u32)) -> f64 {
+        self.at(e.2).min(self.length(e.0, e.1)).max(1e-3)
+    }
+
+    /// The center of a circle, arc or ellipse.
+    fn center_of(&self, id: EntityId) -> Result<[u32; 2], String> {
+        if self.is_ellipse(id) {
+            Ok(self.ellipse(id)?.0)
+        } else {
+            Ok(self.curve(id)?.0)
+        }
     }
 
     /// A line's variables: both ends.
@@ -633,8 +806,8 @@ impl Builder<'_> {
                         self.same.insert(ra, rb);
                     }
                 }
-                (Ok(pa), Err(_)) if self.is_curve(b.entity) => self.on_curve.push((pa[0], b.entity)),
-                (Err(_), Ok(pb)) if self.is_curve(a.entity) => self.on_curve.push((pb[0], a.entity)),
+                (Ok(pa), Err(_)) if self.is_curve(b.entity) || self.is_ellipse(b.entity) => self.on_curve.push((pa[0], b.entity)),
+                (Err(_), Ok(pb)) if self.is_curve(a.entity) || self.is_ellipse(a.entity) => self.on_curve.push((pb[0], a.entity)),
                 _ => {}
             }
         }
@@ -643,7 +816,7 @@ impl Builder<'_> {
 
     fn endpoints(&self, id: EntityId) -> Vec<[u32; 2]> {
         match self.geometry(id) {
-            Ok(Some(Geometry::Line { .. } | Geometry::Arc { .. })) => {
+            Ok(Some(Geometry::Line { .. } | Geometry::Arc { .. } | Geometry::EllipticalArc { .. })) => {
                 [id.start(), id.end()].iter().filter_map(|&r| self.point(r).ok()).collect()
             }
             _ => Vec::new(),
@@ -715,8 +888,12 @@ impl Builder<'_> {
                 } else if self.is_curve(b.entity) && b.part == Part::Whole {
                     let (center, r) = self.curve(b.entity)?;
                     self.push(row(Some(i), Eq::DistToRadius { gap: 0.0 }, &[center[0], center[1], p[0], p[1], r]));
+                } else if self.is_ellipse(b.entity) && b.part == Part::Whole {
+                    let e = self.ellipse(b.entity)?;
+                    let scale = self.ellipse_scale(e);
+                    self.push(row(Some(i), Eq::PointEllipse { scale }, &[p[0], p[1], e.0[0], e.0[1], e.1[0], e.1[1], e.2]));
                 } else {
-                    return Err(format!("{} is not a point, line, circle or arc", b.name()));
+                    return Err(format!("{} is not a point, line, circle, arc or ellipse", b.name()));
                 }
             }
             Rule::Horizontal { a, b } | Rule::Vertical { a, b } => {
@@ -744,8 +921,12 @@ impl Builder<'_> {
                 } else if self.is_curve(*a) && self.is_curve(*b) {
                     let (ra, rb) = (self.curve(*a)?.1, self.curve(*b)?.1);
                     self.push(linear(i, 0.0, &[(ra, 1.0), (rb, -1.0)]));
+                } else if self.is_ellipse(*a) && self.is_ellipse(*b) {
+                    let (ea, eb) = (self.ellipse(*a)?, self.ellipse(*b)?);
+                    self.push(row(Some(i), Eq::EqualLength, &[ea.0[0], ea.0[1], ea.1[0], ea.1[1], eb.0[0], eb.0[1], eb.1[0], eb.1[1]]));
+                    self.push(linear(i, 0.0, &[(ea.2, 1.0), (eb.2, -1.0)]));
                 } else {
-                    return Err("equal needs two lines, or two circles or arcs".to_string());
+                    return Err("equal needs two lines, two circles or arcs, or two ellipses".to_string());
                 }
             }
             Rule::Midpoint { point, line } => {
@@ -754,7 +935,7 @@ impl Builder<'_> {
                 self.push(linear(i, 0.0, &[(p[1], 1.0), (l[1], -0.5), (l[3], -0.5)]));
             }
             Rule::Concentric { a, b } => {
-                let (ca, cb) = (self.curve(*a)?.0, self.curve(*b)?.0);
+                let (ca, cb) = (self.center_of(*a)?, self.center_of(*b)?);
                 self.push(linear(i, 0.0, &[(ca[0], 1.0), (cb[0], -1.0)]));
                 self.push(linear(i, 0.0, &[(ca[1], 1.0), (cb[1], -1.0)]));
             }
@@ -798,6 +979,16 @@ impl Builder<'_> {
                 let v = self.positive(value, "a diameter")?;
                 let r = self.curve(*of)?.1;
                 self.push(linear(i, v, &[(r, 2.0)]));
+            }
+            Rule::MajorRadius { of, value } => {
+                let v = self.positive(value, "a major radius")?;
+                let e = self.ellipse(*of)?;
+                self.push(row(Some(i), Eq::Dist { value: v }, &[e.0[0], e.0[1], e.1[0], e.1[1]]));
+            }
+            Rule::MinorRadius { of, value } => {
+                let v = self.positive(value, "a minor radius")?;
+                let e = self.ellipse(*of)?;
+                self.push(linear(i, v, &[(e.2, 1.0)]));
             }
             Rule::Angle { a, b, value } => {
                 let theta = self.value(value)?.to_radians();
@@ -843,6 +1034,8 @@ impl Builder<'_> {
             } else if r.part == Part::Whole && this.is_curve(r.entity) {
                 let (c, radius) = this.curve(r.entity)?;
                 Ok(Thing::Curve(c, radius))
+            } else if r.part == Part::Whole && this.is_ellipse(r.entity) {
+                Err(format!("a distance to the ellipse {} isn't supported yet: use its center or {}", r.name(), r.entity.major().name()))
             } else {
                 Err(format!("a distance to {} isn't supported: use points, lines, circles or arcs", r.name()))
             }
@@ -894,7 +1087,42 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// A tangency with at least one ellipse.
+    fn tangent_ellipse(&mut self, i: usize, a: EntityId, b: EntityId) -> Result<(), String> {
+        let shared = self.shared_point(a, b);
+        let (first, other) = if self.is_ellipse(a) { (a, b) } else { (b, a) };
+        let e = self.ellipse(first)?;
+        let scale = self.ellipse_scale(e);
+        let own = [e.0[0], e.0[1], e.1[0], e.1[1], e.2];
+        if self.is_line(other) {
+            let l = self.line(other)?;
+            match shared {
+                Some(p) => self.push(row(Some(i), Eq::LineTangentEllipseAt { scale }, &[p[0], p[1], own[0], own[1], own[2], own[3], own[4], l[0], l[1], l[2], l[3]])),
+                None => self.push(row(Some(i), Eq::LineTangentEllipse, &[l[0], l[1], l[2], l[3], own[0], own[1], own[2], own[3], own[4]])),
+            }
+            return Ok(());
+        }
+        let Some(p) = shared else {
+            return Err(format!(
+                "a tangency between ellipse {} and {} needs a point they share: make an end of one coincident with the other",
+                first.0,
+                other.whole().name()
+            ));
+        };
+        if self.is_curve(other) {
+            let c = self.curve(other)?.0;
+            self.push(row(Some(i), Eq::CircleTangentEllipseAt { scale }, &[p[0], p[1], own[0], own[1], own[2], own[3], own[4], c[0], c[1]]));
+        } else {
+            let f = self.ellipse(other)?;
+            self.push(row(Some(i), Eq::EllipsesTangentAt { scale }, &[p[0], p[1], own[0], own[1], own[2], own[3], own[4], f.0[0], f.0[1], f.1[0], f.1[1], f.2]));
+        }
+        Ok(())
+    }
+
     fn tangent(&mut self, i: usize, a: EntityId, b: EntityId) -> Result<(), String> {
+        if self.is_ellipse(a) || self.is_ellipse(b) {
+            return self.tangent_ellipse(i, a, b);
+        }
         let (al, bl) = (self.is_line(a), self.is_line(b));
         if al && bl {
             return Err("two lines can't be tangent: use parallel".to_string());
@@ -933,6 +1161,9 @@ impl Builder<'_> {
     }
 
     fn normal(&mut self, i: usize, a: EntityId, b: EntityId) -> Result<(), String> {
+        if self.is_ellipse(a) || self.is_ellipse(b) {
+            return Err("normal isn't available for an ellipse yet: use tangent, or constrain its center and major axis".to_string());
+        }
         let (al, bl) = (self.is_line(a), self.is_line(b));
         if al && bl {
             return Err("normal is for a line and a curve, or two curves: for two lines, use perpendicular".to_string());
@@ -1002,6 +1233,28 @@ impl Builder<'_> {
                     self.push(linear(i, 0.0, &[(point, uy), (point + 1, -ux), (c[0], -uy), (c[1], ux)]));
                 }
             }
+            Some(Geometry::Ellipse { .. }) => {
+                need(5)?;
+                let e = self.ellipse(what.entity)?;
+                for (k, v) in [e.0[0], e.0[1], e.1[0], e.1[1], e.2].into_iter().enumerate() {
+                    self.push(linear(i, at[k], &[(v, 1.0)]));
+                }
+            }
+            Some(Geometry::EllipticalArc { .. }) => {
+                need(9)?;
+                let e = self.ellipse(what.entity)?;
+                for (k, v) in [e.0[0], e.0[1], e.1[0], e.1[1], e.2].into_iter().enumerate() {
+                    self.push(linear(i, at[k], &[(v, 1.0)]));
+                }
+                // As on an arc: each end stays on the ray from the center through its fixed point.
+                let b = self.sys.base[&what.entity];
+                for (point, offset) in [(b + 5, 5), (b + 7, 7)] {
+                    let (dx, dy) = (at[offset] - at[0], at[offset + 1] - at[1]);
+                    let n = dx.hypot(dy).max(1e-12);
+                    let (ux, uy) = (dx / n, dy / n);
+                    self.push(linear(i, 0.0, &[(point, uy), (point + 1, -ux), (e.0[0], -uy), (e.0[1], ux)]));
+                }
+            }
             _ => return Err(format!("{} can't be fixed", what.name())),
         }
         Ok(())
@@ -1037,6 +1290,11 @@ mod tests {
             (Eq::MidpointLine { value: 0.0, unsigned: false }, 8),
             (Eq::MidpointLine { value: 3.0, unsigned: true }, 8),
             (Eq::PerpendicularToLine, 8),
+            (Eq::PointEllipse { scale: 4.0 }, 7),
+            (Eq::LineTangentEllipse, 9),
+            (Eq::LineTangentEllipseAt { scale: 4.0 }, 11),
+            (Eq::CircleTangentEllipseAt { scale: 4.0 }, 9),
+            (Eq::EllipsesTangentAt { scale: 4.0 }, 12),
         ];
         for (eq, count) in cases {
             for _ in 0..200 {

@@ -41,6 +41,11 @@ impl EntityId {
     pub fn center(self) -> Ref {
         Ref { entity: self, part: Part::Center }
     }
+
+    /// The end of an ellipse's major axis.
+    pub fn major(self) -> Ref {
+        Ref { entity: self, part: Part::Major }
+    }
 }
 
 /// Which part of an entity a constraint refers to.
@@ -51,11 +56,13 @@ pub enum Part {
     Start,
     End,
     Center,
-    /// A circle's or arc's radius. Only used when reporting what is still free.
+    /// A circle's or arc's radius, or an ellipse's minor radius. Only used when reporting what is still free.
     Radius,
+    /// The end of an ellipse's major axis.
+    Major,
 }
 
-/// A reference to an entity or a part of one, written `7`, `7.start`, `7.end`, `7.center`,
+/// A reference to an entity or a part of one, written `7`, `7.start`, `7.end`, `7.center`, `7.major`,
 /// `origin`, `x_axis` or `y_axis`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ref {
@@ -77,16 +84,18 @@ impl Ref {
             Part::End => format!("{base}.end"),
             Part::Center => format!("{base}.center"),
             Part::Radius => format!("{base}.radius"),
+            Part::Major => format!("{base}.major"),
         }
     }
 
     pub fn parse(text: &str) -> Result<Ref, String> {
-        let bad = || format!("\"{text}\" is not a reference; they look like 7, 7.start, 7.end, 7.center, origin, x_axis or y_axis");
+        let bad = || format!("\"{text}\" is not a reference; they look like 7, 7.start, 7.end, 7.center, 7.major, origin, x_axis or y_axis");
         let (base, part) = match text.split_once('.') {
             None => (text, Part::Whole),
             Some((b, "start")) => (b, Part::Start),
             Some((b, "end")) => (b, Part::End),
             Some((b, "center")) => (b, Part::Center),
+            Some((b, "major")) => (b, Part::Major),
             Some(_) => return Err(bad()),
         };
         let entity = match base {
@@ -116,8 +125,8 @@ pub type P2 = [f64; 2];
 /// The shape of an entity.
 ///
 /// Every number here is a length, which keeps the solver's "move as little as possible"
-/// meaningful. A later ellipse (center, major axis end, minor radius) or spline (control
-/// points) fits the same pattern: add a variant here and its variable layout in `system.rs`.
+/// meaningful. A later spline (control points) fits the same pattern: add a variant here and its
+/// variable layout in `system.rs`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Geometry {
     Point { at: P2 },
@@ -125,6 +134,11 @@ pub enum Geometry {
     Circle { center: P2, radius: f64 },
     /// Runs counter-clockwise from `start` to `end`.
     Arc { center: P2, radius: f64, start: P2, end: P2 },
+    /// `major` is where the major axis ends, so its direction and length are both there. `minor` is
+    /// the other radius. Which is really the longer doesn't matter.
+    Ellipse { center: P2, major: P2, minor: f64 },
+    /// Part of an ellipse, running counter-clockwise from `start` to `end`.
+    EllipticalArc { center: P2, major: P2, minor: f64, start: P2, end: P2 },
 }
 
 impl Geometry {
@@ -134,6 +148,8 @@ impl Geometry {
             Geometry::Line { .. } => "line",
             Geometry::Circle { .. } => "circle",
             Geometry::Arc { .. } => "arc",
+            Geometry::Ellipse { .. } => "ellipse",
+            Geometry::EllipticalArc { .. } => "elliptical_arc",
         }
     }
 }
@@ -186,6 +202,10 @@ pub enum Rule {
     VerticalDistance { a: Ref, b: Ref, value: Expr },
     Radius { of: EntityId, value: Expr },
     Diameter { of: EntityId, value: Expr },
+    /// An ellipse's or elliptical arc's major radius: from its center to `7.major`.
+    MajorRadius { of: EntityId, value: Expr },
+    /// An ellipse's or elliptical arc's minor radius.
+    MinorRadius { of: EntityId, value: Expr },
     /// In degrees, counter-clockwise from line `a`'s direction to line `b`'s. With `b` absent:
     /// from +x to line `a`, or an arc's span.
     Angle { a: EntityId, b: Option<EntityId>, value: Expr },
@@ -211,6 +231,8 @@ impl Rule {
             Rule::VerticalDistance { .. } => "vertical_distance",
             Rule::Radius { .. } => "radius",
             Rule::Diameter { .. } => "diameter",
+            Rule::MajorRadius { .. } => "major_radius",
+            Rule::MinorRadius { .. } => "minor_radius",
             Rule::Angle { .. } => "angle",
         }
     }
@@ -239,7 +261,7 @@ impl Rule {
                 v
             }
             Rule::HorizontalDistance { a, b, .. } | Rule::VerticalDistance { a, b, .. } => vec![a.entity, b.entity],
-            Rule::Radius { of, .. } | Rule::Diameter { of, .. } => vec![*of],
+            Rule::Radius { of, .. } | Rule::Diameter { of, .. } | Rule::MajorRadius { of, .. } | Rule::MinorRadius { of, .. } => vec![*of],
             Rule::Angle { a, b, .. } => {
                 let mut v = vec![*a];
                 v.extend(*b);
@@ -256,6 +278,8 @@ impl Rule {
             | Rule::VerticalDistance { value, .. }
             | Rule::Radius { value, .. }
             | Rule::Diameter { value, .. }
+            | Rule::MajorRadius { value, .. }
+            | Rule::MinorRadius { value, .. }
             | Rule::Angle { value, .. } => Some(value),
             _ => None,
         }
@@ -268,6 +292,8 @@ impl Rule {
             | Rule::VerticalDistance { value, .. }
             | Rule::Radius { value, .. }
             | Rule::Diameter { value, .. }
+            | Rule::MajorRadius { value, .. }
+            | Rule::MinorRadius { value, .. }
             | Rule::Angle { value, .. } => Some(value),
             _ => None,
         }
@@ -331,6 +357,24 @@ impl Sketch {
 
     pub fn circle(&mut self, center: P2, radius: f64) -> EntityId {
         self.add(Geometry::Circle { center, radius })
+    }
+
+    /// An ellipse, with `major` where its major axis ends.
+    pub fn ellipse(&mut self, center: P2, major: P2, minor: f64) -> EntityId {
+        self.add(Geometry::Ellipse { center, major, minor })
+    }
+
+    /// Part of an ellipse from eccentric angle `degrees0` to `degrees1`, counter-clockwise, measured from
+    /// the major axis.
+    pub fn elliptical_arc(&mut self, center: P2, major: P2, minor: f64, degrees0: f64, degrees1: f64) -> EntityId {
+        let (dx, dy) = (major[0] - center[0], major[1] - center[1]);
+        let a = dx.hypot(dy);
+        let (ex, ey) = (dx / a, dy / a);
+        let at = |d: f64| {
+            let (s, c) = d.to_radians().sin_cos();
+            [center[0] + a * c * ex - minor * s * ey, center[1] + a * c * ey + minor * s * ex]
+        };
+        self.add(Geometry::EllipticalArc { center, major, minor, start: at(degrees0), end: at(degrees1) })
     }
 
     /// An arc from `degrees0` to `degrees1`, counter-clockwise.
@@ -425,6 +469,14 @@ impl Sketch {
             (Geometry::Arc { center, radius, start, end }, Part::Whole) => {
                 vec![center[0], center[1], radius, start[0], start[1], end[0], end[1]]
             }
+            (Geometry::Ellipse { center, .. } | Geometry::EllipticalArc { center, .. }, Part::Center) => center.to_vec(),
+            (Geometry::Ellipse { major, .. } | Geometry::EllipticalArc { major, .. }, Part::Major) => major.to_vec(),
+            (Geometry::EllipticalArc { start, .. }, Part::Start) => start.to_vec(),
+            (Geometry::EllipticalArc { end, .. }, Part::End) => end.to_vec(),
+            (Geometry::Ellipse { center, major, minor }, Part::Whole) => vec![center[0], center[1], major[0], major[1], minor],
+            (Geometry::EllipticalArc { center, major, minor, start, end }, Part::Whole) => {
+                vec![center[0], center[1], major[0], major[1], minor, start[0], start[1], end[0], end[1]]
+            }
             _ => return Err(bad()),
         })
     }
@@ -479,6 +531,18 @@ impl Sketch {
                 Geometry::Arc { center, radius, start, end } => {
                     see(center);
                     see([radius, 0.0]);
+                    see(start);
+                    see(end);
+                }
+                Geometry::Ellipse { center, major, minor } => {
+                    see(center);
+                    see(major);
+                    see([minor, 0.0]);
+                }
+                Geometry::EllipticalArc { center, major, minor, start, end } => {
+                    see(center);
+                    see(major);
+                    see([minor, 0.0]);
                     see(start);
                     see(end);
                 }

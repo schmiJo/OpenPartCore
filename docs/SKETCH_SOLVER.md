@@ -46,6 +46,33 @@ with every constraint still holding, which is a higher rate than the other categ
 of a distance between two lines without picking a point, so in that comparison PlaneGCS measures from one line's start point.
 That's the same thing only because those lines are also constrained parallel. Measuring is checked directly against worked values.
 
+## Ellipses
+
+An ellipse is five lengths: its center, where its major axis ends, and its minor radius. An elliptical arc adds its two ends and an
+equation to keep each on the ellipse, as an arc does.
+
+| Works with | How |
+|---|---|
+| `coincident` | A point on it, or its `center`, `major`, `start` or `end` with other points |
+| `horizontal`, `vertical`, `distance`, `fix` and the rest | On `7.center` and `7.major`, which are points like any other |
+| `major_radius`, `minor_radius` | Dimensions, which can be references too |
+| `tangent` | With a line, anywhere. With a line, arc, circle or another ellipse at a point they share |
+| `concentric`, `equal` | With circles and arcs, and between ellipses |
+
+An ellipse has no closed-form distance, so "on the ellipse" is the level set in first-order millimetres. It's exact at the solution, and the
+independent check measures the true distance by a plain scan. These equations get their gradients from numbers that carry them along
+(`dual.rs`), which is exact, and the gradient test runs them against differences like every other equation.
+
+**In regions** ellipses are cut like anything else. Where an ellipse meets a curve there's no closed form used: pieces that come close get Newton's
+method on both parameters, in a damped form that still settles where they only touch.
+
+**Into the kernel** an ellipse is exactly a rational spline, so `profiles_from_regions` produces spline segments, which sweep into spline surfaces.
+
+**Tested** by 5,000 random sketches in this solver's own fuzz with no refusals or wrong answers, and 300 against PlaneGCS. PlaneGCS accepted all 294 it could
+build without moving them, with the same freedom on all and no wrong answers on either side. The other 6 raised an error when building the
+FreeCAD geometry. In 19 of 261 drags this solver stopped short where PlaneGCS got there, by at most 0.32 mm and with every constraint holding, which is
+more often than elsewhere and isn't explained yet. PlaneGCS's own drags broke a constraint in 8 of them. Regions with ellipses are tested against the raster.
+
 ## Regions
 
 `arrangement` cuts every curve that isn't construction geometry at each crossing, T-junction and touching point, then
@@ -71,10 +98,10 @@ as `picked_regions`. If a picked region stops existing, `regions` refuses and li
 turn into something else. Regions sharing an edge and both in use merge into one solid when extruded.
 
 **Tested** against a raster that shares nothing with the walk: draw the curves on a 0.1 mm grid, flood-fill from outside, and
-every pocket left must lie in a region, with the pockets in a region adding up to its area. On 1,536 random sketches with
-10,284 pockets and 7,391 regions, there were no disagreements. 24 pockets were reported at first only because walls a cell wide
-closed real gaps, and a finer grid confirmed each of those. 964 further random sketches were left out of this comparison because
-an end stops less than 0.4 mm from another curve, which a raster can't tell from touching. Those gaps have their own worked tests.
+every pocket left must lie in a region, with the pockets in a region adding up to its area. On 1,092 random sketches of lines,
+arcs, circles, ellipses and elliptical arcs, with 6,396 pockets and 5,085 regions, there were no disagreements. 14 pockets were reported at first only
+because walls a cell wide closed real gaps, and a finer grid confirmed each of those. 1,408 further random sketches were left out of this comparison
+because an end stops less than 0.4 mm from another curve, which a raster can't tell from touching. Those gaps have their own worked tests.
 
 **Speed.** 202 lines crossing into 10,000 regions takes about 0.7 s in a debug build. It's quadratic in the number of curves
 where their boxes overlap.
@@ -256,7 +283,8 @@ The one slow frame at 505 entities is 100 ms.
   or a dimension to place something exactly.
 - **A curve's end has to land within 1e-7 mm of another curve to join it.** A larger gap is a real gap, and the piece
   beyond it is listed as ignored. Solved sketches sit far inside this, but hand-placed geometry may not.
-- **Not there yet:** ellipses and splines.
+- **Not there yet:** splines. On an ellipse: a distance to its curve, and `normal`. Use its center or `7.major`, and `tangent`.
+- **A curve tangent to an ellipse needs a shared point.** A line doesn't: its tangency has a closed form.
 - **A conflict set of more than 64 constraints** isn't shrunk to a smallest one. The message says where it stalled.
 - **Solving is `f64` with tolerances.** Near-degenerate sketches, such as a line nearly parallel to one it must be
   perpendicular to, are where failures concentrate.

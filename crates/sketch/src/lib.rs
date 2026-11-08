@@ -28,6 +28,7 @@ pub mod rng;
 pub mod solve;
 pub mod workloads;
 
+mod dual;
 mod ldl;
 mod system;
 

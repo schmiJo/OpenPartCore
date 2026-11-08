@@ -172,10 +172,13 @@ the solution you meant.
 
 An arc runs counter-clockwise from `start` to `end`.
 
+An `ellipse` has `center`, `major` (the point where its major axis ends) and `minor` (the other radius). An `elliptical_arc`
+adds `start` and `end`, and runs counter-clockwise between them. `"7.major"` is the end of the major axis.
+
 **Reference dimensions.** Any dimension can carry `"reference": true`. It then reports what the geometry measures and takes no
 part in solving. Solving writes the measured value into it, and a file may leave `value` out.
 
-**References.** `"7"` is a whole entity. `"7.start"`, `"7.end"` and `"7.center"` are its parts. `"origin"`,
+**References.** `"7"` is a whole entity. `"7.start"`, `"7.end"`, `"7.center"` and `"7.major"` are its parts. `"origin"`,
 `"x_axis"` and `"y_axis"` are fixed reference geometry.
 
 | Constraint `type` | Fields | Meaning |
@@ -192,6 +195,7 @@ part in solving. Solving writes the measured value into it, and a file may leave
 | `fix` | `what`, `at` | Holds something at the values in `at`: x, y for a point; both ends for a line; x, y, radius for a circle; those then both ends for an arc |
 | `distance` | `a`, optional `b`, `value` | A line's length (`b` absent), or between any two of a point, a line and a circle or arc. To a circle or arc, it's the gap to the curve, with an arc counting as its full circle. Between two lines, it's from the middle of `a` to `b`, so add `parallel` for the usual meaning. |
 | `horizontal_distance`, `vertical_distance` | `a`, `b`, `value` | `b.x - a.x` or `b.y - a.y`, which may be negative |
+| `major_radius`, `minor_radius` | `of`, `value` | An ellipse's or elliptical arc's radii |
 | `radius`, `diameter` | `of`, `value` | A circle or arc. Positive. |
 | `angle` | `a`, optional `b`, `value` | Degrees, counter-clockwise from line `a`'s direction to line `b`'s. With `a` alone: from +x to a line, or an arc's span. |
 

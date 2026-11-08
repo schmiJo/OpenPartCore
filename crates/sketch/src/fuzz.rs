@@ -29,9 +29,10 @@ pub enum Category {
     Impossible,
     /// Last, because a category's number seeds its cases and the others must keep theirs.
     Distances,
+    Ellipses,
 }
 
-pub const ALL_CATEGORIES: [Category; 13] = [
+pub const ALL_CATEGORIES: [Category; 14] = [
     Category::Rectilinear,
     Category::Polygons,
     Category::Rectangles,
@@ -41,6 +42,7 @@ pub const ALL_CATEGORIES: [Category; 13] = [
     Category::Symmetry,
     Category::Mixed,
     Category::Distances,
+    Category::Ellipses,
     Category::Large,
     Category::Redundant,
     Category::Conflict,
@@ -59,6 +61,7 @@ impl Category {
             Category::Symmetry => "symmetry",
             Category::Mixed => "mixed",
             Category::Distances => "distances",
+            Category::Ellipses => "ellipses",
             Category::Large => "large",
             Category::Redundant => "redundant",
             Category::Conflict => "conflict",
@@ -156,8 +159,85 @@ fn point_of(s: &Sketch, r: Ref) -> Option<P2> {
         (Geometry::Circle { center, .. } | Geometry::Arc { center, .. }, Part::Center) => Some(center),
         (Geometry::Arc { start, .. }, Part::Start) => Some(start),
         (Geometry::Arc { end, .. }, Part::End) => Some(end),
+        (Geometry::Ellipse { center, .. } | Geometry::EllipticalArc { center, .. }, Part::Center) => Some(center),
+        (Geometry::Ellipse { major, .. } | Geometry::EllipticalArc { major, .. }, Part::Major) => Some(major),
+        (Geometry::EllipticalArc { start, .. }, Part::Start) => Some(start),
+        (Geometry::EllipticalArc { end, .. }, Part::End) => Some(end),
         _ => None,
     }
+}
+
+/// An ellipse's center, unit major direction and two radii.
+fn ellipse_of(s: &Sketch, id: EntityId) -> Option<(P2, P2, f64, f64)> {
+    match s.entity(id)?.geometry {
+        Geometry::Ellipse { center, major, minor } | Geometry::EllipticalArc { center, major, minor, .. } => {
+            let a = dist(center, major);
+            Some((center, [(major[0] - center[0]) / a, (major[1] - center[1]) / a], a, minor))
+        }
+        _ => None,
+    }
+}
+
+/// The nearest point on an ellipse, and its eccentric angle: a dense scan, then narrowing in. Slow and
+/// plain, and it shares nothing with the solver's equation.
+fn nearest_on_ellipse(e: (P2, P2, f64, f64), p: P2) -> (f64, P2) {
+    let (c, x, a, b) = e;
+    let at = |t: f64| {
+        let (s, co) = t.sin_cos();
+        [c[0] + a * co * x[0] - b * s * x[1], c[1] + a * co * x[1] + b * s * x[0]]
+    };
+    let (mut best, mut best_d) = (0.0, f64::INFINITY);
+    for i in 0..720 {
+        let t = TAU * i as f64 / 720.0;
+        let d = dist(at(t), p);
+        if d < best_d {
+            (best, best_d) = (t, d);
+        }
+    }
+    let mut h = TAU / 720.0;
+    for _ in 0..60 {
+        for t in [best - h, best + h] {
+            let d = dist(at(t), p);
+            if d < best_d {
+                (best, best_d) = (t, d);
+            }
+        }
+        h *= 0.7;
+    }
+    (best, at(best))
+}
+
+/// The direction of an ellipse's normal at a point on it, from its angle.
+fn ellipse_normal_at(e: (P2, P2, f64, f64), t: f64) -> P2 {
+    let (_, x, a, b) = e;
+    let (s, c) = t.sin_cos();
+    let n = [b * c * x[0] - a * s * x[1], b * c * x[1] + a * s * x[0]];
+    let m = n[0].hypot(n[1]);
+    [n[0] / m, n[1] / m]
+}
+
+/// An end of one entity lying on the other, which is an ellipse or a circle.
+fn shared_on(s: &Sketch, a: EntityId, b: EntityId) -> Option<P2> {
+    let ends = |e: EntityId| [point_of(s, e.start()), point_of(s, e.end())];
+    let lies_on = |p: P2, e: EntityId| {
+        if let Some(shape) = ellipse_of(s, e) {
+            dist(p, nearest_on_ellipse(shape, p).1) < 1e-7
+        } else if let Some((c, r)) = curve_of(s, e) {
+            (dist(p, c) - r).abs() < 1e-7
+        } else if let Some((u, v)) = line_of(s, e) {
+            signed_distance(p, u, v).abs() < 1e-7
+        } else {
+            false
+        }
+    };
+    for (x, y) in [(a, b), (b, a)] {
+        for p in ends(x).into_iter().flatten() {
+            if lies_on(p, y) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 fn shared_end(s: &Sketch, a: EntityId, b: EntityId) -> Option<P2> {
@@ -183,7 +263,9 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
                 (Some(p), Some(q)) => dist(p, q),
                 (Some(p), None) | (None, Some(p)) => {
                     let edge = if first.is_some() { b.entity } else { a.entity };
-                    if let Some((c, r)) = curve_of(s, edge) {
+                    if let Some(e) = ellipse_of(s, edge) {
+                        dist(p, nearest_on_ellipse(e, p).1)
+                    } else if let Some((c, r)) = curve_of(s, edge) {
                         (dist(p, c) - r).abs()
                     } else {
                         let (u, v) = line_of(s, edge)?;
@@ -211,6 +293,50 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
             let measure = if matches!(rule, Rule::Parallel { .. }) { cross(u, v) } else { dot(u, v) };
             (measure / (nu * nv).max(1e-300)).abs() * nu.max(nv)
         }
+        Rule::Tangent { a, b } if ellipse_of(s, *a).is_some() || ellipse_of(s, *b).is_some() => {
+            let (first, other) = if ellipse_of(s, *a).is_some() { (*a, *b) } else { (*b, *a) };
+            let e = ellipse_of(s, first)?;
+            match shared_end(s, *a, *b).or_else(|| shared_on(s, *a, *b)) {
+                // At the point they share: both pass through it, with their normals in line.
+                Some(p) => {
+                    let (t, foot) = nearest_on_ellipse(e, p);
+                    let n = ellipse_normal_at(e, t);
+                    let mut off = dist(p, foot);
+                    if let Some((u, v)) = line_of(s, other) {
+                        let d = sub(v, u);
+                        off = off.max(dot(n, d).abs() / d[0].hypot(d[1]) * e.3.min(e.2));
+                    } else if let Some((c, _)) = curve_of(s, other) {
+                        let d = sub(p, c);
+                        off = off.max(cross(n, d).abs() / d[0].hypot(d[1]) * e.3.min(e.2));
+                    } else {
+                        let f = ellipse_of(s, other)?;
+                        let (u, _) = nearest_on_ellipse(f, p);
+                        off = off.max(cross(n, ellipse_normal_at(f, u)).abs() * e.3.min(e.2));
+                    }
+                    off
+                }
+                // A line with no shared point: the ellipse reaches the line and goes no further. The largest
+                // and smallest signed distance of the ellipse from it are found by a plain scan.
+                None => {
+                    let (u, v) = line_of(s, other)?;
+                    let (c, x, ra, rb) = e;
+                    let at = |t: f64| {
+                        let (si, co) = t.sin_cos();
+                        [c[0] + ra * co * x[0] - rb * si * x[1], c[1] + ra * co * x[1] + rb * si * x[0]]
+                    };
+                    let (mut hi, mut lo) = (f64::NEG_INFINITY, f64::INFINITY);
+                    for i in 0..4000 {
+                        let d = signed_distance(at(TAU * i as f64 / 4000.0), u, v);
+                        hi = hi.max(d);
+                        lo = lo.min(d);
+                    }
+                    // The scan can only fall short of a true extreme, by about the curvature times the step
+                    // squared, so allow for that.
+                    let slack = ra.max(rb) * (TAU / 4000.0) * (TAU / 4000.0);
+                    (hi.abs().min(lo.abs()) - slack).max(0.0)
+                }
+            }
+        }
         Rule::Tangent { a, b } => {
             if let (Some((c, r)), Some((p, q))) = (curve_of(s, *a), line_of(s, *b)) {
                 (signed_distance(c, p, q).abs() - r).abs()
@@ -225,6 +351,8 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
         Rule::Equal { a, b } => {
             if let (Some((a0, a1)), Some((b0, b1))) = (line_of(s, *a), line_of(s, *b)) {
                 (dist(a0, a1) - dist(b0, b1)).abs()
+            } else if let (Some(x), Some(y)) = (ellipse_of(s, *a), ellipse_of(s, *b)) {
+                (x.2 - y.2).abs().max((x.3 - y.3).abs())
             } else {
                 (curve_of(s, *a)?.1 - curve_of(s, *b)?.1).abs()
             }
@@ -234,7 +362,7 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
             let (a, b) = line_of(s, *line)?;
             dist(p, [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0])
         }
-        Rule::Concentric { a, b } => dist(curve_of(s, *a)?.0, curve_of(s, *b)?.0),
+        Rule::Concentric { a, b } => dist(point_of(s, a.center())?, point_of(s, b.center())?),
         Rule::Symmetric { a, b, about } => {
             let (p, q) = (point_of(s, *a)?, point_of(s, *b)?);
             if let Some(m) = point_of(s, *about) {
@@ -271,6 +399,14 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
                         .max((radius - at[2]).abs())
                         .max(dist(start, [at[3], at[4]]))
                         .max(dist(end, [at[5], at[6]])),
+                    Geometry::Ellipse { center, major, minor } => {
+                        dist(center, [at[0], at[1]]).max(dist(major, [at[2], at[3]])).max((minor - at[4]).abs())
+                    }
+                    Geometry::EllipticalArc { center, major, minor, start, end } => dist(center, [at[0], at[1]])
+                        .max(dist(major, [at[2], at[3]]))
+                        .max((minor - at[4]).abs())
+                        .max(dist(start, [at[5], at[6]]))
+                        .max(dist(end, [at[7], at[8]])),
                     Geometry::Point { .. } => return None,
                 }
             }
@@ -318,6 +454,8 @@ pub fn violation(s: &Sketch, rule: &Rule) -> Option<f64> {
         }
         Rule::HorizontalDistance { a, b, value } => (point_of(s, *b)?[0] - point_of(s, *a)?[0] - num(value)?).abs(),
         Rule::VerticalDistance { a, b, value } => (point_of(s, *b)?[1] - point_of(s, *a)?[1] - num(value)?).abs(),
+        Rule::MajorRadius { of, value } => (ellipse_of(s, *of)?.2 - num(value)?).abs(),
+        Rule::MinorRadius { of, value } => (ellipse_of(s, *of)?.3 - num(value)?).abs(),
         Rule::Radius { of, value } => (curve_of(s, *of)?.1 - num(value)?).abs(),
         Rule::Diameter { of, value } => (2.0 * curve_of(s, *of)?.1 - num(value)?).abs(),
         Rule::Angle { a, b, value } => {
@@ -373,6 +511,13 @@ pub fn violations(s: &Sketch, tol: f64) -> Vec<String> {
             let off = (dist(center, start) - radius).abs().max((dist(center, end) - radius).abs());
             if off > tol {
                 out.push(format!("arc {} has an end off its circle by {off:.3e}", e.id.0));
+            }
+        }
+        if let Geometry::EllipticalArc { start, end, .. } = e.geometry {
+            let shape = ellipse_of(s, e.id).expect("an elliptical arc");
+            let off = dist(start, nearest_on_ellipse(shape, start).1).max(dist(end, nearest_on_ellipse(shape, end).1));
+            if off > tol {
+                out.push(format!("elliptical arc {} has an end off its ellipse by {off:.3e}", e.id.0));
             }
         }
     }
@@ -601,6 +746,102 @@ impl Gen<'_> {
             self.pin_somewhere(bottom.start());
         }
         vec![bottom, right, top, left]
+    }
+
+    /// Ellipses and elliptical arcs, with everything that can hold them.
+    fn ellipses(&mut self, c: P2) -> Vec<EntityId> {
+        let (ra, rb, turn) = (self.rng.range(10.0, 20.0), self.rng.range(4.0, 9.0), self.rng.range(0.0, TAU));
+        let x = [turn.cos(), turn.sin()];
+        let tip = [c[0] + x[0] * ra, c[1] + x[1] * ra];
+        let e = self.s.ellipse(c, tip, rb);
+        let at = |t: f64| [c[0] + ra * t.cos() * x[0] - rb * t.sin() * x[1], c[1] + ra * t.cos() * x[1] + rb * t.sin() * x[0]];
+        let normal = |t: f64| {
+            let n = [rb * t.cos() * x[0] - ra * t.sin() * x[1], rb * t.cos() * x[1] + ra * t.sin() * x[0]];
+            let m = n[0].hypot(n[1]);
+            [n[0] / m, n[1] / m]
+        };
+        let mut made = vec![e];
+        if self.rng.chance(0.8) {
+            self.on(Rule::MajorRadius { of: e, value: ra.into() });
+            self.on(Rule::MinorRadius { of: e, value: rb.into() });
+        }
+        // A point on it.
+        if self.rng.chance(0.7) {
+            let p = at(self.rng.range(0.0, TAU));
+            let q = self.s.point(p[0], p[1]);
+            self.on(Rule::Coincident { a: q.whole(), b: e.whole() });
+        }
+        // A line tangent to it, with no point shared.
+        if self.rng.chance(0.7) {
+            let t = self.rng.range(0.0, TAU);
+            let (p, n) = (at(t), normal(t));
+            let (m0, m1) = (self.rng.range(3.0, 15.0), self.rng.range(3.0, 15.0));
+            let d = [-n[1], n[0]];
+            let l = self.s.line([p[0] - d[0] * m0, p[1] - d[1] * m0], [p[0] + d[0] * m1, p[1] + d[1] * m1]);
+            self.on(Rule::Tangent { a: l, b: e });
+            made.push(l);
+        }
+        // A line leaving it at a tangent, from a point on it.
+        if self.rng.chance(0.7) {
+            let t = self.rng.range(0.0, TAU);
+            let (p, n) = (at(t), normal(t));
+            let len = self.rng.range(4.0, 20.0);
+            let l = self.s.line(p, [p[0] - n[1] * len, p[1] + n[0] * len]);
+            self.on(Rule::Coincident { a: l.start(), b: e.whole() });
+            self.on(Rule::Tangent { a: l, b: e });
+            made.push(l);
+        }
+        // An arc touching it from outside, sharing an end.
+        if self.rng.chance(0.6) {
+            let t = self.rng.range(0.0, TAU);
+            let (p, n) = (at(t), normal(t));
+            let r = self.rng.range(3.0, 9.0);
+            let center = [p[0] + n[0] * r, p[1] + n[1] * r];
+            let from = (p[1] - center[1]).atan2(p[0] - center[0]);
+            let arc = self.s.add(Geometry::Arc { center, radius: r, start: p, end: polar(center, r, from + self.rng.range(0.5, 2.5)) });
+            self.on(Rule::Coincident { a: arc.start(), b: e.whole() });
+            self.on(Rule::Tangent { a: arc, b: e });
+            made.push(arc);
+        }
+        // Something concentric, and one of equal size elsewhere.
+        if self.rng.chance(0.5) {
+            let r = self.rng.range(1.0, rb * 0.8);
+            let k = self.s.circle(c, r);
+            self.on(Rule::Concentric { a: e, b: k });
+            self.on(Rule::Radius { of: k, value: r.into() });
+            made.push(k);
+        }
+        if self.rng.chance(0.5) {
+            let far = polar(c, 50.0, self.rng.range(0.0, TAU));
+            let twin = self.s.ellipse(far, [far[0] + x[0] * ra, far[1] + x[1] * ra], rb);
+            self.on(Rule::Equal { a: e, b: twin });
+            made.push(twin);
+        }
+        // An elliptical arc, with lines joined to both its ends.
+        if self.rng.chance(0.8) {
+            let far = polar(c, 90.0, self.rng.range(0.0, TAU));
+            let (sa, sb) = (self.rng.range(8.0, 16.0), self.rng.range(3.0, 7.0));
+            let (d0, d1) = (self.rng.range(0.0, 90.0), self.rng.range(120.0, 300.0));
+            let a = self.s.elliptical_arc(far, [far[0] + sa, far[1]], sb, d0, d1);
+            self.on(Rule::Horizontal { a: a.center(), b: Some(a.major()) });
+            self.on(Rule::MajorRadius { of: a, value: sa.into() });
+            self.on(Rule::MinorRadius { of: a, value: sb.into() });
+            if let Some(Geometry::EllipticalArc { start, end, .. }) = self.s.entity(a).map(|x| x.geometry) {
+                let (l0, l1) = (self.s.line(end, [end[0] + 3.0, end[1] + 9.0]), self.s.line([start[0] - 4.0, start[1] + 8.0], start));
+                self.join(a.end(), l0.start());
+                self.join(l1.end(), a.start());
+                self.length_of(l0);
+                self.length_of(l1);
+                made.push(l0);
+                made.push(l1);
+            }
+            made.push(a);
+        }
+        // Measuring one.
+        if self.rng.chance(0.5) {
+            let _ = self.s.add_reference(Rule::MajorRadius { of: e, value: 0.0.into() });
+        }
+        made
     }
 
     /// Dimensions to circles and arcs, between parallel lines, and reference dimensions.
@@ -848,6 +1089,24 @@ pub fn perturb(s: &Sketch, rng: &mut Rng, m: f64) -> Sketch {
                 let a1 = (end[1] - center[1]).atan2(end[0] - center[0]) + rng.range(-shift, shift);
                 Geometry::Arc { center: c, radius: r, start: polar(c, r, a0), end: polar(c, r, a1) }
             }
+            Geometry::Ellipse { center, major, minor } => {
+                Geometry::Ellipse { center: nudge(center, rng, m), major: nudge(major, rng, m), minor: (minor + rng.range(-m, m)).max(minor * 0.3) }
+            }
+            Geometry::EllipticalArc { center, major, minor, start, end } => {
+                // Back on the nudged ellipse, at about the same place.
+                let (a, x) = (dist(center, major), [(major[0] - center[0]) / dist(center, major), (major[1] - center[1]) / dist(center, major)]);
+                let angle_of = |p: P2| {
+                    let d = sub(p, center);
+                    (dot(d, [-x[1], x[0]]) / minor).atan2(dot(d, x) / a)
+                };
+                let (a0, a1) = (angle_of(start), angle_of(end));
+                let (c, tip) = (nudge(center, rng, m), nudge(major, rng, m));
+                let radius = dist(c, tip);
+                let e = [(tip[0] - c[0]) / radius, (tip[1] - c[1]) / radius];
+                let b = (minor + rng.range(-m, m)).max(minor * 0.3);
+                let at = |t: f64| [c[0] + radius * t.cos() * e[0] - b * t.sin() * e[1], c[1] + radius * t.cos() * e[1] + b * t.sin() * e[0]];
+                Geometry::EllipticalArc { center: c, major: tip, minor: b, start: at(a0), end: at(a1) }
+            }
         };
     }
     out
@@ -900,6 +1159,10 @@ pub fn generate_sized(category: Category, seed: u64, entities: usize) -> Case {
         Category::Distances => {
             let c = [gen.rng.range(-20.0, 20.0), gen.rng.range(-20.0, 20.0)];
             gen.distances(c);
+        }
+        Category::Ellipses => {
+            let c = [gen.rng.range(-20.0, 20.0), gen.rng.range(-20.0, 20.0)];
+            gen.ellipses(c);
         }
         Category::Mixed => {
             let blocks = gen.rng.int(2, 5);
@@ -1190,6 +1453,10 @@ pub fn largest_move(a: &Sketch, b: &Sketch) -> f64 {
             Geometry::Line { start, end } => vec![start[0], start[1], end[0], end[1]],
             Geometry::Circle { center, radius } => vec![center[0], center[1], radius],
             Geometry::Arc { center, radius, start, end } => vec![center[0], center[1], radius, start[0], start[1], end[0], end[1]],
+            Geometry::Ellipse { center, major, minor } => vec![center[0], center[1], major[0], major[1], minor],
+            Geometry::EllipticalArc { center, major, minor, start, end } => {
+                vec![center[0], center[1], major[0], major[1], minor, start[0], start[1], end[0], end[1]]
+            }
         }
     };
     let mut largest = 0.0f64;

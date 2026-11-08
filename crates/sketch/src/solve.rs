@@ -919,6 +919,10 @@ pub(crate) fn collapsed(sketch: &Sketch) -> Vec<EntityId> {
             Geometry::Line { start, end } => (end[0] - start[0]).hypot(end[1] - start[1]) < COLLAPSED,
             Geometry::Circle { radius, .. } => radius < COLLAPSED,
             Geometry::Arc { radius, start, end, .. } => radius < COLLAPSED || (end[0] - start[0]).hypot(end[1] - start[1]) < COLLAPSED,
+            Geometry::Ellipse { center, major, minor } => minor < COLLAPSED || (major[0] - center[0]).hypot(major[1] - center[1]) < COLLAPSED,
+            Geometry::EllipticalArc { center, major, minor, start, end } => {
+                minor < COLLAPSED || (major[0] - center[0]).hypot(major[1] - center[1]) < COLLAPSED || (end[0] - start[0]).hypot(end[1] - start[1]) < COLLAPSED
+            }
         };
         if gone {
             out.push(e.id);

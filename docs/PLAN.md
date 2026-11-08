@@ -57,6 +57,7 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| Ellipses | `Geometry` gained `Ellipse` and `EllipticalArc`, `SegKind` gained `Ellipse`, `Part` gained `Major`, and `Rule` gained `MajorRadius` and `MinorRadius` | An exhaustive `match` needs the new arms. Existing sketch JSON is unchanged. A region's loop can now hold an ellipse, which `profiles_from_regions` handles |
 | Spline surfaces | `Surface` is no longer `Copy`, and gained `Extruded` and `Revolved` | Use `face.surface.clone()` or borrow it. An exhaustive `match` needs the new arms. `Surface::name` gives `extrusion` and `revolution` |
 | Spline surfaces | `Curve` gained `Spline`. `SegGeom` gained `Spline`, and it and `Seg` are no longer `Copy` | An exhaustive `match` needs the new arm |
 | Spline surfaces | `MassProps` gained `volume_error` | Reading it is unaffected. It's zero unless the body has spline faces or traced edges |
@@ -75,7 +76,7 @@ From OpenShape's list, in its order:
 
 1. Sketch regions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 2. Solver dimensions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
-3. Ellipses and elliptical arcs: kernel profiles done, as exact rational splines. Solver and regions next.
+3. Ellipses and elliptical arcs in the solver, regions and kernel profiles: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 4. Splines, as decided in [NURBS_DESIGN.md](NURBS_DESIGN.md): extruded and revolved in the kernel are done. Sketches next. OpenShape
    also wants lofts and free-form surfaces from imported files. Both are phase 3 of that note, which isn't decided yet.
 5. STEP import: analytic surfaces first, refusing anything else and naming the surface type.

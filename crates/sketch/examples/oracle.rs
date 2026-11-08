@@ -42,6 +42,9 @@ fn pick_drag(s: &Sketch, free: &[Ref], rng: &mut Rng) -> Option<(Ref, P2)> {
         (Geometry::Circle { center, .. } | Geometry::Arc { center, .. }, Part::Center) => center,
         (Geometry::Arc { start, .. }, Part::Start) => start,
         (Geometry::Arc { end, .. }, Part::End) => end,
+        (Geometry::Ellipse { center, .. } | Geometry::EllipticalArc { center, .. }, Part::Center) => center,
+        (Geometry::EllipticalArc { start, .. }, Part::Start) => start,
+        (Geometry::EllipticalArc { end, .. }, Part::End) => end,
         _ => return None,
     };
     let reach = rng.range(1.0, 15.0);
@@ -126,6 +129,10 @@ fn moved_others(a: &Sketch, b: &Sketch, grab: Ref) -> f64 {
             Geometry::Point { at } => vec![(Part::Whole, at)],
             Geometry::Line { start, end } => vec![(Part::Start, start), (Part::End, end)],
             Geometry::Circle { center, radius } => vec![(Part::Center, center), (Part::Radius, [radius, 0.0])],
+            Geometry::Ellipse { center, major, minor } => vec![(Part::Center, center), (Part::Major, major), (Part::Radius, [minor, 0.0])],
+            Geometry::EllipticalArc { center, major, minor, start, end } => {
+                vec![(Part::Center, center), (Part::Major, major), (Part::Radius, [minor, 0.0]), (Part::Start, start), (Part::End, end)]
+            }
             Geometry::Arc { center, radius, start, end } => {
                 vec![(Part::Center, center), (Part::Radius, [radius, 0.0]), (Part::Start, start), (Part::End, end)]
             }
@@ -162,6 +169,8 @@ fn with_geometry(s: &Sketch, list: &[Value]) -> Option<Sketch> {
             Geometry::Line { .. } => Geometry::Line { start: [v[0], v[1]], end: [v[2], v[3]] },
             Geometry::Circle { .. } => Geometry::Circle { center: [v[0], v[1]], radius: v[2] },
             Geometry::Arc { .. } => Geometry::Arc { center: [v[0], v[1]], radius: v[2], start: [v[3], v[4]], end: [v[5], v[6]] },
+            Geometry::Ellipse { .. } => Geometry::Ellipse { center: [v[0], v[1]], major: [v[2], v[3]], minor: v[4] },
+            Geometry::EllipticalArc { .. } => Geometry::EllipticalArc { center: [v[0], v[1]], major: [v[2], v[3]], minor: v[4], start: [v[5], v[6]], end: [v[7], v[8]] },
         };
     }
     Some(out)

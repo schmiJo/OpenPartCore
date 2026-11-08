@@ -358,6 +358,11 @@ struct Grid {
     wall: Vec<bool>,
 }
 
+fn ellipse_point(center: [f64; 2], x: [f64; 2], a: f64, b: f64, t: f64) -> [f64; 2] {
+    let (u, v) = (a * t.cos(), b * t.sin());
+    [center[0] + u * x[0] - v * x[1], center[1] + u * x[1] + v * x[0]]
+}
+
 /// A pocket: its size in cells, a point in it, and its bounds.
 struct Pocket {
     cells: usize,
@@ -405,6 +410,25 @@ impl Grid {
                         a1 += TAU;
                     }
                     self.draw(|t| { let u = a0 + (a1 - a0) * t; [center[0] + radius * u.cos(), center[1] + radius * u.sin()] }, (a1 - a0) * radius);
+                }
+                Geometry::Ellipse { center, major, minor } => {
+                    let a = (major[0] - center[0]).hypot(major[1] - center[1]);
+                    let x = [(major[0] - center[0]) / a, (major[1] - center[1]) / a];
+                    self.draw(|t| ellipse_point(center, x, a, minor, t * TAU), TAU * a.max(minor));
+                }
+                Geometry::EllipticalArc { center, major, minor, start, end } => {
+                    let a = (major[0] - center[0]).hypot(major[1] - center[1]);
+                    let x = [(major[0] - center[0]) / a, (major[1] - center[1]) / a];
+                    let angle = |p: [f64; 2]| {
+                        let d = [p[0] - center[0], p[1] - center[1]];
+                        ((d[1] * x[0] - d[0] * x[1]) / minor).atan2((d[0] * x[0] + d[1] * x[1]) / a)
+                    };
+                    let a0 = angle(start);
+                    let mut a1 = angle(end);
+                    while a1 <= a0 {
+                        a1 += TAU;
+                    }
+                    self.draw(|t| ellipse_point(center, x, a, minor, a0 + (a1 - a0) * t), (a1 - a0) * a.max(minor));
                 }
                 Geometry::Point { .. } => {}
             }
@@ -498,11 +522,20 @@ fn has_near_miss(s: &Sketch) -> bool {
             (a[0] + f * dx - p[0]).hypot(a[1] + f * dy - p[1])
         }
         Geometry::Circle { center, radius } | Geometry::Arc { center, radius, .. } => ((p[0] - center[0]).hypot(p[1] - center[1]) - radius).abs(),
+        Geometry::Ellipse { center, major, minor } | Geometry::EllipticalArc { center, major, minor, .. } => {
+            // Sampled, which is plenty to see that an end is near it.
+            let a = (major[0] - center[0]).hypot(major[1] - center[1]);
+            let x = [(major[0] - center[0]) / a, (major[1] - center[1]) / a];
+            (0..720).map(|i| {
+                let q = ellipse_point(center, x, a, minor, TAU * i as f64 / 720.0);
+                (q[0] - p[0]).hypot(q[1] - p[1])
+            }).fold(f64::INFINITY, f64::min)
+        }
         Geometry::Point { .. } => f64::INFINITY,
     };
     s.entities.iter().any(|e| {
         let ends: &[[f64; 2]] = match &e.geometry {
-            Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => &[*start, *end],
+            Geometry::Line { start, end } | Geometry::Arc { start, end, .. } | Geometry::EllipticalArc { start, end, .. } => &[*start, *end],
             _ => &[],
         };
         ends.iter().any(|&p| s.entities.iter().any(|o| o.id != e.id && (1e-6..0.4).contains(&gap(&o.geometry, p))))
@@ -523,7 +556,25 @@ fn random_sketch(rng: &mut Rng) -> Sketch {
                 [rng.range(-span, span), rng.range(-span, span)]
             }
         };
-        match rng.int(0, 5) {
+        match rng.int(0, 7) {
+            6 => {
+                let c = pick(rng, &spots);
+                let (a, t, b) = (rng.range(5.0, 25.0), rng.range(0.0, TAU), rng.range(2.0, 14.0));
+                s.ellipse(c, [c[0] + a * t.cos(), c[1] + a * t.sin()], b);
+                spots.push(ellipse_point(c, [t.cos(), t.sin()], a, b, rng.range(0.0, TAU)));
+            }
+            7 => {
+                let c = [rng.range(-span, span), rng.range(-span, span)];
+                let (a, t, b) = (rng.range(5.0, 25.0), rng.range(0.0, TAU), rng.range(2.0, 14.0));
+                let (d0, d1) = (rng.range(0.0, 360.0), rng.range(0.0, 360.0));
+                if (d0 - d1).abs() > 10.0 {
+                    let id = s.elliptical_arc(c, [c[0] + a * t.cos(), c[1] + a * t.sin()], b, d0, d1);
+                    if let Some(Entity { geometry: Geometry::EllipticalArc { start, end, .. }, .. }) = s.entity(id) {
+                        spots.push(*start);
+                        spots.push(*end);
+                    }
+                }
+            }
             0..=2 => {
                 let (a, b) = (pick(rng, &spots), pick(rng, &spots));
                 if (a[0] - b[0]).hypot(a[1] - b[1]) > 1.0 {
@@ -577,6 +628,9 @@ fn every_region_matches_a_pocket_of_a_raster() {
                 Geometry::Point { at } => at[0].abs().max(at[1].abs()),
                 Geometry::Line { start, end } => start[0].abs().max(start[1].abs()).max(end[0].abs()).max(end[1].abs()),
                 Geometry::Circle { center, radius } | Geometry::Arc { center, radius, .. } => center[0].abs().max(center[1].abs()) + radius,
+                Geometry::Ellipse { center, major, minor } | Geometry::EllipticalArc { center, major, minor, .. } => {
+                    center[0].abs().max(center[1].abs()) + minor.max((major[0] - center[0]).hypot(major[1] - center[1]))
+                }
             })
         }) + 2.0;
         let n = (2.0 * reach / cell).ceil() as usize;
@@ -629,5 +683,76 @@ fn seg_length(s: &Seg) -> f64 {
     match s.kind {
         SegKind::Line { a, b } => (a[0] - b[0]).hypot(a[1] - b[1]),
         SegKind::Arc { radius, a0, a1, .. } => radius * (a1 - a0).abs(),
+        SegKind::Ellipse { major, minor, a0, a1, .. } => major.max(minor) * (a1 - a0).abs(),
     }
+}
+
+// ----- Ellipses -----
+
+#[test]
+fn a_whole_ellipse_is_a_region_and_a_hole() {
+    let mut s = Sketch::new();
+    rect(&mut s, -30.0, -30.0, 60.0, 60.0);
+    let e = s.ellipse([0.0, 0.0], [10.0, 5.0], 4.0);
+    let a = s.arrangement();
+    let major = 125f64.sqrt();
+    assert!(close(&areas(&a), &[PI * major * 4.0, 3600.0 - PI * major * 4.0]), "{:?}", areas(&a));
+    let plate = a.regions.iter().find(|r| r.depth == 0).unwrap();
+    assert_eq!(plate.holes.len(), 1);
+    assert_eq!(plate.holes[0].segs[0].entity, e);
+}
+
+#[test]
+fn a_line_across_an_ellipse_splits_it_and_an_arc_closes_on_a_chord() {
+    let mut s = Sketch::new();
+    s.ellipse([0.0, 0.0], [10.0, 0.0], 5.0);
+    s.line([-20.0, 0.0], [20.0, 0.0]);
+    let a = s.arrangement();
+    assert!(close(&areas(&a), &[25.0 * PI, 25.0 * PI]), "{:?}", areas(&a));
+
+    // An elliptical arc from 0 to 180 degrees, closed by its chord.
+    let mut t = Sketch::new();
+    let arc = t.elliptical_arc([0.0, 0.0], [10.0, 0.0], 5.0, 0.0, 180.0);
+    t.line([-10.0, 0.0], [10.0, 0.0]);
+    let a = t.arrangement();
+    assert!(close(&areas(&a), &[25.0 * PI]), "{:?}", areas(&a));
+    assert!(a.regions[0].outer.segs.iter().any(|g| g.entity == arc));
+    assert!(a.ignored.is_empty(), "{:?}", a.ignored);
+}
+
+#[test]
+fn an_ellipse_crossing_a_circle_makes_lobes_with_their_own_ids() {
+    // Four crossings: four lobes of the ellipse outside the circle would be two here, and the rest.
+    let mut s = Sketch::new();
+    s.ellipse([0.0, 0.0], [10.0, 0.0], 3.0);
+    s.circle([0.0, 0.0], 6.0);
+    let a = s.arrangement();
+    assert_eq!(a.regions.len(), 5, "{:?}", areas(&a));
+    let mut ids: Vec<RegionId> = a.regions.iter().map(|r| r.id).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 5, "lobes with the same curves around them still get their own ids");
+    let total: f64 = a.regions.iter().map(Region::area).sum();
+    // Their union: the circle, plus the ellipse's two lobes outside it.
+    let lobe = a.region_at([8.0, 0.0]).unwrap().area();
+    assert!((total - (36.0 * PI + 2.0 * lobe)).abs() < 1e-6, "{total}");
+    // Dragging it doesn't change them.
+    let mut t = Sketch::new();
+    t.ellipse([0.5, 0.2], [10.5, 0.4], 3.2);
+    t.circle([0.0, 0.0], 6.1);
+    let mut before: Vec<RegionId> = a.regions.iter().map(|r| r.id).collect();
+    let mut after: Vec<RegionId> = t.arrangement().regions.iter().map(|r| r.id).collect();
+    before.sort();
+    after.sort();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn an_ellipse_touching_a_line_cuts_nothing_off() {
+    let mut s = Sketch::new();
+    s.ellipse([0.0, 0.0], [10.0, 0.0], 5.0);
+    let l = s.line([-20.0, 5.0], [20.0, 5.0]);
+    let a = s.arrangement();
+    assert!(close(&areas(&a), &[50.0 * PI]), "{:?}", areas(&a));
+    assert!(a.ignored.iter().all(|i| i.entity == l), "{:?}", a.ignored);
 }

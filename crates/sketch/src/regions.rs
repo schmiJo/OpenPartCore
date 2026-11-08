@@ -1,6 +1,6 @@
 //! Finds the closed regions of a sketch: the areas a kernel profile can be made from.
 //!
-//! Lines, arcs and circles that aren't construction geometry are cut wherever they cross or touch,
+//! Lines, arcs, circles and ellipses that aren't construction geometry are cut wherever they cross or touch,
 //! at crossings and T-junctions alike. Every area those pieces enclose is a region, with an id that
 //! survives solving and dragging. Pieces that enclose nothing, such as open curves and spurs, are
 //! reported as ignored rather than refused. A connected group of curves inside a region is a hole in
@@ -28,6 +28,9 @@ pub enum SegKind {
     /// Runs from angle `a0` to `a1` in radians: counter-clockwise if `a1 > a0`, clockwise if not.
     /// A whole circle runs through a full turn.
     Arc { center: P2, radius: f64, a0: f64, a1: f64 },
+    /// Part or all of an ellipse, by eccentric angle measured from the unit vector `x` along the major
+    /// axis, with the same directions as an arc.
+    Ellipse { center: P2, x: P2, major: f64, minor: f64, a0: f64, a1: f64 },
 }
 
 /// A piece of a loop, and the entity it came from.
@@ -42,6 +45,7 @@ impl Seg {
         match self.kind {
             SegKind::Line { a, .. } => a,
             SegKind::Arc { center, radius, a0, .. } => [center[0] + radius * a0.cos(), center[1] + radius * a0.sin()],
+            SegKind::Ellipse { a0, .. } => point_at(self.kind, a0),
         }
     }
 
@@ -49,6 +53,7 @@ impl Seg {
         match self.kind {
             SegKind::Line { b, .. } => b,
             SegKind::Arc { center, radius, a1, .. } => [center[0] + radius * a1.cos(), center[1] + radius * a1.sin()],
+            SegKind::Ellipse { a1, .. } => point_at(self.kind, a1),
         }
     }
 
@@ -56,6 +61,7 @@ impl Seg {
         let kind = match self.kind {
             SegKind::Line { a, b } => SegKind::Line { a: b, b: a },
             SegKind::Arc { center, radius, a0, a1 } => SegKind::Arc { center, radius, a0: a1, a1: a0 },
+            SegKind::Ellipse { center, x, major, minor, a0, a1 } => SegKind::Ellipse { center, x, major, minor, a0: a1, a1: a0 },
         };
         Seg { entity: self.entity, kind }
     }
@@ -68,6 +74,7 @@ impl Seg {
                 let (s, c) = ((a0 + a1) / 2.0).sin_cos();
                 [center[0] + radius * c, center[1] + radius * s]
             }
+            SegKind::Ellipse { a0, a1, .. } => point_at(self.kind, (a0 + a1) / 2.0),
         }
     }
 
@@ -81,6 +88,16 @@ impl Seg {
                     (c.atan2(-s), 1.0 / radius)
                 } else {
                     ((-c).atan2(s), -1.0 / radius)
+                }
+            }
+            SegKind::Ellipse { major, minor, a0, a1, .. } => {
+                let d = velocity_at(self.kind, a0);
+                let speed = d[0].hypot(d[1]);
+                let bend = major * minor / (speed * speed * speed);
+                if a1 >= a0 {
+                    (d[1].atan2(d[0]), bend)
+                } else {
+                    ((-d[1]).atan2(-d[0]), -bend)
                 }
             }
         }
@@ -103,6 +120,11 @@ impl Loop {
                 SegKind::Arc { center, radius, a0, a1 } => {
                     radius * radius * (a1 - a0)
                         + radius * (center[0] * (a1.sin() - a0.sin()) - center[1] * (a1.cos() - a0.cos()))
+                }
+                SegKind::Ellipse { center, x, major, minor, a0, a1 } => {
+                    let y = [-x[1], x[0]];
+                    let (cx, cy) = (center[0] * x[1] - center[1] * x[0], center[0] * y[1] - center[1] * y[0]);
+                    major * minor * (a1 - a0) + major * cx * (a1.cos() - a0.cos()) + minor * cy * (a1.sin() - a0.sin())
                 }
             };
         }
@@ -135,6 +157,23 @@ impl Loop {
                         if inside_circle && side(p) * side(mid) > 0.0 {
                             winding += if b1 > b0 { TAU } else { -TAU };
                         }
+                    }
+                }
+                SegKind::Ellipse { a0, a1, .. } => {
+                    // Chords, split finer wherever the point is close enough to be between chord and curve.
+                    fn piece(kind: SegKind, p: P2, t0: f64, t1: f64, depth: u32, turn: &dyn Fn(P2, P2) -> f64) -> f64 {
+                        let (q0, q1, m) = (point_at(kind, t0), point_at(kind, t1), point_at(kind, (t0 + t1) / 2.0));
+                        let reach = dist(q0, m).max(dist(q1, m));
+                        if dist(p, m) > 1.5 * reach || depth == 0 {
+                            turn(q0, q1)
+                        } else {
+                            piece(kind, p, t0, (t0 + t1) / 2.0, depth - 1, turn) + piece(kind, p, (t0 + t1) / 2.0, t1, depth - 1, turn)
+                        }
+                    }
+                    let pieces = 8;
+                    for k in 0..pieces {
+                        let (b0, b1) = (a0 + (a1 - a0) * k as f64 / pieces as f64, a0 + (a1 - a0) * (k + 1) as f64 / pieces as f64);
+                        winding += piece(s.kind, p, b0, b1, 40, &turn);
                     }
                 }
             }
@@ -246,6 +285,30 @@ fn dist(a: P2, b: P2) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
+/// The point at a curve's parameter: a fraction on a line, an angle on an arc or ellipse.
+fn point_at(kind: SegKind, t: f64) -> P2 {
+    match kind {
+        SegKind::Line { a, b } => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t],
+        SegKind::Arc { center, radius, .. } => [center[0] + radius * t.cos(), center[1] + radius * t.sin()],
+        SegKind::Ellipse { center, x, major, minor, .. } => {
+            let (u, v) = (major * t.cos(), minor * t.sin());
+            [center[0] + u * x[0] - v * x[1], center[1] + u * x[1] + v * x[0]]
+        }
+    }
+}
+
+/// How fast `point_at` moves with its parameter, going up.
+fn velocity_at(kind: SegKind, t: f64) -> P2 {
+    match kind {
+        SegKind::Line { a, b } => [b[0] - a[0], b[1] - a[1]],
+        SegKind::Arc { radius, .. } => [-radius * t.sin(), radius * t.cos()],
+        SegKind::Ellipse { x, major, minor, .. } => {
+            let (u, v) = (-major * t.sin(), minor * t.cos());
+            [u * x[0] - v * x[1], u * x[1] + v * x[0]]
+        }
+    }
+}
+
 fn line_param(a: P2, b: P2, p: P2) -> f64 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)
@@ -272,13 +335,104 @@ fn param_on(kind: SegKind, p: P2) -> Option<f64> {
             }
             (t <= a1 - a0 + slack).then(|| a0 + t.clamp(0.0, a1 - a0))
         }
+        SegKind::Ellipse { center, x, major, minor, a0, a1 } => {
+            let d = [p[0] - center[0], p[1] - center[1]];
+            let (u, v) = (d[0] * x[0] + d[1] * x[1], d[1] * x[0] - d[0] * x[1]);
+            // Starting from where it would be on a circle, walk to the nearest point of the ellipse.
+            let mut t = (v / minor).atan2(u / major);
+            for _ in 0..24 {
+                let (s, c) = t.sin_cos();
+                let (ex, ey) = (major * c - u, minor * s - v);
+                let (dx, dy) = (-major * s, minor * c);
+                let slope = ex * dx + ey * dy;
+                let curve = dx * dx + dy * dy + ex * (-major * c) + ey * (-minor * s);
+                let step = if curve.abs() > 1e-12 { slope / curve } else { 0.0 };
+                t -= step.clamp(-0.5, 0.5);
+                if step.abs() < 1e-14 {
+                    break;
+                }
+            }
+            if dist(point_at(kind, t), p) > JOIN {
+                return None;
+            }
+            let slack = JOIN / major.min(minor);
+            let mut along = (t - a0).rem_euclid(TAU);
+            if along > a1 - a0 + slack && along > TAU - slack {
+                along -= TAU;
+            }
+            (along <= a1 - a0 + slack).then(|| a0 + along.clamp(0.0, a1 - a0))
+        }
     }
+}
+
+/// Where two curves meet when no closed form is at hand: wherever pieces of them come close, Newton's
+/// method from there on the two parameters, in a form that still settles where the curves only touch.
+fn crossings_numeric(s: SegKind, t: SegKind) -> Vec<P2> {
+    fn stations(kind: SegKind) -> (f64, f64, usize) {
+        match kind {
+            SegKind::Line { .. } => (0.0, 1.0, 64),
+            SegKind::Arc { a0, a1, .. } => (a0, a1, (((a1 - a0).abs() * 16.0) as usize).max(8)),
+            SegKind::Ellipse { a0, a1, major, minor, .. } => {
+                let shape = major.max(minor) / major.min(minor);
+                (a0, a1, (((a1 - a0).abs() * 16.0 * shape.sqrt()) as usize).max(8))
+            }
+        }
+    }
+    let (s0, s1, ns) = stations(s);
+    let (t0, t1, nt) = stations(t);
+    let along = |lo: f64, hi: f64, n: usize, i: usize| lo + (hi - lo) * i as f64 / n as f64;
+    let (ps, pt): (Vec<P2>, Vec<P2>) = (
+        (0..=ns).map(|i| point_at(s, along(s0, s1, ns, i))).collect(),
+        (0..=nt).map(|j| point_at(t, along(t0, t1, nt, j))).collect(),
+    );
+    let mut out: Vec<P2> = Vec::new();
+    for i in 0..ns {
+        let (a, b) = (ps[i], ps[i + 1]);
+        let margin_s = dist(a, b) * 0.2 + JOIN;
+        for j in 0..nt {
+            let (c, d) = (pt[j], pt[j + 1]);
+            let margin = margin_s + dist(c, d) * 0.2;
+            if a[0].max(b[0]) + margin < c[0].min(d[0])
+                || c[0].max(d[0]) + margin < a[0].min(b[0])
+                || a[1].max(b[1]) + margin < c[1].min(d[1])
+                || c[1].max(d[1]) + margin < a[1].min(b[1])
+            {
+                continue;
+            }
+            let (mut u, mut v) = (along(s0, s1, ns, i) + (s1 - s0) / ns as f64 / 2.0, along(t0, t1, nt, j) + (t1 - t0) / nt as f64 / 2.0);
+            for _ in 0..40 {
+                let (p, q) = (point_at(s, u), point_at(t, v));
+                let r = [p[0] - q[0], p[1] - q[1]];
+                let (du, dv) = (velocity_at(s, u), velocity_at(t, v));
+                // Least squares on the two parameters, with a little damping to get through tangency.
+                let (aa, ab, bb) = (du[0] * du[0] + du[1] * du[1], -(du[0] * dv[0] + du[1] * dv[1]), dv[0] * dv[0] + dv[1] * dv[1]);
+                let damp = 1e-10 * (aa + bb);
+                let (g0, g1) = (du[0] * r[0] + du[1] * r[1], -(dv[0] * r[0] + dv[1] * r[1]));
+                let det = (aa + damp) * (bb + damp) - ab * ab;
+                if det.abs() < 1e-300 {
+                    break;
+                }
+                let (step_u, step_v) = (((bb + damp) * g0 - ab * g1) / det, ((aa + damp) * g1 - ab * g0) / det);
+                u -= step_u;
+                v -= step_v;
+                if step_u.abs() * aa.sqrt() + step_v.abs() * bb.sqrt() < 1e-13 {
+                    break;
+                }
+            }
+            let (p, q) = (point_at(s, u), point_at(t, v));
+            if dist(p, q) <= JOIN && !out.iter().any(|&o| dist(o, p) <= JOIN / 2.0) {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
 /// Where two curves cross or touch, leaving out where they run together: the ends of an overlap are
 /// found by testing each curve's ends against the other curve.
 fn crossings(s: SegKind, t: SegKind) -> Vec<P2> {
     match (s, t) {
+        (SegKind::Ellipse { .. }, _) | (_, SegKind::Ellipse { .. }) => crossings_numeric(s, t),
         (SegKind::Line { a, b }, SegKind::Line { a: c, b: d }) => {
             let (u, v) = ([b[0] - a[0], b[1] - a[1]], [d[0] - c[0], d[1] - c[1]]);
             let cross = u[0] * v[1] - u[1] * v[0];
@@ -319,6 +473,10 @@ fn bounds(kind: SegKind) -> [f64; 4] {
     match kind {
         SegKind::Line { a, b } => [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])],
         SegKind::Arc { center, radius, .. } => [center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius],
+        SegKind::Ellipse { center, major, minor, .. } => {
+            let r = major.max(minor);
+            [center[0] - r, center[1] - r, center[0] + r, center[1] + r]
+        }
     }
 }
 
@@ -463,8 +621,16 @@ impl Walk {
     }
 }
 
+/// A whole circle or ellipse, which nothing touches.
 fn is_whole_circle(l: &Loop) -> bool {
-    l.segs.len() == 1 && matches!(l.segs[0].kind, SegKind::Arc { a0, a1, .. } if (a1 - a0).abs() >= TAU - 1e-9)
+    l.segs.len() == 1
+        && matches!(l.segs[0].kind, SegKind::Arc { a0, a1, .. } | SegKind::Ellipse { a0, a1, .. } if (a1 - a0).abs() >= TAU - 1e-9)
+}
+
+/// An ellipse's unit major direction and major radius, if it's a real ellipse.
+fn ellipse_axes(center: P2, major: P2, minor: f64) -> Option<(P2, f64)> {
+    let a = dist(center, major);
+    (a > JOIN && a.is_finite() && minor > JOIN && minor.is_finite()).then(|| ([(major[0] - center[0]) / a, (major[1] - center[1]) / a], a))
 }
 
 fn refusal(message: String, entities: Vec<EntityId>) -> SketchError {
@@ -499,6 +665,21 @@ impl Sketch {
                         (SegKind::Arc { center, radius, a0, a1 }, false)
                     })
                 }
+                Geometry::Ellipse { center, major, minor } => ellipse_axes(center, major, minor).map(|(x, a)| (SegKind::Ellipse { center, x, major: a, minor, a0: 0.0, a1: TAU }, true)),
+                Geometry::EllipticalArc { center, major, minor, start, end } => {
+                    ellipse_axes(center, major, minor).filter(|_| start.iter().chain(&end).all(|v| v.is_finite())).map(|(x, a)| {
+                        let angle = |p: P2| {
+                            let d = [p[0] - center[0], p[1] - center[1]];
+                            ((d[1] * x[0] - d[0] * x[1]) / minor).atan2((d[0] * x[0] + d[1] * x[1]) / a)
+                        };
+                        let a0 = angle(start);
+                        let mut a1 = angle(end);
+                        while a1 <= a0 {
+                            a1 += TAU;
+                        }
+                        (SegKind::Ellipse { center, x, major: a, minor, a0, a1 }, false)
+                    })
+                }
             };
             match curve {
                 Some((kind, closed)) => curves.push((e.id, kind, closed)),
@@ -518,7 +699,7 @@ impl Sketch {
             let seg = Seg { entity, kind };
             let (first, last) = match kind {
                 SegKind::Line { .. } => (0.0, 1.0),
-                SegKind::Arc { a0, a1, .. } => (a0, a1),
+                SegKind::Arc { a0, a1, .. } | SegKind::Ellipse { a0, a1, .. } => (a0, a1),
             };
             for (p, t) in [(seg.start(), first), (seg.end(), last)] {
                 points.push(p);
@@ -564,6 +745,7 @@ impl Sketch {
             let speed = match kind {
                 SegKind::Line { a, b } => dist(a, b),
                 SegKind::Arc { radius, .. } => radius,
+                SegKind::Ellipse { major, minor, .. } => major.min(minor),
             };
             let near = 4.0 * JOIN / speed;
             let mut stops: Vec<(f64, usize)> = Vec::new();
@@ -583,7 +765,7 @@ impl Sketch {
                     stops.pop();
                 }
                 stops.push((stops[0].0 + TAU, stops[0].1));
-            } else if let (SegKind::Arc { a1, .. }, Some(last)) = (kind, stops.last_mut()) {
+            } else if let (SegKind::Arc { a1, .. } | SegKind::Ellipse { a1, .. }, Some(last)) = (kind, stops.last_mut()) {
                 last.0 = a1;
             } else if let Some(last) = stops.last_mut() {
                 last.0 = 1.0;
@@ -597,6 +779,7 @@ impl Sketch {
                 let seg_kind = match kind {
                     SegKind::Line { .. } => SegKind::Line { a: points[n0], b: points[n1] },
                     SegKind::Arc { center, radius, .. } => SegKind::Arc { center, radius, a0: t0, a1: t1 },
+                    SegKind::Ellipse { center, x, major, minor, .. } => SegKind::Ellipse { center, x, major, minor, a0: t0, a1: t1 },
                 };
                 pieces.push(Piece { curve: c, start: t0, seg: Seg { entity, kind: seg_kind }, from: n0, to: n1 });
             }
@@ -746,9 +929,8 @@ impl Sketch {
             let (entity, kind, _) = curves[c];
             let group = parent.len();
             parent.push(group);
-            let SegKind::Arc { radius, .. } = kind else { continue };
-            let area = PI * radius * radius;
             let seg = Seg { entity, kind };
+            let area = Loop { segs: vec![seg] }.signed_area();
             if area < MIN_AREA {
                 ignored.push(Ignored { entity, whole: true, why: WhyIgnored::NoArea, pieces: vec![seg] });
                 continue;

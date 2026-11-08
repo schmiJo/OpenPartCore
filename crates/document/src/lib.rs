@@ -22,6 +22,7 @@ use coreshape::build::{
 use coreshape::error::{Error, Result};
 use coreshape::math::*;
 use coreshape::profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
+use coreshape::spline::Spline;
 use coreshape::topo::{Body, FaceTag};
 use coreshape::tweak::{draft, offset, shell};
 pub use coreshape_sketch::expr::{self, Env, Expr};
@@ -1465,8 +1466,8 @@ fn wire_from_loop(l: &coreshape_sketch::Loop) -> Wire {
     let joint = |i: usize| -> Vec2 {
         let (s, next) = (&l.segs[i], &l.segs[(i + 1) % n]);
         let p = match (s.kind, next.kind) {
-            (SegKind::Arc { .. }, _) => s.end(),
-            (_, SegKind::Arc { .. }) => next.start(),
+            (SegKind::Arc { .. } | SegKind::Ellipse { .. }, _) => s.end(),
+            (_, SegKind::Arc { .. } | SegKind::Ellipse { .. }) => next.start(),
             _ => s.end(),
         };
         v2(p[0], p[1])
@@ -1487,6 +1488,16 @@ fn wire_from_loop(l: &coreshape_sketch::Loop) -> Wire {
                     segs.push(Seg { geom: SegGeom::Arc { center, radius, a0: middle, a1 }, id });
                 } else {
                     segs.push(Seg { geom: SegGeom::Arc { center, radius, a0, a1 }, id });
+                }
+            }
+            // An ellipse is exactly a rational spline, which is how the kernel sweeps one.
+            SegKind::Ellipse { center, x, major, minor, a0, a1 } => {
+                let (at, along, across) = (v3(center[0], center[1], 0.0), v3(x[0], x[1], 0.0), v3(-x[1], x[0], 0.0));
+                match Spline::ellipse_arc(at, along, across, major, minor, a0, a1) {
+                    Ok(spline) => segs.push(Seg { geom: SegGeom::Spline(Arc::new(spline)), id }),
+                    // Its numbers have already been through the solver, so this means something absurd
+                    // like an overflow. An empty segment gets refused with a reason when it's used.
+                    Err(_) => segs.push(Seg { geom: SegGeom::Line { a: v2(center[0], center[1]), b: v2(center[0], center[1]) }, id }),
                 }
             }
         }

@@ -882,3 +882,130 @@ fn measuring_every_kind_of_dimension() {
     assert!(s.measure_rule(&Rule::Vertical { a: l.whole(), b: None }).is_err());
     assert!(s.measure_rule(&Rule::Radius { of: l, value: zero() }).is_err());
 }
+
+// ----- Ellipses -----
+
+#[test]
+fn an_ellipse_has_five_freedoms_and_dimensions_take_them() {
+    let mut s = Sketch::new();
+    let e = s.ellipse([1.0, 2.0], [11.0, 3.0], 4.0);
+    assert_eq!(s.solve().unwrap().analysis.dof, 5);
+    s.constrain(Rule::Coincident { a: e.center(), b: ORIGIN.whole() });
+    s.constrain(Rule::Horizontal { a: e.center(), b: Some(e.major()) });
+    let major = s.constrain(Rule::MajorRadius { of: e, value: 20.0.into() });
+    let minor = s.constrain(Rule::MinorRadius { of: e, value: 7.0.into() });
+    let solved = s.solve().unwrap();
+    assert_eq!(solved.analysis.dof, 0);
+    match solved.sketch.entity(e).unwrap().geometry {
+        Geometry::Ellipse { center, major, minor } => {
+            assert!(center[0].abs() < 1e-9 && center[1].abs() < 1e-9);
+            assert!((major[0] - 20.0).abs() < 1e-9 && major[1].abs() < 1e-9);
+            assert!((minor - 7.0).abs() < 1e-12);
+        }
+        _ => panic!(),
+    }
+    assert!((solved.sketch.measure(major).unwrap() - 20.0).abs() < 1e-9);
+    assert!((solved.sketch.measure(minor).unwrap() - 7.0).abs() < 1e-9);
+    assert!(violations(&solved.sketch, 1e-8).is_empty());
+}
+
+#[test]
+fn a_point_on_an_ellipse_lands_on_it() {
+    let mut s = Sketch::new();
+    let e = s.ellipse([0.0, 0.0], [10.0, 0.0], 5.0);
+    s.fix(e).unwrap();
+    let p = s.point(3.0, 9.0);
+    s.constrain(Rule::Coincident { a: p.whole(), b: e.whole() });
+    s.constrain(Rule::Vertical { a: p.whole(), b: None }.clone());
+    // That's a line form on a point, which is refused rather than misread.
+    assert!(s.solve().is_err());
+    let mut s = Sketch::new();
+    let e = s.ellipse([0.0, 0.0], [10.0, 0.0], 5.0);
+    s.fix(e).unwrap();
+    let p = s.point(3.0, 9.0);
+    let helper = s.point(6.0, -40.0);
+    s.fix(helper).unwrap();
+    s.constrain(Rule::Coincident { a: p.whole(), b: e.whole() });
+    s.constrain(Rule::Vertical { a: p.whole(), b: Some(helper.whole()) });
+    let solved = s.solve().unwrap();
+    assert_eq!(solved.analysis.dof, 0);
+    match solved.sketch.entity(p).unwrap().geometry {
+        // x = 6 on x^2/100 + y^2/25 = 1.
+        Geometry::Point { at } => assert!((at[0] - 6.0).abs() < 1e-9 && (at[1] - 4.0).abs() < 1e-9, "{at:?}"),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn lines_and_arcs_are_tangent_to_an_ellipse() {
+    let mut s = Sketch::new();
+    let e = s.ellipse([0.0, 0.0], [10.0, 0.0], 5.0);
+    s.fix(e).unwrap();
+    // Horizontal and tangent, not touching at an end: it has to be at y = 5.
+    let top = s.line([-3.0, 6.0], [3.0, 6.5]);
+    s.constrain(Rule::Horizontal { a: top.whole(), b: None });
+    s.constrain(Rule::Tangent { a: top, b: e });
+    let solved = s.solve().unwrap();
+    match solved.sketch.entity(top).unwrap().geometry {
+        Geometry::Line { start, end } => assert!((start[1] - 5.0).abs() < 1e-9 && (end[1] - 5.0).abs() < 1e-9, "{start:?} {end:?}"),
+        _ => panic!(),
+    }
+    assert!(violations(&solved.sketch, 1e-8).is_empty(), "{:?}", violations(&solved.sketch, 1e-8));
+
+    // From a point on it: the line's direction follows the ellipse there.
+    let mut s = Sketch::new();
+    let e = s.ellipse([0.0, 0.0], [10.0, 0.0], 5.0);
+    s.fix(e).unwrap();
+    let l = s.line([6.0, 4.2], [0.0, 8.0]);
+    s.constrain(Rule::Coincident { a: l.start(), b: e.whole() });
+    s.constrain(Rule::Tangent { a: l, b: e });
+    let solved = s.solve().unwrap();
+    assert!(violations(&solved.sketch, 1e-8).is_empty(), "{:?}", violations(&solved.sketch, 1e-8));
+    match solved.sketch.entity(l).unwrap().geometry {
+        Geometry::Line { start, end } => {
+            // The tangent at (x, y) runs along (-y / 25, x / 100).
+            let (t0, t1) = (-start[1] / 25.0, start[0] / 100.0);
+            let cross = t0 * (end[1] - start[1]) - t1 * (end[0] - start[0]);
+            assert!(cross.abs() < 1e-8, "{cross}");
+        }
+        _ => panic!(),
+    }
+
+    // Two curves touching need a point they share.
+    let mut s = Sketch::new();
+    let e = s.ellipse([0.0, 0.0], [10.0, 0.0], 5.0);
+    let c = s.circle([0.0, 8.0], 3.0);
+    s.constrain(Rule::Tangent { a: c, b: e });
+    assert_eq!(s.solve().unwrap_err().kind, ErrorKind::Invalid);
+}
+
+#[test]
+fn an_elliptical_arc_keeps_its_ends_on_its_ellipse() {
+    let mut s = Sketch::new();
+    let a = s.elliptical_arc([0.0, 0.0], [10.0, 0.0], 4.0, 20.0, 150.0);
+    assert_eq!(s.solve().unwrap().analysis.dof, 7);
+    s.constrain(Rule::MajorRadius { of: a, value: 14.0.into() });
+    let solved = s.solve().unwrap();
+    assert!(violations(&solved.sketch, 1e-8).is_empty(), "{:?}", violations(&solved.sketch, 1e-8));
+    // Dragging one end around keeps it on.
+    let (dragged, _) = solved.sketch.drag(Grab::Point(a.end()), [-9.0, 6.0]).unwrap();
+    assert!(violations(&dragged, 1e-8).is_empty(), "{:?}", violations(&dragged, 1e-8));
+    // And fixing the whole thing leaves nothing free.
+    let mut f = Sketch::new();
+    let b = f.elliptical_arc([0.0, 0.0], [10.0, 0.0], 4.0, 20.0, 150.0);
+    f.fix(b).unwrap();
+    assert_eq!(f.solve().unwrap().analysis.dof, 0);
+}
+
+#[test]
+fn ellipses_save_and_load() {
+    let mut s = Sketch::new();
+    let e = s.ellipse([1.0, 2.0], [11.0, 3.0], 4.0);
+    let a = s.elliptical_arc([0.0, 0.0], [10.0, 0.0], 4.0, 20.0, 150.0);
+    s.constrain(Rule::MajorRadius { of: e, value: 12.0.into() });
+    s.constrain(Rule::MinorRadius { of: a, value: 3.0.into() });
+    s.constrain(Rule::Horizontal { a: a.center(), b: Some(a.major()) });
+    let back = Sketch::load_text(&s.save_text()).unwrap();
+    assert_eq!(back, s);
+    assert_eq!(Ref::parse("7.major").unwrap(), EntityId(7).major());
+}

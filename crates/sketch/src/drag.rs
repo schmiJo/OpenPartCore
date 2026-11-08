@@ -92,6 +92,10 @@ impl DragSession {
                 (Geometry::Circle { .. } | Geometry::Arc { .. }, Part::Center) => 0,
                 (Geometry::Arc { .. }, Part::Start) => 3,
                 (Geometry::Arc { .. }, Part::End) => 5,
+                (Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. }, Part::Center) => 0,
+                (Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. }, Part::Major) => 2,
+                (Geometry::EllipticalArc { .. }, Part::Start) => 5,
+                (Geometry::EllipticalArc { .. }, Part::End) => 7,
                 _ => return Err(bad(format!("{} is not a point that can be grabbed", r.name()))),
             };
             Ok([b + offset, b + offset + 1])
@@ -117,6 +121,13 @@ impl DragSession {
                     Geometry::Circle { .. } | Geometry::Arc { .. } => {
                         soft_vars.push(b + 2);
                         targets.push(Target::RadiusTo { cx: b, cy: b + 1 });
+                    }
+                    // Grabbing an ellipse by its edge moves the whole thing, like grabbing a line.
+                    Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {
+                        for k in 0..4 {
+                            soft_vars.push(b + k);
+                            targets.push(Target::Value(x[(b + k) as usize]));
+                        }
                     }
                     Geometry::Point { .. } => {
                         soft_vars.push(b);
