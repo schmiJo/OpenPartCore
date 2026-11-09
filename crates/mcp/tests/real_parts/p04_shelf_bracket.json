@@ -1,0 +1,29 @@
+{
+  "name": "Shelf bracket",
+  "kind": "bracket",
+  "parameters": {"a": 120, "b": 120, "t": 5, "f": 30, "ft": 5, "r": 18, "hole": 7, "c": 1},
+  "steps": [
+    {"id": 1, "name": "Web", "type": "sketch", "plane": {"origin": [0, "t / 2", 0], "z": [0, -1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "polygon", "points": [[0, 0], ["a", 0], [0, "b"]]}, "holes": [{"type": "circle", "cx": 35, "cy": 35, "r": "r"}]}]},
+    {"id": 2, "name": "Web solid", "type": "extrude", "sketch": 1, "length": "t"},
+    {"id": 3, "name": "Bottom flange outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": 0, "y": "-f / 2", "w": "a", "h": "f"}}]},
+    {"id": 4, "name": "Bottom flange", "type": "extrude", "sketch": 3, "length": "ft"},
+    {"id": 5, "name": "Back flange outline", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]},
+     "regions": [{"outer": {"type": "rect", "x": "-f / 2", "y": 0, "w": "f", "h": "b"}}]},
+    {"id": 6, "name": "Back flange", "type": "extrude", "sketch": 5, "length": "ft"},
+    {"id": 7, "name": "Holes in the bottom flange", "type": "sketch", "plane": {"origin": [0, 0, "ft"], "on_face": "f4:end"},
+     "regions": [{"outer": {"type": "circle", "cx": 70, "cy": 9, "r": "hole / 2"}}, {"outer": {"type": "circle", "cx": 70, "cy": -9, "r": "hole / 2"}}]},
+    {"id": 8, "name": "Cut them", "type": "extrude", "sketch": 7, "start": "-ft - 1", "length": "ft + 2", "mode": "remove"},
+    {"id": 9, "name": "Holes in the back flange", "type": "sketch", "plane": {"origin": ["ft", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0], "on_face": "f6:end"},
+     "regions": [{"outer": {"type": "circle", "cx": 9, "cy": 70, "r": "hole / 2"}}, {"outer": {"type": "circle", "cx": -9, "cy": 70, "r": "hole / 2"}}]},
+    {"id": 10, "name": "Cut them", "type": "extrude", "sketch": 9, "start": "-ft - 1", "length": "ft + 2", "mode": "remove"},
+    {"expect": {
+      "volume": "a * f * ft + b * f * ft - ft * f * ft + t * (0.5 * (a * (1 - ft / b) - ft) * (b * (1 - ft / a) - ft) - pi * r^2) - 4 * pi * (hole / 2)^2 * ft",
+      "genus": [5]}},
+    {"id": 11, "name": "Ease the sloped edge", "type": "chamfer", "edges": {"any": [{"between": ["f2:side.1", "f2:start"]}, {"between": ["f2:side.1", "f2:end"]}]}, "distance": "c"}
+  ],
+  "always": {"genus": [5],
+    "volume": "a * f * ft + b * f * ft - ft * f * ft + t * (0.5 * (a * (1 - ft / b) - ft) * (b * (1 - ft / a) - ft) - pi * r^2) - 4 * pi * (hole / 2)^2 * ft - 2 * (c^2 / 2) * sqrt(2) * (a - c / 3 * sqrt(2) - 2 * ft)",
+    "bounds": [[0, "-f / 2", 0], ["a", "f / 2", "b"]]},
+  "changes": [{"set": {"t": 6}}, {"set": {"f": 36}}, {"set": {"r": 14}}]
+}

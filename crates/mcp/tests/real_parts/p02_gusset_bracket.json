@@ -1,0 +1,25 @@
+{
+  "name": "Gusset bracket",
+  "kind": "bracket",
+  "parameters": {"w": 60, "a": 80, "b": 70, "t": 8, "g": 6, "r": 3, "hole": 9},
+  "steps": [
+    {"id": 1, "name": "Plate outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": 0, "y": "-w / 2", "w": "a", "h": "w"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "t"},
+    {"id": 3, "name": "Upright outline", "type": "sketch", "plane": {"origin": [0, "w / 2", 0], "z": [0, -1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "rect", "x": 0, "y": "t", "w": "t", "h": "b - t"}}]},
+    {"id": 4, "name": "Upright", "type": "extrude", "sketch": 3, "length": "w"},
+    {"expect": {"volume": "a * w * t + t * (b - t) * w", "genus": [0]}},
+    {"id": 5, "name": "Rib outline", "type": "sketch", "plane": {"origin": [0, "g / 2", 0], "z": [0, -1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "polygon", "points": [["t", "t"], ["a - 10", "t"], ["t", "b - 10"]]}}]},
+    {"id": 6, "name": "Rib", "type": "extrude", "sketch": 5, "length": "g"},
+    {"expect": {"volume": "a * w * t + t * (b - t) * w + 0.5 * (a - 10 - t) * (b - 10 - t) * g", "genus": [0]}},
+    {"id": 7, "name": "Plate holes", "type": "sketch", "plane": {"origin": [0, 0, "t"], "on_face": "f2:end"},
+     "regions": [{"outer": {"type": "circle", "cx": 30, "cy": "12 - w / 2", "r": "hole / 2"}, "repeat": {"type": "grid", "nx": 2, "ny": 2, "dx": "a - 42", "dy": "w - 24"}}]},
+    {"id": 8, "name": "Cut plate holes", "type": "extrude", "sketch": 7, "start": "-t - 1", "length": "t + 2", "mode": "remove"},
+    {"expect": {"volume": "a * w * t + t * (b - t) * w + 0.5 * (a - 10 - t) * (b - 10 - t) * g - 4 * pi * (hole / 2)^2 * t", "genus": [4]}},
+    {"id": 9, "name": "Rib root on the plate", "type": "fillet", "edges": {"any": [{"between": ["f6:start", "f2:end"]}, {"between": ["f6:end", "f2:end"]}]}, "radius": "r"},
+    {"id": 10, "name": "Rib root on the upright", "type": "fillet", "edges": {"any": [{"between": ["f6:start", "f4:side.1"]}, {"between": ["f6:end", "f4:side.1"]}]}, "radius": "r"}
+  ],
+  "always": {"genus": [4], "bounds": [[0, "-w / 2", 0], ["a", "w / 2", "b"]]},
+  "changes": [{"set": {"t": 10}}, {"set": {"g": 8}}, {"set": {"w": 70}}]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "Blind flange",
+  "kind": "flange",
+  "parameters": {"OD": 140, "T": 16, "RF": 45, "RFh": 2, "n": 6, "PCD": 110, "hd": 13, "c": 1.5, "tap": 8.5},
+  "steps": [
+    {"id": 1, "name": "Disc outline", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "OD / 2"}}]},
+    {"id": 2, "name": "Disc", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Raised face outline", "type": "sketch", "plane": {"origin": [0, 0, "T"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "circle", "r": "RF"}}]},
+    {"id": 4, "name": "Raised face", "type": "extrude", "sketch": 3, "length": "RFh"},
+    {"id": 5, "name": "Bolt holes", "type": "sketch", "plane": {"origin": [0, 0, "T"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "circle", "r": "hd / 2"}, "repeat": {"type": "circular", "count": "n", "radius": "PCD / 2", "start_degrees": 30}}]},
+    {"id": 6, "name": "Cut them", "type": "extrude", "sketch": 5, "start": "-T - 1", "length": "T + 2", "mode": "remove"},
+    {"id": 7, "name": "Lifting eye", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "tap / 2"}}]},
+    {"id": 8, "name": "Blind tap", "type": "extrude", "sketch": 7, "start": -1, "length": 11, "mode": "remove"},
+    {"id": 9, "name": "Rim", "type": "chamfer", "edges": {"between": ["f2:end", "f2:side.0"]}, "distance": "c"},
+    {"id": 10, "name": "Raised face's edge", "type": "chamfer", "edges": {"between": ["f4:end", "f4:side.0"]}, "distance": 0.5}
+  ],
+  "always": {
+    "volume": "pi * (OD / 2)^2 * T + pi * RF^2 * RFh - n * pi * (hd / 2)^2 * T - pi * (tap / 2)^2 * 10 - 2 * pi * (OD / 2 - c / 3) * c^2 / 2 - 2 * pi * (RF - 0.5 / 3) * 0.5^2 / 2",
+    "genus": ["n"],
+    "bounds": [["-OD / 2", "-OD / 2", 0], ["OD / 2", "OD / 2", "T + RFh"]]
+  },
+  "changes": [{"set": {"n": 8}}, {"set": {"T": 20}}, {"set": {"RF": 40}}]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "Morse taper arbor",
+  "kind": "shaft",
+  "parameters": {"r0": 6, "r1": 8.9, "L": 70, "cr": 12, "ch": 15, "flat": 3.5, "fl": 14},
+  "steps": [
+    {"id": 1, "name": "Half section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [[0, 0], ["r0", 0], ["r1", "L"], ["cr", "L"], ["cr", "L + ch"], [0, "L + ch"]]}}]},
+    {"id": 2, "name": "Turned", "type": "revolve", "sketch": 1},
+    {"expect": {"volume": "pi * L / 3 * (r0^2 + r0 * r1 + r1^2) + pi * cr^2 * ch", "genus": [0]}},
+    {"id": 3, "name": "Tang flat", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "rect", "x": "flat", "y": -10, "w": 8, "h": 20}}]},
+    {"id": 4, "name": "Cut it", "type": "extrude", "sketch": 3, "length": "fl + 1", "mode": "remove"},
+    {"id": 5, "name": "Flat on the other side", "type": "mirror", "of": [4], "normal": [1, 0, 0]},
+    {"id": 6, "name": "Center", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [[0, "L + ch"], [2.5, "L + ch"], [0, "L + ch - 4"]]}}]},
+    {"id": 7, "name": "Drill it", "type": "revolve", "sketch": 6, "mode": "remove"},
+    {"id": 8, "name": "Collar's edge", "type": "chamfer", "edges": {"between": ["f2:side.3", "f2:side.4"]}, "distance": 1}
+  ],
+  "always": {"genus": [0], "bounds": [["-cr", "-cr", 0], ["cr", "cr", "L + ch"]]},
+  "changes": [{"set": {"L": 80}}, {"set": {"fl": 18}}]
+}

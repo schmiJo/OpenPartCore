@@ -1,0 +1,20 @@
+{
+  "name": "Hinge leaf",
+  "kind": "hinge",
+  "parameters": {"w": 30, "t": 2, "R": 4, "pin": 3, "kl": 16, "rc": 4, "hole": 4.5, "cs": 8},
+  "steps": [
+    {"id": 1, "name": "Plate outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": 0, "y": 0, "w": "w", "h": "5 * kl"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "t"},
+    {"id": 3, "name": "Knuckle, tangent to the plate's underside", "type": "sketch", "plane": {"origin": [0, "kl", 0], "z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "R", "r": "R"}}]},
+    {"id": 4, "name": "Knuckle solid", "type": "extrude", "sketch": 3, "length": "kl"},
+    {"id": 5, "name": "All three", "type": "pattern", "of": [4], "direction": [0, 1, 0], "count": 3, "spacing": "2 * kl"},
+    {"id": 6, "name": "Pin hole", "type": "sketch", "plane": {"origin": [0, "5 * kl + 1", 0], "z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "R", "r": "pin / 2"}}]},
+    {"id": 7, "name": "Drill it", "type": "extrude", "sketch": 6, "length": "5 * kl + 2", "mode": "remove"},
+    {"id": 8, "name": "Plate's corners", "type": "fillet", "edges": {"any": [{"between": ["f2:side.0", "f2:side.1"]}, {"between": ["f2:side.1", "f2:side.2"]}]}, "radius": "rc"},
+    {"id": 9, "name": "Screw holes", "type": "sketch", "plane": {"origin": [0, 0, "t"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "circle", "cx": "w - 10", "cy": "kl", "r": "hole / 2"}, "repeat": {"type": "grid", "nx": 1, "ny": 3, "dx": 0, "dy": "1.5 * kl"}}]},
+    {"id": 10, "name": "Cut them", "type": "extrude", "sketch": 9, "start": "-t - 1", "length": "t + 2", "mode": "remove"},
+    {"id": 11, "name": "Countersinks", "type": "chamfer", "edges": {"both": [{"on_face": "f2:end"}, {"radius": "hole / 2"}]}, "distance": 0.8}
+  ],
+  "always": {"genus": [6], "bounds": [["-R", 0, 0], ["w", "5 * kl", "2 * R"]]},
+  "changes": [{"set": {"w": 40}}, {"set": {"kl": 20}}]
+}

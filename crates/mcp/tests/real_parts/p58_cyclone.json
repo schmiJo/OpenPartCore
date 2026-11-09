@@ -1,0 +1,17 @@
+{
+  "name": "Cyclone body with a tangential inlet",
+  "kind": "tangent",
+  "parameters": {"R": 50, "H": 120, "w": 3, "ri": 15, "zi": 90, "Li": 90},
+  "steps": [
+    {"id": 1, "name": "Body", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "R"}}]},
+    {"id": 2, "name": "Body solid", "type": "extrude", "sketch": 1, "length": "H"},
+    {"id": 3, "name": "Inlet, its outside tangent to the body's", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": "R - ri", "cy": "zi", "r": "ri"}}]},
+    {"id": 4, "name": "Inlet solid", "type": "extrude", "sketch": 3, "length": "Li"},
+    {"id": 5, "name": "Bore", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "r": "R - w"}}]},
+    {"id": 6, "name": "Cut it", "type": "extrude", "sketch": 5, "length": "H + 2", "mode": "remove"},
+    {"id": 7, "name": "Inlet's bore, tangent to the body's", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": "R - ri", "cy": "zi", "r": "ri - w"}}]},
+    {"id": 8, "name": "Cut it", "type": "extrude", "sketch": 7, "length": "Li + 1", "mode": "remove"}
+  ],
+  "always": {"genus": [2], "bounds": [["-R", "-R", 0], ["Li", "R", "H"]]},
+  "changes": [{"set": {"H": 140}}, {"set": {"Li": 110}}]
+}

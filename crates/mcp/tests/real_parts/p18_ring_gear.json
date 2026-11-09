@@ -1,0 +1,17 @@
+{
+  "name": "Internal ring gear",
+  "kind": "gear",
+  "parameters": {"z": 36, "m": 2.5, "OD": 120, "F": 15, "w": 3.2, "d": 5.5},
+  "steps": [
+    {"id": 1, "name": "Ring", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "OD / 2"}, "holes": [{"type": "circle", "r": "m * (z - 2) / 2"}]}]},
+    {"id": 2, "name": "Ring solid", "type": "extrude", "sketch": 1, "length": "F"},
+    {"id": 3, "name": "Space between two teeth", "type": "sketch", "plane": {"origin": [0, 0, -1]},
+     "regions": [{"outer": {"type": "polygon", "points": [["m * (z - 2) / 2 - 1", "-w / 2 - 0.5"], ["m * (z - 2) / 2 + d", "-w / 2 + 0.6"], ["m * (z - 2) / 2 + d", "w / 2 - 0.6"], ["m * (z - 2) / 2 - 1", "w / 2 + 0.5"]]}}]},
+    {"id": 4, "name": "Cut it", "type": "extrude", "sketch": 3, "length": "F + 2", "mode": "remove"},
+    {"id": 5, "name": "All the teeth", "type": "pattern", "of": [4], "count": "z"},
+    {"id": 6, "name": "Mounting holes", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": 3.5}, "repeat": {"type": "circular", "count": 6, "radius": 53}}]},
+    {"id": 7, "name": "Cut them", "type": "extrude", "sketch": 6, "start": -1, "length": "F + 2", "mode": "remove"}
+  ],
+  "always": {"genus": [7], "bounds": [["-OD / 2", "-OD / 2", 0], ["OD / 2", "OD / 2", "F"]]},
+  "changes": [{"set": {"F": 20}}, {"set": {"z": 32}}]
+}

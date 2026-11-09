@@ -1,0 +1,20 @@
+{
+  "name": "Pin fin heat sink",
+  "kind": "thermal",
+  "parameters": {"A": 50, "base": 4, "r": 1.5, "h": 15, "n": 8, "pitch": 6, "c": 0.3},
+  "steps": [
+    {"id": 1, "name": "Base outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-A / 2", "y": "-A / 2", "w": "A", "h": "A"}}]},
+    {"id": 2, "name": "Base", "type": "extrude", "sketch": 1, "length": "base"},
+    {"id": 3, "name": "Pins", "type": "sketch", "plane": {"origin": [0, 0, "base"], "on_face": "f2:end"},
+     "regions": [{"outer": {"type": "circle", "cx": "-(n - 1) * pitch / 2", "cy": "-(n - 1) * pitch / 2", "r": "r"}, "repeat": {"type": "grid", "nx": "n", "ny": "n", "dx": "pitch", "dy": "pitch"}}]},
+    {"id": 4, "name": "Pin solids", "type": "extrude", "sketch": 3, "length": "h"},
+    {"expect": {"volume": "A^2 * base + n^2 * pi * r^2 * h", "genus": [0]}},
+    {"id": 5, "name": "Pin tips", "type": "chamfer", "edges": {"both": [{"radius": "r"}, {"in_box": [["-A", "-A", "base + h - 0.01"], ["A", "A", "base + h + 0.01"]]}]}, "distance": "c"}
+  ],
+  "always": {
+    "volume": "A^2 * base + n^2 * pi * r^2 * h - n^2 * 2 * pi * (r - c / 3) * c^2 / 2",
+    "genus": [0],
+    "bounds": [["-A / 2", "-A / 2", 0], ["A / 2", "A / 2", "base + h"]]
+  },
+  "changes": [{"set": {"h": 20}}, {"set": {"n": 6}}]
+}

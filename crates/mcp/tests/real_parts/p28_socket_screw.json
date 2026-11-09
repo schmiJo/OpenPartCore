@@ -1,0 +1,20 @@
+{
+  "name": "Socket head cap screw M6",
+  "kind": "fastener",
+  "parameters": {"r": 3, "L": 20, "R": 5, "H": 6, "AF": 5, "sd": 3, "n": 30},
+  "steps": [
+    {"id": 1, "name": "Half section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [[0, 0], ["r", 0], ["r", "L"], ["R", "L"], ["R", "L + H"], [0, "L + H"]]}}]},
+    {"id": 2, "name": "Turned", "type": "revolve", "sketch": 1},
+    {"id": 3, "name": "Lead-in", "type": "chamfer", "edges": {"between": ["f2:side.0", "f2:side.1"]}, "distance": 0.6},
+    {"id": 4, "name": "Head's edge", "type": "chamfer", "edges": {"between": ["f2:side.3", "f2:side.4"]}, "distance": 0.4},
+    {"id": 5, "name": "Hexagon socket", "type": "sketch", "plane": {"origin": [0, 0, "L + H"], "on_face": "f2:side.4"}, "regions": [{"outer": {"type": "polygon", "points": [
+      ["AF / sqrt(3) * cos(0)", "AF / sqrt(3) * sin(0)"], ["AF / sqrt(3) * cos(60)", "AF / sqrt(3) * sin(60)"], ["AF / sqrt(3) * cos(120)", "AF / sqrt(3) * sin(120)"],
+      ["AF / sqrt(3) * cos(180)", "AF / sqrt(3) * sin(180)"], ["AF / sqrt(3) * cos(240)", "AF / sqrt(3) * sin(240)"], ["AF / sqrt(3) * cos(300)", "AF / sqrt(3) * sin(300)"]]}}]},
+    {"id": 6, "name": "Cut socket", "type": "extrude", "sketch": 5, "start": "-sd", "length": "sd + 1", "mode": "remove"},
+    {"id": 7, "name": "Knurl groove", "type": "sketch", "plane": {"origin": [0, 0, "L + H + 1"], "z": [0, 0, -1], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "polygon", "points": [["R - 0.3", 0], ["R + 0.3", -0.35], ["R + 0.3", 0.35]]}}]},
+    {"id": 8, "name": "Cut it", "type": "extrude", "sketch": 7, "length": "H + 2", "mode": "remove"},
+    {"id": 9, "name": "All round the head", "type": "pattern", "of": [8], "count": "n"}
+  ],
+  "always": {"genus": [0], "bounds": [["-R", "-R", 0], ["R", "R", "L + H"]]},
+  "changes": [{"set": {"L": 30}}, {"set": {"n": 24}}]
+}

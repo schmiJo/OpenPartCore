@@ -1,0 +1,19 @@
+{
+  "name": "Rabbet cut level with where a fillet starts",
+  "kind": "tangent",
+  "parameters": {"L": 60, "W": 40, "T": 20, "r": 5, "n": 15},
+  "steps": [
+    {"id": 1, "name": "Footprint", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": 0, "y": 0, "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Block", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Long top edges", "type": "fillet", "edges": {"any": [{"between": ["f2:end", "f2:side.0"]}, {"between": ["f2:end", "f2:side.2"]}]}, "radius": "r"},
+    {"expect": {"volume": "L * (W * T - 2 * (1 - pi / 4) * r^2)"}},
+    {"id": 4, "name": "Rabbet, its floor level with the fillets' lower edges", "type": "sketch", "plane": {"origin": [0, 0, "T - r"]}, "regions": [{"outer": {"type": "rect", "x": -1, "y": -1, "w": "n + 1", "h": "W + 2"}}]},
+    {"id": 5, "name": "Cut it", "type": "extrude", "sketch": 4, "length": "r + 1", "mode": "remove"}
+  ],
+  "always": {
+    "volume": "L * (W * T - 2 * (1 - pi / 4) * r^2) - n * (W * r - 2 * (1 - pi / 4) * r^2)",
+    "genus": [0],
+    "bounds": [[0, 0, 0], ["L", "W", "T"]]
+  },
+  "changes": [{"set": {"r": 4}}, {"set": {"n": 20}}, {"set": {"T": 25}}]
+}

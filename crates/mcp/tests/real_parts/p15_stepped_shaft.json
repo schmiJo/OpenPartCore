@@ -1,0 +1,21 @@
+{
+  "name": "Stepped shaft with keyway",
+  "kind": "shaft",
+  "parameters": {"r1": 10, "r2": 15, "r3": 20, "r4": 12.5, "z1": 30, "z2": 90, "z3": 105, "z4": 150, "kw": 6, "kl": 30, "kd": 3.5},
+  "steps": [
+    {"id": 1, "name": "Half section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [[0, 0], ["r1", 0], ["r1", "z1"], ["r2", "z1"], ["r2", "z2"], ["r3", "z2"], ["r3", "z3"], ["r4", "z3"], ["r4", "z4"], [0, "z4"]]}}]},
+    {"id": 2, "name": "Turned", "type": "revolve", "sketch": 1},
+    {"expect": {"volume": "pi * (r1^2 * z1 + r2^2 * (z2 - z1) + r3^2 * (z3 - z2) + r4^2 * (z4 - z3))", "genus": [0]}},
+    {"id": 3, "name": "Shoulder", "type": "fillet", "edges": {"between": ["f2:side.2", "f2:side.3"]}, "radius": 1.5},
+    {"id": 4, "name": "Shoulder after the collar", "type": "fillet", "edges": {"between": ["f2:side.6", "f2:side.7"]}, "radius": 2},
+    {"id": 5, "name": "Lower end", "type": "chamfer", "edges": {"between": ["f2:side.0", "f2:side.1"]}, "distance": 1},
+    {"id": 6, "name": "Upper end", "type": "chamfer", "edges": {"between": ["f2:side.7", "f2:side.8"]}, "distance": 1.5},
+    {"id": 7, "name": "Keyway outline, on a plane tangent to the shaft", "type": "sketch", "plane": {"origin": ["r2", 0, "(z1 + z2) / 2"], "z": [-1, 0, 0], "x": [0, 1, 0]},
+     "regions": [{"outer": {"type": "rounded_rect", "w": "kw", "h": "kl", "r": "kw / 2"}}]},
+    {"id": 8, "name": "Keyway", "type": "extrude", "sketch": 7, "length": "kd", "mode": "remove"},
+    {"id": 9, "name": "Center hole", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [[0, "z4"], [3, "z4"], [0, "z4 - 5"]]}}]},
+    {"id": 10, "name": "Drill it", "type": "revolve", "sketch": 9, "mode": "remove"}
+  ],
+  "always": {"genus": [0], "bounds": [["-r3", "-r3", 0], ["r3", "r3", "z4"]]},
+  "changes": [{"set": {"kl": 40}}, {"set": {"r2": 16}}, {"set": {"z4": 170}}]
+}

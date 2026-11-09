@@ -1,0 +1,26 @@
+{
+  "name": "Flanged pipe elbow",
+  "kind": "pipe",
+  "parameters": {"OD": 40, "ID": 30, "leg": 30, "bend": 60, "FD": 70, "ft": 8, "hole": 7, "pcd": 54},
+  "steps": [
+    {"id": 1, "name": "Pipe section", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "OD / 2"}, "holes": [{"type": "circle", "r": "ID / 2"}]}]},
+    {"id": 2, "name": "Along the path", "type": "sweep", "sketch": 1, "path": [{"line": "leg"}, {"arc_radius": "bend", "degrees": 90, "toward_degrees": 0}, {"line": "leg"}]},
+    {"expect": {"volume": "pi * ((OD / 2)^2 - (ID / 2)^2) * (2 * leg + pi / 2 * bend)", "genus": [1], "volume_tolerance": 1e-5}},
+    {"id": 3, "name": "First flange", "type": "sketch", "plane": {"origin": [0, 0, "-ft"]}, "regions": [{"outer": {"type": "circle", "r": "FD / 2"}, "holes": [{"type": "circle", "r": "ID / 2"}]}]},
+    {"id": 4, "name": "First flange solid", "type": "extrude", "sketch": 3, "length": "ft"},
+    {"id": 5, "name": "Second flange", "type": "sketch", "plane": {"origin": ["bend + leg", 0, "leg + bend"], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": "FD / 2"}, "holes": [{"type": "circle", "r": "ID / 2"}]}]},
+    {"id": 6, "name": "Second flange solid", "type": "extrude", "sketch": 5, "length": "ft"},
+    {"expect": {"volume": "pi * ((OD / 2)^2 - (ID / 2)^2) * (2 * leg + pi / 2 * bend) + 2 * pi * ((FD / 2)^2 - (ID / 2)^2) * ft", "genus": [1], "volume_tolerance": 1e-5}},
+    {"id": 7, "name": "Holes in the first", "type": "sketch", "plane": {"origin": [0, 0, "-ft - 1"]}, "regions": [{"outer": {"type": "circle", "r": "hole / 2"}, "repeat": {"type": "circular", "count": 4, "radius": "pcd / 2", "start_degrees": 45}}]},
+    {"id": 8, "name": "Cut them", "type": "extrude", "sketch": 7, "length": "ft + 2", "mode": "remove"},
+    {"id": 9, "name": "Holes in the second", "type": "sketch", "plane": {"origin": ["bend + leg - 1", 0, "leg + bend"], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": "hole / 2"}, "repeat": {"type": "circular", "count": 4, "radius": "pcd / 2", "start_degrees": 45}}]},
+    {"id": 10, "name": "Cut them", "type": "extrude", "sketch": 9, "length": "ft + 2", "mode": "remove"}
+  ],
+  "always": {
+    "volume": "pi * ((OD / 2)^2 - (ID / 2)^2) * (2 * leg + pi / 2 * bend) + 2 * pi * ((FD / 2)^2 - (ID / 2)^2) * ft - 8 * pi * (hole / 2)^2 * ft",
+    "volume_tolerance": 1e-5,
+    "genus": [9],
+    "bounds": [["-FD / 2", "-FD / 2", "-ft"], ["bend + leg + ft", "FD / 2", "leg + bend + FD / 2"]]
+  },
+  "changes": [{"set": {"leg": 40}}, {"set": {"bend": 70}}]
+}

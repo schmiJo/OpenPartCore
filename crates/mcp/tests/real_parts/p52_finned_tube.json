@@ -1,0 +1,18 @@
+{
+  "name": "Finned tube",
+  "kind": "thermal",
+  "parameters": {"Ro": 15, "Ri": 12, "L": 120, "RF": 30, "ft": 2, "n": 10, "pitch": 10, "z0": 10},
+  "steps": [
+    {"id": 1, "name": "Tube section", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "Ro"}, "holes": [{"type": "circle", "r": "Ri"}]}]},
+    {"id": 2, "name": "Tube", "type": "extrude", "sketch": 1, "length": "L"},
+    {"id": 3, "name": "Fin, drawn to the tube's own outside", "type": "sketch", "plane": {"origin": [0, 0, "z0"]}, "regions": [{"outer": {"type": "circle", "r": "RF"}, "holes": [{"type": "circle", "r": "Ro"}]}]},
+    {"id": 4, "name": "Fin", "type": "extrude", "sketch": 3, "length": "ft"},
+    {"id": 5, "name": "All the fins", "type": "pattern", "of": [4], "direction": [0, 0, 1], "count": "n", "spacing": "pitch"}
+  ],
+  "always": {
+    "volume": "pi * (Ro^2 - Ri^2) * L + n * ft * pi * (RF^2 - Ro^2)",
+    "genus": [1],
+    "bounds": [["-RF", "-RF", 0], ["RF", "RF", "L"]]
+  },
+  "changes": [{"set": {"n": 8}}, {"set": {"RF": 35}}, {"set": {"ft": 3}}]
+}

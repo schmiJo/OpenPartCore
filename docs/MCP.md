@@ -46,7 +46,7 @@ A body is a part, as in Onshape: one connected solid. A feature acts on all of t
 
 The tools for features always work on a Part Studio: the last one selected, even with an assembly selected. `render` and `export` follow the selected tab, so with an assembly they draw it, with each instance its own colour, and write it as a STEP assembly, or an STL of it all. `body` still means a part of the Part Studio. `document_save`, `document_open` and `export` with `coreshape` take the whole project, which is a plain document if it's one Part Studio.
 
-Every tool that changes an assembly solves it and answers with its state: `freedom`, each instance's pose in `at`, each mate's `values`, and a `failing` on any mate that can't be met. A mate that fails isn't an error, as in Onshape, and neither is a part that's gone from its Part Studio, which comes back under `problems`.
+A new mate brings its first end to the second, and if that's the only mate on it and it leaves a turn free, it comes to rest with its connectors lined up, at an angle of zero. Every tool that changes an assembly solves it and answers with its state: `freedom`, each instance's pose in `at`, each mate's `values`, and a `failing` on any mate that can't be met. A mate that fails isn't an error, as in Onshape, and neither is a part that's gone from its Part Studio, which comes back under `problems`.
 
 ```
 tab_new { "type": "assembly" }

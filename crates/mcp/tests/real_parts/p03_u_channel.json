@@ -1,0 +1,25 @@
+{
+  "name": "U channel with slots",
+  "kind": "bracket",
+  "parameters": {"W": 40, "H": 30, "t": 3, "L": 120, "sw": 8, "sl": 24, "ri": 2, "ro": 5, "pitch": 35},
+  "steps": [
+    {"id": 1, "name": "Section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [[0, 0], ["W", 0], ["W", "H"], ["W - t", "H"], ["W - t", "t"], ["t", "t"], ["t", "H"], [0, "H"]]}}]},
+    {"id": 2, "name": "Channel", "type": "extrude", "sketch": 1, "length": "L"},
+    {"id": 3, "name": "Outer bends", "type": "fillet", "edges": {"any": [{"between": ["f2:side.0", "f2:side.1"]}, {"between": ["f2:side.0", "f2:side.7"]}]}, "radius": "ro"},
+    {"id": 4, "name": "Inner bends", "type": "fillet", "edges": {"any": [{"between": ["f2:side.3", "f2:side.4"]}, {"between": ["f2:side.4", "f2:side.5"]}]}, "radius": "ri"},
+    {"expect": {"volume": "L * (W * H - (W - 2 * t) * (H - t) - 2 * (1 - pi / 4) * ro^2 + 2 * (1 - pi / 4) * ri^2)"}},
+    {"id": 5, "name": "Slot", "type": "sketch", "plane": {"origin": [-1, 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]},
+     "regions": [{"outer": {"type": "rounded_rect", "cx": "H - 10", "cy": 30, "w": "sw", "h": "sl", "r": "sw / 2"}}]},
+    {"id": 6, "name": "Cut slot", "type": "extrude", "sketch": 5, "length": "W + 2", "mode": "remove"},
+    {"id": 7, "name": "More slots", "type": "pattern", "of": [6], "direction": [0, 0, 1], "count": 3, "spacing": "pitch"},
+    {"id": 8, "name": "Floor hole", "type": "sketch", "plane": {"origin": [0, -1, 0], "z": [0, 1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "circle", "cx": "W / 2", "cy": "-L / 2", "r": 4}}]},
+    {"id": 9, "name": "Cut floor hole", "type": "extrude", "sketch": 8, "length": "t + 2", "mode": "remove"}
+  ],
+  "always": {
+    "volume": "L * (W * H - (W - 2 * t) * (H - t) - 2 * (1 - pi / 4) * ro^2 + 2 * (1 - pi / 4) * ri^2) - 6 * t * (sw * sl - (4 - pi) * (sw / 2)^2) - pi * 16 * t",
+    "genus": [7],
+    "bounds": [[0, 0, 0], ["W", "H", "L"]]
+  },
+  "changes": [{"set": {"L": 160}}, {"set": {"H": 36}}, {"set": {"t": 2}}]
+}

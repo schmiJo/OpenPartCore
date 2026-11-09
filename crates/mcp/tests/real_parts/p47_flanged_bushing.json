@@ -1,0 +1,20 @@
+{
+  "name": "Flanged bushing with oil groove",
+  "kind": "bushing",
+  "parameters": {"ri": 10, "ro": 13, "Rf": 20, "tf": 4, "H": 30, "gw": 2, "gd": 1, "oil": 1},
+  "steps": [
+    {"id": 1, "name": "Half section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["ri", 0], ["Rf", 0], ["Rf", "tf"], ["ro", "tf"], ["ro", "H"], ["ri", "H"]]}}]},
+    {"id": 2, "name": "Turned", "type": "revolve", "sketch": 1},
+    {"id": 3, "name": "Oil groove", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["ri - 1", "H / 2 - gw / 2"], ["ri + gd", "H / 2 - gw / 2"], ["ri + gd", "H / 2 + gw / 2"], ["ri - 1", "H / 2 + gw / 2"]]}}]},
+    {"id": 4, "name": "Turn it", "type": "revolve", "sketch": 3, "mode": "remove"},
+    {"expect": {"volume": "pi * (Rf^2 - ri^2) * tf + pi * (ro^2 - ri^2) * (H - tf) - pi * ((ri + gd)^2 - ri^2) * gw", "genus": [1]}},
+    {"id": 5, "name": "Oil hole", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "H / 2", "r": "oil"}}]},
+    {"id": 6, "name": "Drill it", "type": "extrude", "sketch": 5, "length": "ro + 1", "mode": "remove"},
+    {"expect": {"genus": [2]}},
+    {"id": 7, "name": "Bore's ends", "type": "chamfer", "edges": {"any": [{"between": ["f2:side.0", "f2:side.5"]}, {"between": ["f2:side.4", "f2:side.5"]}]}, "distance": 0.5},
+    {"id": 8, "name": "Lead-in", "type": "chamfer", "edges": {"between": ["f2:side.3", "f2:side.4"]}, "distance": 0.8},
+    {"id": 9, "name": "Under the flange", "type": "fillet", "edges": {"between": ["f2:side.2", "f2:side.3"]}, "radius": 1}
+  ],
+  "always": {"genus": [2], "bounds": [["-Rf", "-Rf", 0], ["Rf", "Rf", "H"]]},
+  "changes": [{"set": {"H": 40}}, {"set": {"ro": 14}}]
+}

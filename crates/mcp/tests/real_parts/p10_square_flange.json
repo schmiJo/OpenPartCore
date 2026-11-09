@@ -1,0 +1,25 @@
+{
+  "name": "Square flange with hub",
+  "kind": "flange",
+  "parameters": {"A": 100, "T": 12, "hub": 30, "H": 40, "bore": 30, "hole": 11, "ins": 12, "r": 6, "rc": 8, "c": 1},
+  "steps": [
+    {"id": 1, "name": "Plate outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-A / 2", "y": "-A / 2", "w": "A", "h": "A"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Hub outline", "type": "sketch", "plane": {"origin": [0, 0, "T"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "circle", "r": "hub"}}]},
+    {"id": 4, "name": "Hub", "type": "extrude", "sketch": 3, "length": "H"},
+    {"id": 5, "name": "Bore", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "bore / 2"}}]},
+    {"id": 6, "name": "Cut bore", "type": "extrude", "sketch": 5, "start": -1, "length": "T + H + 2", "mode": "remove"},
+    {"id": 7, "name": "Corner holes", "type": "sketch", "plane": {"origin": [0, 0, "T"], "on_face": "f2:end"},
+     "regions": [{"outer": {"type": "circle", "cx": "ins - A / 2", "cy": "ins - A / 2", "r": "hole / 2"}, "repeat": {"type": "grid", "nx": 2, "ny": 2, "dx": "A - 2 * ins", "dy": "A - 2 * ins"}}]},
+    {"id": 8, "name": "Cut them", "type": "extrude", "sketch": 7, "start": "-T - 1", "length": "T + 2", "mode": "remove"},
+    {"id": 9, "name": "Hub's root", "type": "fillet", "edges": {"between": ["f4:side.0", "f2:end"]}, "radius": "r"},
+    {"id": 10, "name": "Plate's corners", "type": "fillet", "edges": {"any": [{"between": ["f2:side.0", "f2:side.1"]}, {"between": ["f2:side.1", "f2:side.2"]}, {"between": ["f2:side.2", "f2:side.3"]}, {"between": ["f2:side.3", "f2:side.0"]}]}, "radius": "rc"},
+    {"id": 11, "name": "Bore's mouth", "type": "chamfer", "edges": {"between": ["f4:end", "f6:side.0"]}, "distance": "c"}
+  ],
+  "always": {
+    "volume": "(A^2 - (4 - pi) * rc^2) * T + pi * hub^2 * H - pi * (bore / 2)^2 * (T + H) - 4 * pi * (hole / 2)^2 * T + 2 * pi * (hub + r * (10 - 3 * pi) / (12 - 3 * pi)) * (1 - pi / 4) * r^2 - 2 * pi * (bore / 2 + c / 3) * c^2 / 2",
+    "genus": [5],
+    "bounds": [["-A / 2", "-A / 2", 0], ["A / 2", "A / 2", "T + H"]]
+  },
+  "changes": [{"set": {"H": 50}}, {"set": {"A": 120}}, {"set": {"hub": 26}}]
+}

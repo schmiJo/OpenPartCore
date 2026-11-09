@@ -1,0 +1,24 @@
+{
+  "name": "Motor mount plate",
+  "scan_fixed": ["s", "rc", "pcd", "cs"],
+  "kind": "plate",
+  "parameters": {"s": 57, "t": 6, "rc": 6, "bore": 38.1, "pcd": 47.14, "h": 5, "cs": 8.5, "c": 1},
+  "steps": [
+    {"id": 1, "name": "Outline", "type": "sketch", "regions": [{"outer": {"type": "rounded_rect", "w": "s", "h": "s", "r": "rc"}, "holes": [{"type": "circle", "r": "bore / 2"}]}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "t"},
+    {"id": 3, "name": "Screw holes", "type": "sketch", "plane": {"origin": [0, 0, "t"], "on_face": "f2:end"},
+     "regions": [{"outer": {"type": "circle", "cx": "-pcd / 2", "cy": "-pcd / 2", "r": "h / 2"}, "repeat": {"type": "grid", "nx": 2, "ny": 2, "dx": "pcd", "dy": "pcd"}}]},
+    {"id": 4, "name": "Cut them", "type": "extrude", "sketch": 3, "start": "-t - 1", "length": "t + 2", "mode": "remove"},
+    {"id": 5, "name": "Countersink", "type": "solid", "shape": "cone", "r0": "h / 2", "r1": "cs / 2", "height": "(cs - h) / 2",
+     "at": {"origin": ["-pcd / 2", "-pcd / 2", "t - (cs - h) / 2"]}, "mode": "remove"},
+    {"id": 6, "name": "Across", "type": "pattern", "of": [5], "direction": [1, 0, 0], "count": 2, "spacing": "pcd"},
+    {"id": 7, "name": "Up", "type": "pattern", "of": [5, 6], "direction": [0, 1, 0], "count": 2, "spacing": "pcd"},
+    {"id": 8, "name": "Bore's edge", "type": "chamfer", "edges": {"both": [{"on_face": "f2:end"}, {"radius": "bore / 2"}]}, "distance": "c"}
+  ],
+  "always": {
+    "volume": "(s^2 - (4 - pi) * rc^2 - pi * (bore / 2)^2) * t - 4 * pi * (h / 2)^2 * t - 4 * (pi * ((cs - h) / 2) / 3 * ((h / 2)^2 + (h / 2) * (cs / 2) + (cs / 2)^2) - pi * (h / 2)^2 * (cs - h) / 2) - 2 * pi * (bore / 2 + c / 3) * c^2 / 2",
+    "genus": [5],
+    "bounds": [["-s / 2", "-s / 2", 0], ["s / 2", "s / 2", "t"]]
+  },
+  "changes": [{"set": {"t": 8}}, {"set": {"pcd": 46}}, {"set": {"cs": 8}}]
+}

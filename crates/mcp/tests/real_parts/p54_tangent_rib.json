@@ -1,0 +1,19 @@
+{
+  "name": "Boss with a rib tangent to it",
+  "kind": "tangent",
+  "parameters": {"T": 8, "r": 15, "h": 40, "x0": 30, "L": 70, "rh": 22},
+  "steps": [
+    {"id": 1, "name": "Plate outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": 0, "y": -40, "w": 120, "h": 80}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Boss outline", "type": "sketch", "plane": {"origin": [0, 0, "T"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "circle", "cx": "x0", "cy": 0, "r": "r"}}]},
+    {"id": 4, "name": "Boss", "type": "extrude", "sketch": 3, "length": "h"},
+    {"id": 5, "name": "Rib, as wide as the boss, its sides tangent to it", "type": "sketch", "plane": {"origin": [0, 0, "T"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "rect", "x": "x0", "y": "-r", "w": "L", "h": "2 * r"}}]},
+    {"id": 6, "name": "Rib", "type": "extrude", "sketch": 5, "length": "rh"}
+  ],
+  "always": {
+    "volume": "120 * 80 * T + pi * r^2 * h + (L * 2 * r - pi * r^2 / 2) * rh",
+    "genus": [0],
+    "bounds": [[0, -40, 0], [120, 40, "T + h"]]
+  },
+  "changes": [{"set": {"r": 18}}, {"set": {"rh": 30}}, {"set": {"x0": 35}}]
+}

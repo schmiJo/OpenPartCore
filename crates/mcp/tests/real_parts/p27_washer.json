@@ -1,0 +1,17 @@
+{
+  "name": "Washer",
+  "kind": "fastener",
+  "parameters": {"OD": 20, "ID": 10.5, "t": 2, "c": 0.5, "ci": 0.3},
+  "steps": [
+    {"id": 1, "name": "Ring", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "OD / 2"}, "holes": [{"type": "circle", "r": "ID / 2"}]}]},
+    {"id": 2, "name": "Washer", "type": "extrude", "sketch": 1, "length": "t"},
+    {"id": 3, "name": "Outer edge", "type": "chamfer", "edges": {"between": ["f2:end", "f2:side.0"]}, "distance": "c"},
+    {"id": 4, "name": "Inner edge", "type": "chamfer", "edges": {"between": ["f2:end", "f2:hole.0.side.0"]}, "distance": "ci"}
+  ],
+  "always": {
+    "volume": "pi * ((OD / 2)^2 - (ID / 2)^2) * t - 2 * pi * (OD / 2 - c / 3) * c^2 / 2 - 2 * pi * (ID / 2 + ci / 3) * ci^2 / 2",
+    "genus": [1],
+    "bounds": [["-OD / 2", "-OD / 2", 0], ["OD / 2", "OD / 2", "t"]]
+  },
+  "changes": [{"set": {"t": 3}}, {"set": {"OD": 24}}]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "Slot running from a hole of its own width",
+  "kind": "tangent",
+  "parameters": {"L": 60, "W": 40, "t": 6, "x0": 18, "r": 6, "s": 18},
+  "steps": [
+    {"id": 1, "name": "Outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": 0, "y": 0, "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "t"},
+    {"id": 3, "name": "Hole", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "cx": "x0", "cy": "W / 2", "r": "r"}}]},
+    {"id": 4, "name": "Drill it", "type": "extrude", "sketch": 3, "length": "t + 2", "mode": "remove"},
+    {"id": 5, "name": "Slot, whose round end is the hole's own wall", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "rounded_rect", "cx": "x0 + s / 2", "cy": "W / 2", "w": "s + 2 * r", "h": "2 * r", "r": "r"}}]},
+    {"id": 6, "name": "Cut it", "type": "extrude", "sketch": 5, "length": "t + 2", "mode": "remove"}
+  ],
+  "always": {
+    "volume": "(L * W - s * 2 * r - pi * r^2) * t",
+    "genus": [1],
+    "bounds": [[0, 0, 0], ["L", "W", "t"]]
+  },
+  "changes": [{"set": {"s": 22}}, {"set": {"r": 5}}]
+}

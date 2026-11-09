@@ -1,0 +1,22 @@
+{
+  "name": "Plate with an ear, its sides tangent to its round end",
+  "kind": "tangent",
+  "parameters": {"L": 100, "W": 60, "T": 8, "e": 10, "r": 10, "hole": 4},
+  "steps": [
+    {"id": 1, "name": "Plate outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": 0, "y": 0, "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Neck", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "L", "y": "W / 2 - r", "w": "e", "h": "2 * r"}}]},
+    {"id": 4, "name": "Neck solid", "type": "extrude", "sketch": 3, "length": "T"},
+    {"id": 5, "name": "Round end, flush above and below", "type": "sketch", "regions": [{"outer": {"type": "circle", "cx": "L + e", "cy": "W / 2", "r": "r"}}]},
+    {"id": 6, "name": "Round end solid", "type": "extrude", "sketch": 5, "length": "T"},
+    {"expect": {"volume": "(L * W + e * 2 * r + pi * r^2 / 2) * T", "genus": [0]}},
+    {"id": 7, "name": "Hole, concentric with the round end", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "cx": "L + e", "cy": "W / 2", "r": "hole"}}]},
+    {"id": 8, "name": "Drill it", "type": "extrude", "sketch": 7, "length": "T + 2", "mode": "remove"}
+  ],
+  "always": {
+    "volume": "(L * W + e * 2 * r + pi * r^2 / 2 - pi * hole^2) * T",
+    "genus": [1],
+    "bounds": [[0, 0, 0], ["L + e + r", "W", "T"]]
+  },
+  "changes": [{"set": {"T": 10}}, {"set": {"r": 12}}, {"set": {"e": 15}}]
+}

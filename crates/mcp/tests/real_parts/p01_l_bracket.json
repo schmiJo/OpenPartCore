@@ -1,0 +1,25 @@
+{
+  "name": "L bracket",
+  "kind": "bracket",
+  "parameters": {"w": 50, "a": 70, "b": 60, "t": 6, "hole": 8, "r": 5, "c": 3},
+  "steps": [
+    {"id": 1, "name": "Profile", "type": "sketch", "plane": {"z": [0, -1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "polygon", "points": [[0, 0], ["a", 0], ["a", "t"], ["t", "t"], ["t", "b"], [0, "b"]]}}]},
+    {"id": 2, "name": "Body", "type": "extrude", "sketch": 1, "length": "w"},
+    {"expect": {"volume": "w * (a * t + (b - t) * t)"}},
+    {"id": 3, "name": "Base holes", "type": "sketch", "plane": {"origin": [0, 0, "t"], "on_face": "f2:side.2"},
+     "regions": [{"outer": {"type": "circle", "cx": "a - 12", "cy": -12, "r": "hole / 2"}}, {"outer": {"type": "circle", "cx": "a - 12", "cy": "12 - w", "r": "hole / 2"}}]},
+    {"id": 4, "name": "Cut base holes", "type": "extrude", "sketch": 3, "start": "-t - 1", "length": "t + 2", "mode": "remove"},
+    {"id": 5, "name": "Inner corner", "type": "fillet", "edges": {"between": ["f2:side.2", "f2:side.3"]}, "radius": "r"},
+    {"id": 6, "name": "Upright hole", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]},
+     "regions": [{"outer": {"type": "circle", "cx": "-w / 2", "cy": "b - 15", "r": "hole / 2"}}]},
+    {"id": 7, "name": "Cut upright hole", "type": "extrude", "sketch": 6, "start": -1, "length": "t + 2", "mode": "remove"},
+    {"id": 8, "name": "Top corners", "type": "chamfer", "edges": {"any": [{"between": ["f2:side.4", "f2:start"]}, {"between": ["f2:side.4", "f2:end"]}]}, "distance": "c"}
+  ],
+  "always": {
+    "volume": "w * (a * t + (b - t) * t) + (1 - pi / 4) * r^2 * w - 3 * pi * (hole / 2)^2 * t - 2 * (c^2 / 2) * t",
+    "genus": [3],
+    "bounds": [[0, "-w", 0], ["a", 0, "b"]]
+  },
+  "changes": [{"set": {"t": 8}}, {"set": {"w": 80}}, {"set": {"hole": 10, "r": 3}}]
+}

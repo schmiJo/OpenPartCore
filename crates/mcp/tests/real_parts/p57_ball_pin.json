@@ -1,0 +1,16 @@
+{
+  "name": "Pin with a ball end, the same size as its shank",
+  "kind": "tangent",
+  "parameters": {"r": 6, "L": 40, "cross": 2},
+  "steps": [
+    {"id": 1, "name": "Circle", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "r"}}]},
+    {"id": 2, "name": "Shank", "type": "extrude", "sketch": 1, "length": "L"},
+    {"id": 3, "name": "Ball, tangent all round where it meets the shank", "type": "solid", "shape": "sphere", "radius": "r", "at": {"origin": [0, 0, "L"]}},
+    {"expect": {"volume": "pi * r^2 * L + 2 / 3 * pi * r^3", "genus": [0], "bounds": [["-r", "-r", 0], ["r", "r", "L + r"]]}},
+    {"id": 4, "name": "Cross hole", "type": "sketch", "plane": {"origin": [-10, 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "L / 2", "r": "cross"}}]},
+    {"id": 5, "name": "Drill it", "type": "extrude", "sketch": 4, "length": 20, "mode": "remove"},
+    {"id": 6, "name": "Lead-in", "type": "chamfer", "edges": {"between": ["f2:start", "f2:side.0"]}, "distance": 1}
+  ],
+  "always": {"genus": [1], "bounds": [["-r", "-r", 0], ["r", "r", "L + r"]]},
+  "changes": [{"set": {"L": 50}}, {"set": {"r": 7}}]
+}
