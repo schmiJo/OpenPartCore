@@ -1,0 +1,9 @@
+[package]
+name = "coreshape-assembly"
+description = "Assemblies as in Onshape: instances of parts, mate connectors, mates and their solver, and a project of tabs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+coreshape = { path = "../kernel" }
+coreshape-document = { path = "../document" }

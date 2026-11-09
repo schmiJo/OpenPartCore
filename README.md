@@ -23,6 +23,7 @@ It runs natively and in the browser through WebAssembly.
   redundant and conflicting constraints, supports dragging, and is fast enough for every mouse
   move. Checked against FreeCAD's PlaneGCS: see [docs/SKETCH_SOLVER.md](docs/SKETCH_SOLVER.md).
 - **Output:** exact volume and area, a watertight mesh, STL and STEP, and offscreen PNG images.
+- **Assemblies, as in Onshape:** tabs of Part Studios and assemblies, instances that follow their parts, mate connectors found from faces and edges, eight kinds of mate with limits, gears, racks and screws, sub-assemblies, dragging, interference and a parts list, and STEP assemblies in and out.
 - **Input:** STEP files with analytic surfaces, swept curves, free-form surfaces, faceted solids and assemblies, healing what real files get wrong, and tested against OpenCASCADE on 108 files from other systems: 100 read. Anything else is refused by name.
 - **For agents:** an MCP server for building, editing and inspecting parts by stable names. See
   [docs/MCP.md](docs/MCP.md).
@@ -116,6 +117,7 @@ The file format is described in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
 | `crates/kernel/src/fuzz.rs` | Replayable randomized Boolean testing |
 | `crates/sketch/` | The constraint solver, with expressions and JSON. Knows nothing about the kernel |
 | `crates/document/` | Parameters, features, rebuilding and the file format, joining the kernel and solver |
+| `crates/assembly/` | Assemblies as in Onshape: instances, mate connectors, mates and their solver, and a project of tabs |
 | `crates/render/` | Offscreen rendering and a PNG encoder |
 | `crates/mcp/` | The MCP server |
 | `crates/wasm/` | C ABI and the demo models |

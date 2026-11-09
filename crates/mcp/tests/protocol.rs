@@ -447,3 +447,289 @@ fn a_document_with_one_body_lists_as_it_did() {
     let bodies = json::parse(&c.ok("bodies_list", "{}")).unwrap();
     assert_eq!(bodies.as_array().unwrap().len(), 1);
 }
+
+// ----- Assemblies -----
+
+fn parsed(text: &str) -> Value {
+    json::parse(text).unwrap_or_else(|e| panic!("{e}: {text}"))
+}
+
+fn numbers(v: &Value) -> Vec<f64> {
+    v.as_array().unwrap().iter().map(|n| n.as_f64().unwrap()).collect()
+}
+
+/// Where an instance's frame is, from an assembly's state.
+fn origin_of(state: &Value, name: &str) -> Vec<f64> {
+    let list = state.get("instances").and_then(Value::as_array).unwrap();
+    let it = list.iter().find(|i| i.get("name").and_then(Value::as_str) == Some(name)).unwrap_or_else(|| panic!("no {name} in {}", state.to_text()));
+    numbers(it.get("at").unwrap().get("origin").unwrap())
+}
+
+fn near(got: Vec<f64>, want: [f64; 3]) {
+    assert!(got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6), "{got:?} isn't {want:?}");
+}
+
+fn mate_value(state: &Value, mate: f64, dof: &str) -> f64 {
+    let list = state.get("mates").and_then(Value::as_array).unwrap();
+    let it = list.iter().find(|m| m.get("id").and_then(Value::as_f64) == Some(mate)).unwrap();
+    it.get("values").unwrap().get(dof).and_then(Value::as_f64).unwrap()
+}
+
+fn id_of(state: &Value) -> f64 {
+    state.get("id").and_then(Value::as_f64).unwrap()
+}
+
+/// A plate of height `h`, and a pin, and an assembly with one of each mated by a revolute on the plate's top face.
+fn plate_and_pin(c: &mut Client) -> (f64, f64) {
+    c.ok("parameter_set", r#"{"name":"h","value":10}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":40,"dy":40,"dz":"h","mode":"new_body"}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"cylinder","radius":3,"height":20,"mode":"new_body"}}"#);
+    c.ok("tab_new", r#"{"type":"assembly"}"#);
+    let plate = id_of(&parsed(&c.ok("instance_add", r#"{"part":"f1","fixed":true,"name":"Plate"}"#)));
+    let pin = id_of(&parsed(&c.ok("instance_add", r#"{"part":"f2","name":"Pin"}"#)));
+    (plate, pin)
+}
+
+#[test]
+fn an_assembly_can_be_built_moved_and_kept_through_the_tools() {
+    let dir = folder("assembly");
+    let mut c = Client::start(&dir);
+    let (plate, pin) = plate_and_pin(&mut c);
+    let tabs = parsed(&c.ok("tab_list", "{}"));
+    let tabs = tabs.as_array().unwrap();
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(tabs[1].get("selected").and_then(Value::as_bool), Some(true));
+
+    // The places on offer on the plate's top, ready to use.
+    let places = parsed(&c.ok("connector_candidates", &format!(r#"{{"instance":{plate},"face":"f1:end"}}"#)));
+    let places = places.as_array().unwrap();
+    assert_eq!(places.len(), 9);
+    assert_eq!(numbers(places[0].get("at").unwrap().get("origin").unwrap()), vec![20.0, 20.0, 10.0]);
+    let on_plate = places[0].get("on").unwrap().to_text();
+
+    // The pin's end, on the plate. The first end moves, and two faces need flip to lie against each other.
+    let answer = parsed(&c.ok("mate_add", &format!(r#"{{"type":"revolute","a":{{"instance":{pin},"on":{{"face":"f2:start"}}}},"b":{{"instance":{plate},"on":{on_plate}}},"flip":true}}"#)));
+    let mate = id_of(&answer);
+    near(origin_of(&answer, "Pin"), [20.0, 20.0, 10.0]);
+    assert_eq!(answer.get("freedom").and_then(Value::as_f64), Some(1.0));
+
+    // It turns, and keeps count.
+    let turned = parsed(&c.ok("mate_set_value", &format!(r#"{{"id":{mate},"dof":"angle","value":400}}"#)));
+    assert!((turned.get("reached").and_then(Value::as_f64).unwrap() - 400.0).abs() < 1e-5, "{}", turned.to_text());
+    assert!((mate_value(&turned, mate, "angle") - 400.0).abs() < 1e-5);
+    let dragged = parsed(&c.ok("assembly_drag", &format!(r#"{{"instance":{pin},"point":[3,0,0],"to":[20,23,10]}}"#)));
+    assert!(dragged.get("remaining").and_then(Value::as_f64).unwrap() < 1e-5, "{}", dragged.to_text());
+
+    // A taller plate, in the Part Studio, brings the pin up with it.
+    c.ok("parameter_set", r#"{"name":"h","value":25}"#);
+    let state = parsed(&c.ok("assembly_solve", "{}"));
+    near(origin_of(&state, "Pin"), [20.0, 20.0, 25.0]);
+    assert!(state.get("problems").is_none());
+
+    // Touching isn't interference, and two of the same part are one line of a bill of materials.
+    let check = parsed(&c.ok("interference_check", "{}"));
+    assert!(check.get("interferences").unwrap().as_array().unwrap().is_empty(), "{}", check.to_text());
+    c.ok("instance_add", r#"{"part":"f2","name":"Spare","at":{"origin":[5,5,20]}}"#);
+    let bom = parsed(&c.ok("bom", "{}"));
+    let rows = bom.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].get("count").and_then(Value::as_f64), Some(2.0));
+    let check = parsed(&c.ok("interference_check", "{}"));
+    let found = check.get("interferences").unwrap().as_array().unwrap();
+    assert_eq!(found.len(), 1, "{}", check.to_text());
+    // The spare is in the plate for 5 of its height.
+    let want = std::f64::consts::PI * 9.0 * 5.0;
+    assert!((found[0].get("volume").and_then(Value::as_f64).unwrap() - want).abs() < 1e-5);
+
+    // Drawn, and written as an assembly, with each part once.
+    let (content, failed) = c.call("render", r#"{"width":200,"height":150}"#);
+    assert!(!failed);
+    assert!(content.iter().any(|x| x.get("type").and_then(Value::as_str) == Some("image")));
+    let step = c.ok("export", r#"{"format":"step"}"#);
+    assert_eq!(step.matches("NEXT_ASSEMBLY_USAGE_OCCURRENCE").count(), 3);
+    assert_eq!(step.matches("MANIFOLD_SOLID_BREP").count(), 2);
+
+    // Saved and opened again, everything's there and the same.
+    c.ok("document_save", r#"{"path":"joint.coreshape"}"#);
+    c.ok("document_new", "{}");
+    assert_eq!(parsed(&c.ok("tab_list", "{}")).as_array().unwrap().len(), 1);
+    c.ok("document_open", r#"{"path":"joint.coreshape"}"#);
+    assert_eq!(parsed(&c.ok("tab_list", "{}")).as_array().unwrap().len(), 2);
+    let state = parsed(&c.ok("assembly_solve", r#"{"tab":2}"#));
+    near(origin_of(&state, "Pin"), [20.0, 20.0, 25.0]);
+    // Dragged from 400 degrees to the nearest place that gets there, a turn and a quarter.
+    assert!((mate_value(&state, mate, "angle") - 450.0).abs() < 1e-5, "{}", state.to_text());
+    let shown = c.ok("project_show", "{}");
+    assert!(shown.contains("coreshape-project"));
+}
+
+#[test]
+fn the_part_studio_tools_still_work_with_an_assembly_selected() {
+    let dir = folder("assembly_studio");
+    let mut c = Client::start(&dir);
+    plate_and_pin(&mut c);
+    // Features go to the Part Studio, and bodies are the Part Studio's.
+    let added = c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":1,"dy":1,"dz":1,"at":{"origin":[100,0,0]},"mode":"new_body"}}"#);
+    assert!(added.contains("\"id\": 3"), "{added}");
+    assert_eq!(parsed(&c.ok("bodies_list", "{}")).as_array().unwrap().len(), 3);
+    assert!(parsed(&c.ok("faces_list", r#"{"body":"f3"}"#)).as_array().is_some());
+    // A second Part Studio has its own features, and the first is still there when it comes back.
+    c.ok("tab_new", r#"{"type":"part_studio","name":"Other"}"#);
+    assert!(c.refused("bodies_list", "{}").contains("no solid"));
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":2,"dy":2,"dz":2,"mode":"new_body"}}"#);
+    assert_eq!(parsed(&c.ok("bodies_list", "{}")).as_array().unwrap().len(), 1);
+    c.ok("tab_select", r#"{"tab":1}"#);
+    assert_eq!(parsed(&c.ok("bodies_list", "{}")).as_array().unwrap().len(), 3);
+    // An instance from the other Part Studio, by its tab, whichever is being worked on.
+    c.ok("tab_select", r#"{"tab":2}"#);
+    let state = parsed(&c.ok("instance_add", r#"{"part":"f1","studio":3,"name":"From the other"}"#));
+    assert!(state.get("instances").unwrap().as_array().unwrap().iter().any(|i| i.get("tab").and_then(Value::as_f64) == Some(3.0)));
+    // The file goes on being a plain document only as long as that's all there is.
+    let saved = c.ok("export", r#"{"format":"coreshape"}"#);
+    assert!(saved.contains("coreshape-project"));
+}
+
+#[test]
+fn a_project_of_one_part_studio_stays_a_plain_document_through_the_tools() {
+    let dir = folder("assembly_plain");
+    let mut c = Client::start(&dir);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":1,"dy":1,"dz":1}}"#);
+    let shown = c.ok("export", r#"{"format":"coreshape"}"#);
+    assert!(shown.contains("coreshape-document") && !shown.contains("coreshape-project"));
+    assert_eq!(shown, c.ok("document_show", "{}"));
+    c.ok("document_save", r#"{"path":"plain.coreshape"}"#);
+    assert_eq!(std::fs::read_to_string(dir.join("plain.coreshape")).unwrap(), shown);
+    c.ok("document_open", r#"{"path":"plain.coreshape"}"#);
+    assert_eq!(c.ok("document_show", "{}"), shown);
+}
+
+#[test]
+fn assembly_tools_refuse_what_cant_be_done_and_say_why() {
+    let dir = folder("assembly_refused");
+    let mut c = Client::start(&dir);
+    assert!(c.refused("assembly_solve", "{}").contains("no assembly is selected"));
+    assert!(c.refused("mate_add", r#"{"type":"revolute","a":1,"b":2}"#).contains("no assembly is selected"));
+    let (plate, pin) = plate_and_pin(&mut c);
+    assert!(c.refused("instance_add", r#"{"part":"f9"}"#).contains("no part f9"));
+    assert!(c.refused("instance_add", "{}").contains("part"));
+    assert!(c.refused("instance_add", r#"{"assembly":1}"#).contains("Part Studio"));
+    // It can't go in itself, and it's not kept for trying.
+    assert!(c.refused("instance_add", r#"{"assembly":2}"#).contains("inside itself"));
+    assert_eq!(parsed(&c.ok("assembly_solve", "{}")).get("instances").unwrap().as_array().unwrap().len(), 2);
+
+    assert!(c.refused("connector_add", &format!(r#"{{"instance":{pin},"on":{{"face":"f9:end"}}}}"#)).contains("f9:end"));
+    assert!(c.refused("connector_add", r#"{"instance":77,"on":{"face":"f1:end"}}"#).contains("77"));
+    assert!(c.refused("connector_candidates", &format!(r#"{{"instance":{pin},"face":"nonsense"}}"#)).contains("nonsense"));
+    assert!(c.refused("connector_candidates", &format!(r#"{{"instance":{pin}}}"#)).contains("face"));
+
+    let a = format!(r#"{{"instance":{plate},"on":{{"face":"f1:end"}}}}"#);
+    let b = format!(r#"{{"instance":{pin},"on":{{"face":"f2:start"}}}}"#);
+    assert!(c.refused("mate_add", &format!(r#"{{"type":"welded","a":{a},"b":{b}}}"#)).contains("welded"));
+    assert!(c.refused("mate_add", &format!(r#"{{"type":"revolute","a":{a}}}"#)).contains("\"b\""));
+    assert!(c.refused("mate_add", &format!(r#"{{"type":"revolute","a":{a},"b":{a}}}"#)).contains("different instances"));
+    assert!(c.refused("mate_add", &format!(r#"{{"type":"revolute","a":{a},"b":{b},"limits":[{{"dof":"z","min":0,"max":1}}]}}"#)).contains("no motion along z"));
+    assert!(c.refused("mate_add", &format!(r#"{{"type":"revolute","a":{a},"b":{b},"limits":[{{"dof":"angle","min":5,"max":1}}]}}"#)).contains("more than"));
+    // None of those left a connector behind.
+    let shown = parsed(&c.ok("project_show", "{}"));
+    let tabs = shown.get("tabs").unwrap().as_array().unwrap();
+    assert!(tabs[1].get("assembly").unwrap().get("connectors").unwrap().as_array().unwrap().is_empty());
+
+    let made = parsed(&c.ok("mate_add", &format!(r#"{{"type":"revolute","a":{b},"b":{a},"flip":true}}"#)));
+    let mate = id_of(&made);
+    assert!(c.refused("mate_set_value", &format!(r#"{{"id":{mate},"dof":"z","value":1}}"#)).contains("can't move along z"));
+    assert!(c.refused("mate_set_value", r#"{"id":99,"dof":"angle","value":1}"#).contains("99"));
+    assert!(c.refused("relation_add", &format!(r#"{{"type":"gear","ratio":1,"a":{mate},"b":99}}"#)).contains("99"));
+    assert!(c.refused("relation_add", &format!(r#"{{"type":"gear","a":{mate},"b":{mate}}}"#)).contains("ratio"));
+    assert!(c.refused("group_add", &format!(r#"{{"instances":[{plate}]}}"#)).contains("at least two"));
+    assert!(c.refused("instance_edit", &format!(r#"{{"id":{pin},"locked":true}}"#)).contains("only a sub-assembly"));
+    assert!(c.refused("assembly_drag", &format!(r#"{{"instance":{pin}}}"#)).contains("to"));
+    assert!(c.refused("assembly_drag", r#"{"instance":77,"to":[1,2,3]}"#).contains("77"));
+    let connector = shown_connector(&mut c);
+    assert!(c.refused("connector_delete", &format!(r#"{{"id":{connector}}}"#)).contains("used by"));
+
+    // A Part Studio in use stays, and the last one has to stay anyway.
+    assert!(c.refused("tab_delete", r#"{"tab":1}"#).contains("Part Studio"));
+    c.ok("tab_new", r#"{"type":"part_studio"}"#);
+    assert!(c.refused("tab_delete", r#"{"tab":1}"#).contains("instances from it"));
+    assert!(c.refused("tab_select", r#"{"tab":99}"#).contains("99"));
+
+    // A bad file brings nothing in.
+    let before = parsed(&c.ok("tab_list", "{}")).as_array().unwrap().len();
+    assert!(!c.refused("assembly_import_step", r#"{"text":"not a file"}"#).is_empty());
+    assert_eq!(parsed(&c.ok("tab_list", "{}")).as_array().unwrap().len(), before);
+}
+
+fn shown_connector(c: &mut Client) -> f64 {
+    let shown = parsed(&c.ok("project_show", "{}"));
+    let tab = shown.get("tabs").unwrap().as_array().unwrap().iter().find(|t| t.get("assembly").is_some()).unwrap().clone();
+    tab.get("assembly").unwrap().get("connectors").unwrap().as_array().unwrap()[0].get("id").and_then(Value::as_f64).unwrap()
+}
+
+#[test]
+fn a_failing_mate_and_a_missing_part_come_back_as_state_and_not_as_errors() {
+    let dir = folder("assembly_failing");
+    let mut c = Client::start(&dir);
+    let (plate, pin) = plate_and_pin(&mut c);
+    c.ok("instance_edit", &format!(r#"{{"id":{pin},"fixed":true,"at":{{"origin":[100,0,0]}}}}"#));
+    let a = format!(r#"{{"instance":{plate},"on":{{"face":"f1:end"}}}}"#);
+    let b = format!(r#"{{"instance":{pin},"on":{{"face":"f2:start"}}}}"#);
+    // Both fixed, and nowhere near: it's kept, and it's named.
+    let answer = parsed(&c.ok("mate_add", &format!(r#"{{"type":"fastened","a":{a},"b":{b}}}"#)));
+    let mate = answer.get("mates").unwrap().as_array().unwrap()[0].clone();
+    assert!(mate.get("failing").and_then(Value::as_str).is_some(), "{}", answer.to_text());
+    // Let go, it's met.
+    let answer = parsed(&c.ok("instance_edit", &format!(r#"{{"id":{pin},"fixed":false}}"#)));
+    assert!(answer.get("mates").unwrap().as_array().unwrap()[0].get("failing").is_none(), "{}", answer.to_text());
+    // Its part suppressed in the Part Studio, what's left still comes back, saying what's wrong.
+    c.ok("feature_suppress", r#"{"id":2,"suppressed":true}"#);
+    let answer = parsed(&c.ok("assembly_solve", "{}"));
+    assert_eq!(answer.get("instances").unwrap().as_array().unwrap().len(), 1);
+    assert!(answer.get("problems").unwrap().as_array().unwrap()[0].as_str().unwrap().contains("Pin"));
+    assert!(answer.get("mates").unwrap().as_array().unwrap()[0].get("failing").is_some());
+}
+
+#[test]
+fn a_step_assembly_comes_in_as_tabs_through_the_tools() {
+    let dir = folder("assembly_import");
+    let mut c = Client::start(&dir);
+    let (_, pin) = plate_and_pin(&mut c);
+    c.ok("instance_edit", &format!(r#"{{"id":{pin},"at":{{"origin":[1,2,3]}}}}"#));
+    c.ok("instance_add", r#"{"part":"f2","at":{"origin":[20,0,0]}}"#);
+    c.ok("export", r#"{"format":"step","path":"three.step"}"#);
+    c.ok("document_new", "{}");
+    let state = parsed(&c.ok("assembly_import_step", r#"{"path":"three.step","name":"Three"}"#));
+    let list = state.get("instances").unwrap().as_array().unwrap();
+    assert_eq!(list.len(), 3);
+    assert_eq!(state.get("freedom").and_then(Value::as_f64), Some(0.0));
+    near(numbers(list[1].get("at").unwrap().get("origin").unwrap()), [1.0, 2.0, 3.0]);
+    let tabs = parsed(&c.ok("tab_list", "{}"));
+    let tabs = tabs.as_array().unwrap();
+    assert_eq!(tabs.len(), 3);
+    assert_eq!(tabs[1].get("name").and_then(Value::as_str), Some("Three"));
+    assert_eq!(tabs[2].get("selected").and_then(Value::as_bool), Some(true));
+    // Its parts are there to work on, once.
+    c.ok("tab_select", r#"{"tab":2}"#);
+    assert_eq!(parsed(&c.ok("bodies_list", "{}")).as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_sub_assembly_can_be_added_locked_and_reached_into_through_the_tools() {
+    let dir = folder("assembly_sub");
+    let mut c = Client::start(&dir);
+    let (plate, pin) = plate_and_pin(&mut c);
+    c.ok("mate_add", &format!(r#"{{"type":"revolute","a":{{"instance":{pin},"on":{{"face":"f2:start"}}}},"b":{{"instance":{plate},"on":{{"face":"f1:end"}}}},"flip":true}}"#));
+    c.ok("tab_new", r#"{"type":"assembly","name":"Top"}"#);
+    let sub = id_of(&parsed(&c.ok("instance_add", r#"{"assembly":2,"at":{"origin":[0,0,100]}}"#)));
+    let state = parsed(&c.ok("assembly_solve", "{}"));
+    assert_eq!(state.get("instances").unwrap().as_array().unwrap().len(), 2);
+    // Six for the base, which isn't fixed up here, and one for the turn.
+    assert_eq!(state.get("freedom").and_then(Value::as_f64), Some(7.0));
+    let state = parsed(&c.ok("instance_edit", &format!(r#"{{"id":{sub},"locked":true}}"#)));
+    assert_eq!(state.get("freedom").and_then(Value::as_f64), Some(6.0));
+    near(origin_of(&state, "Pin"), [20.0, 20.0, 110.0]);
+    let state = parsed(&c.ok("instance_edit", &format!(r#"{{"id":{sub},"locked":false,"fixed":true}}"#)));
+    assert_eq!(state.get("freedom").and_then(Value::as_f64), Some(0.0));
+    // A connector reaching in has to get as far as a part.
+    assert!(c.refused("connector_add", &format!(r#"{{"instance":{sub},"on":{{"face":"f1:end"}}}}"#)).contains("go all the way down"));
+    c.ok("connector_add", &format!(r#"{{"instance":[{sub},{pin}],"on":{{"face":"f2:end"}}}}"#));
+}

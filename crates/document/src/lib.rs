@@ -611,6 +611,8 @@ pub enum Op {
     /// The solids in a STEP file, kept here in full so that the document stands alone. Their faces are named by their
     /// place in the file: `f3:side.0` is the first. A piece cut from a wide face keeps that face's name.
     ImportStep { text: String, mode: Mode },
+    /// Each distinct solid in a STEP file once, as a new body in its own coordinates, for an assembly to use.
+    ImportStepParts { text: String },
     Fillet { edges: EdgeSelect, radius: Expr, propagate: bool },
     Chamfer { edges: EdgeSelect, distance: Expr, propagate: bool },
     /// A solid through sketches in order, each holding one outline, with free-form sides. Straight between
@@ -728,6 +730,7 @@ impl Op {
             Op::Revolve { .. } => "revolve",
             Op::Solid { .. } => "solid",
             Op::ImportStep { .. } => "import_step",
+            Op::ImportStepParts { .. } => "import_step_parts",
             Op::Fillet { .. } => "fillet",
             Op::Chamfer { .. } => "chamfer",
             Op::Sweep { .. } => "sweep",
@@ -762,6 +765,7 @@ impl Op {
             | Op::Sweep { mode, .. }
             | Op::Helix { mode, .. }
             | Op::Thicken { mode, .. } => Some(*mode),
+            Op::ImportStepParts { .. } => Some(Mode::NewBody),
             _ => None,
         }
     }
@@ -773,6 +777,7 @@ impl Op {
             Op::Revolve { .. } => "Revolve",
             Op::Solid { .. } => "Solid",
             Op::ImportStep { .. } => "Imported STEP",
+            Op::ImportStepParts { .. } => "Imported STEP parts",
             Op::Fillet { .. } => "Fillet",
             Op::Chamfer { .. } => "Chamfer",
             Op::Sweep { .. } => "Sweep",
@@ -843,7 +848,7 @@ impl Op {
             }
         }
         match self {
-            Op::ImportStep { .. } => {}
+            Op::ImportStep { .. } | Op::ImportStepParts { .. } => {}
             Op::Sketch { plane, regions } => {
                 place(plane, &mut out);
                 for r in regions {
@@ -1969,6 +1974,11 @@ impl Document {
                     }
                 })
             }
+            Op::ImportStepParts { text } => {
+                let solids = coreshape::import::step::read_step_parts(text, tag)?;
+                let added = solids.iter().map(|b| Arc::new(b.clone())).collect();
+                Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), Mode::NewBody)) })
+            }
             Op::Solid { primitive, at, mode } => {
                 let frame = at.resolve(env)?;
                 let made = match primitive {
@@ -2958,6 +2968,7 @@ pub fn op_value(op: &Op) -> Value {
             ("keep_tools", Value::Bool(*keep_tools)),
         ]),
         Op::ImportStep { text, mode } => Value::obj(vec![("type", Value::str("import_step")), ("text", Value::str(text)), ("mode", mode_value(*mode))]),
+        Op::ImportStepParts { text } => Value::obj(vec![("type", Value::str("import_step_parts")), ("text", Value::str(text))]),
         Op::Solid { primitive, at, mode } => {
             let mut items = vec![("type", Value::str("solid"))];
             match primitive {
@@ -3253,6 +3264,13 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 .as_str()
                 .ok_or_else(|| Error::InvalidInput("an imported file's \"text\" must be the STEP file as text".into()))?;
             Ok(Op::ImportStep { text: text.to_string(), mode: read_mode(v)? })
+        }
+        "import_step_parts" => {
+            with(&["type", "text"])?;
+            let text = field(v, "text", "imported parts")?
+                .as_str()
+                .ok_or_else(|| Error::InvalidInput("imported parts' \"text\" must be the STEP file as text".into()))?;
+            Ok(Op::ImportStepParts { text: text.to_string() })
         }
         "solid" => {
             let shape = field(v, "shape", "a solid")?.as_str().unwrap_or("");

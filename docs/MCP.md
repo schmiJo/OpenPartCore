@@ -27,12 +27,38 @@ under the root, which is the current folder unless given. A path that leaves it,
 | `render` | A PNG: iso, front, back, left, right, top, bottom, four views at once, or any angle. Optional face labels, one tint per face, and highlighted faces and edges |
 | `sketch_solve`, `sketch_drag`, `sketch_regions`, `sketch_arrangement` | The sketch solver, without changing the document. `sketch_arrangement` lists every closed region with its id, and the curves that make none |
 
+| `tab_list`, `tab_new`, `tab_select`, `tab_rename`, `tab_delete`, `project_show` | Tabs of Part Studios and assemblies |
+| `instance_add`, `instance_edit`, `instance_delete` | Parts and whole assemblies in the selected assembly |
+| `connector_candidates`, `connector_add`, `connector_edit`, `connector_delete` | Mate connectors. Candidates are the places a face or edge offers, each ready to use |
+| `mate_add`, `mate_edit`, `mate_delete`, `mate_set_value` | Mates, whose ends can be connectors or made on the spot, and taking one to a value |
+| `group_add`, `group_delete`, `relation_add`, `relation_delete` | Instances that move as one, and gears, racks, screws and linear relations |
+| `assembly_solve`, `assembly_drag` | Where every part is, what can still move, each mate's values, and which mates can't be met and why |
+| `interference_check`, `bom`, `assembly_import_step` | What overlaps and by how much, how many of each part, and a STEP assembly as new tabs |
+
 Each face in `faces_list` has a `key` as well as a `name`, since a name can cover several faces, and `highlight_faces` and edge selections take either. An edge's `select` uses keys when names alone
 would fit several edges: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
 
 ## Several bodies
 
 A body is a part, as in Onshape: one connected solid. A feature acts on all of them unless it lists `"bodies": ["f3.2"]`, and leaves alone any it doesn't reach. `"mode": "new_body"` makes parts that stay separate, and `import_step` with that mode makes one for each solid in the file. `transform`, `delete_bodies` and `boolean` are features too. `bodies_list` gives the names, and `render` tints each body differently unless told otherwise with `colors`, and takes `body` to show just one. `app_set` keeps data for an app with a feature or the document, without touching the model. See the format guide for the details.
+
+## Assemblies
+
+The tools for features always work on a Part Studio: the last one selected, even with an assembly selected. `render` and `export` follow the selected tab, so with an assembly they draw it, with each instance its own colour, and write it as a STEP assembly, or an STL of it all. `body` still means a part of the Part Studio. `document_save`, `document_open` and `export` with `coreshape` take the whole project, which is a plain document if it's one Part Studio.
+
+Every tool that changes an assembly solves it and answers with its state: `freedom`, each instance's pose in `at`, each mate's `values`, and a `failing` on any mate that can't be met. A mate that fails isn't an error, as in Onshape, and neither is a part that's gone from its Part Studio, which comes back under `problems`.
+
+```
+tab_new { "type": "assembly" }
+instance_add { "part": "f1", "fixed": true, "name": "Plate" }
+instance_add { "part": "f2", "name": "Pin" }
+mate_add { "type": "revolute", "flip": true,
+           "a": { "instance": 3, "on": { "face": "f2:start" } },
+           "b": { "instance": 2, "on": { "face": "f1:end" } } }
+mate_set_value { "id": 6, "dof": "angle", "value": 400 }
+```
+
+An app can get the same with `Session::solved`, which gives each part's `Body` and where it goes, and `Session::with_project` for anything else. See [FILE_FORMAT.md](FILE_FORMAT.md#projects-and-assemblies) for what each thing means, and [KNOWN_LIMITS.md](KNOWN_LIMITS.md#assemblies) for how far it goes.
 
 ## How a session goes
 

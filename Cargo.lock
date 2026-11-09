@@ -7,6 +7,14 @@ name = "coreshape"
 version = "0.1.0"
 
 [[package]]
+name = "coreshape-assembly"
+version = "0.1.0"
+dependencies = [
+ "coreshape",
+ "coreshape-document",
+]
+
+[[package]]
 name = "coreshape-document"
 version = "0.1.0"
 dependencies = [
@@ -19,6 +27,7 @@ name = "coreshape-mcp"
 version = "0.1.0"
 dependencies = [
  "coreshape",
+ "coreshape-assembly",
  "coreshape-document",
  "coreshape-render",
  "coreshape-sketch",

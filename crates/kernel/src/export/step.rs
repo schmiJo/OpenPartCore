@@ -576,6 +576,68 @@ pub fn write_step_bodies(bodies: &[&Body], name: &str) -> String {
     )
 }
 
+/// Writes an assembly: each part once, in its own coordinates, and a use of it for each instance, with its own name and
+/// where it goes. `uses` says which part by its place in `parts`. Other systems read this as an assembly of the parts, and
+/// sub-assemblies come flattened into it.
+pub fn write_step_assembly(parts: &[(&str, &Body)], uses: &[(usize, &str, Frame)], name: &str) -> String {
+    let mut w = Writer { out: String::new(), next: 1 };
+    let app = w.entity("APPLICATION_CONTEXT('automotive design')");
+    w.entity(&format!("APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2001,#{app})"));
+    let mech = w.entity(&format!("MECHANICAL_CONTEXT('',#{app},'mechanical')"));
+    let pctx = w.entity(&format!("PRODUCT_DEFINITION_CONTEXT('part definition',#{app},'design')"));
+    let definition = |w: &mut Writer, text: &str| -> (usize, usize) {
+        let label = quote(text);
+        let prod = w.entity(&format!("PRODUCT({label},{label},'',(#{mech}))"));
+        w.entity(&format!("PRODUCT_RELATED_PRODUCT_CATEGORY('part','',(#{prod}))"));
+        let formation = w.entity(&format!("PRODUCT_DEFINITION_FORMATION('','',#{prod})"));
+        let def = w.entity(&format!("PRODUCT_DEFINITION('design','',#{formation},#{pctx})"));
+        let shape = w.entity(&format!("PRODUCT_DEFINITION_SHAPE('','',#{def})"));
+        (def, shape)
+    };
+
+    let length = w.entity("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))");
+    let angle = w.entity("(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))");
+    let steradian = w.entity("(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())");
+    let accuracy = w.entity(&format!("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE({}),#{length},'distance_accuracy_value','confusion accuracy')", real(TOL)));
+    let ctx = w.entity(&format!(
+        "(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{accuracy}))GLOBAL_UNIT_ASSIGNED_CONTEXT((#{length},#{angle},#{steradian}))REPRESENTATION_CONTEXT('Context','3D'))"
+    ));
+
+    // Each part, with the placement a use of it is measured from.
+    let mut written = Vec::with_capacity(parts.len());
+    for (label, body) in parts {
+        let (def, shape) = definition(&mut w, label);
+        let solids = write_solids(&mut w, body);
+        let origin = w.axis(&Frame::WORLD);
+        let rep = w.entity(&format!("ADVANCED_BREP_SHAPE_REPRESENTATION({},(#{origin},{}),#{ctx})", quote(label), solids.join(",")));
+        w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{shape},#{rep})"));
+        written.push((def, origin, rep));
+    }
+
+    // The whole, which holds a placement for each use, and nothing else.
+    let (top_def, top_shape) = definition(&mut w, name);
+    let origin = w.axis(&Frame::WORLD);
+    let places: Vec<usize> = uses.iter().map(|(_, _, at)| w.axis(at)).collect();
+    let listed: Vec<String> = std::iter::once(origin).chain(places.iter().copied()).map(|p| format!("#{p}")).collect();
+    let top_rep = w.entity(&format!("SHAPE_REPRESENTATION({},({}),#{ctx})", quote(name), listed.join(",")));
+    w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{top_shape},#{top_rep})"));
+
+    for (k, ((part, label, _), place)) in uses.iter().zip(&places).enumerate() {
+        let (part_def, part_origin, part_rep) = written[*part];
+        let motion = w.entity(&format!("ITEM_DEFINED_TRANSFORMATION('','',#{part_origin},#{place})"));
+        let relation = w.entity(&format!("(REPRESENTATION_RELATIONSHIP('','',#{part_rep},#{top_rep})REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{motion})SHAPE_REPRESENTATION_RELATIONSHIP())"));
+        let usage = w.entity(&format!("NEXT_ASSEMBLY_USAGE_OCCURRENCE('{}',{},'',#{top_def},#{part_def},$)", k + 1, quote(label)));
+        let shape = w.entity(&format!("PRODUCT_DEFINITION_SHAPE('','',#{usage})"));
+        w.entity(&format!("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{relation},#{shape})"));
+    }
+
+    let product = quote(name);
+    format!(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('CoreShape assembly'),'2;1');\nFILE_NAME({product},'2026-01-01T00:00:00',(''),(''),'CoreShape','CoreShape','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN {{ 1 0 10303 214 1 1 1 1 }}'));\nENDSEC;\nDATA;\n{}ENDSEC;\nEND-ISO-10303-21;\n",
+        w.out
+    )
+}
+
 /// A body's solids: each of its outer shells, with the voids inside it. Returns their references.
 fn write_solids(w: &mut Writer, body: &Body) -> Vec<String> {
     let vertex_ids: Vec<usize> = body

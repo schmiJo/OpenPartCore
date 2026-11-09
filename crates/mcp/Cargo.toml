@@ -14,4 +14,5 @@ path = "src/main.rs"
 coreshape = { path = "../kernel" }
 coreshape-sketch = { path = "../sketch" }
 coreshape-document = { path = "../document" }
+coreshape-assembly = { path = "../assembly" }
 coreshape-render = { path = "../render" }

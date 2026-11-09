@@ -172,11 +172,72 @@ A body is a part: one connected solid, with any voids inside it. This works as O
 - **A cut that splits a part** leaves the name on the piece with the most faces from before, or the larger of those, and the others are named for the feature that split it. So after a change that swaps which piece that is, the names swap too.
 - **A change to one part leaves the others alone,** when what comes after names which parts it acts on. A feature with no list depends on all of them.
 
+## Projects and assemblies
+
+A project is an Onshape document: tabs of Part Studios and assemblies. **A project with only one Part Studio is written as the plain document it always was,** and a reader takes either.
+
+```json
+{ "format": "coreshape-project", "version": 1, "next_id": 3, "tabs": [
+  { "id": 1, "name": "Part Studio 1", "type": "part_studio", "document": { "format": "coreshape-document", "...": "..." } },
+  { "id": 2, "name": "Assembly 1", "type": "assembly", "assembly": { "next_id": 7, "instances": [], "connectors": [], "mates": [], "groups": [], "relations": [] } }
+] }
+```
+
+An assembly never changes a part. It holds uses of parts and where they are, so a part changed in its Part Studio changes in every assembly, what's mated to it follows, and nothing about moving an instance goes in a history.
+
+| Thing | Fields |
+|---|---|
+| Instance | `id`, `name`, `source` as `{"tab": 1, "body": "f3"}` or `{"assembly": 2}`, `at` as `{"origin", "z", "x"}`, and `fixed`, `suppressed`, `locked` if true |
+| Connector | `id`, `instance` as a list of ids down to a part, `on`, and `offset`, `rotation` in degrees, `flip`, `quarter_turns`, `implicit` if set |
+| Mate | `id`, `name`, `type`, `a` and `b` as connectors' ids, and `offset`, `rotation`, `flip`, `quarter_turns`, `limits`, `suppressed`, `turned` if set |
+| Group | `id`, `name`, `instances` as lists of ids, `suppressed` if true |
+| Relation | `id`, `type`, `a` and `b` as mates' ids, its amount, and `reverse`, `offset`, `suppressed` if set |
+
+**A connector's `on`** is what it's found from, so it follows the part:
+
+| `on` | Where |
+|---|---|
+| `{"face": "f1:end"}` | The centroid of a flat face, with z straight out of it, or the middle of a round face's axis, with z along it. `"point"` can also be `axis_start`, `axis_end` or `apex` |
+| `{"face": "f1:end", "near": [x, y, z]}` | The nearest of the face's corners, edge middles and arc centers |
+| `{"edge": ["f1:end", "f1:side.0"], "point": "middle"}` | On the edge between two faces: `middle`, `start`, `end`, or `center` for a round one |
+| `{"frame": {"origin", "z", "x"}}` | Just a place, in the part's own coordinates, which follows nothing |
+
+If what it's found from has gone, that mate fails, says which face, and the rest of the assembly still solves. The first of a key's faces is used if it covers several.
+
+**A mate's `type`** says what stays free between its two connectors, whose z axes end up pointing the same way:
+
+| `type` | Free |
+|---|---|
+| `fastened` | Nothing |
+| `revolute` | Turn about z |
+| `slider` | Slide along z |
+| `cylindrical` | Turn about z, slide along z |
+| `pin_slot` | Turn about z, slide along x |
+| `planar` | Turn about z, slide along x and y |
+| `ball` | Any turn |
+| `parallel` | Turn about z, any slide |
+
+Two faces' z axes both point out of them, so two faces need `flip` to lie against each other. `offset` is from `a` to `b` along `a`'s axes, `rotation` is about `a`'s z, and `flip` and `quarter_turns` act on `b`. `limits` is a list of `{"dof": "x", "y", "z" or "angle", "min", "max"}`, in millimetres and degrees. `turned` is how far it has turned in radians, with its turns, kept so that the next turn can be told from this one.
+
+**A relation** ties mates' motions together, as `b = ratio * a + offset`:
+
+| `type` | Between | Amount |
+|---|---|---|
+| `gear` | Two that turn | `ratio` |
+| `rack_and_pinion` | One that turns, and one that slides | `distance` for each whole turn |
+| `screw` | One cylindrical mate, named as both | `lead` for each whole turn |
+| `linear` | Two that slide | `ratio` |
+
+`offset` is set when it's added, from where they are, so that adding it moves nothing.
+
+**A sub-assembly** is an instance of an assembly tab, and as in Onshape its mates go on working in the assembly above, so its parts can move there. Where they've got to is kept in that assembly's `moved`, by path, relative to the top-level instance they're in, so moving the instance takes them along. `fixed` counts only in the assembly it's set in. `locked` keeps the parts as their own tab solves them, moving as one. A connector reaches into a sub-assembly by a longer `instance` list, which has to go all the way down to a part.
+
 ## Rules a reader enforces
 
 - A feature may only refer to features before it, including through `bodies`, and `sketch` must name a sketch.
 - Parameters may refer to each other but not in a cycle.
 - A version other than this reader's is refused with a message saying so.
+- Everything an assembly refers to has to be there: its mates' connectors, its relations' mates, and its instances' tabs, as the right kind of tab. An id can't appear twice.
 
 ## Constrained sketches
 

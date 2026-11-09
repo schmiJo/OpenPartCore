@@ -18,7 +18,8 @@ These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 - **Draft on spline and free-form faces,** and any draft that changes the topology, other than taking a fillet off and putting it back.
 - **Sheet bodies.** Everything here is a closed solid, so thicken takes faces of a solid, and a surface can't exist alone.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
-- **Assemblies as assemblies, and drawings.** A document holds an assembly's parts as separate bodies, but there's no tree of them: see [below](#several-bodies).
+- **Engineering drawings.** No sheets of projected views, hidden lines, section views, dimensions or title blocks, and no PDF or DXF. Sketching is built, and that's a different thing.
+- **The rest of Onshape's assemblies.** Tangent and Width mates, Replicate, assembly patterns, exploded views and named positions. What is built: see [below](#assemblies).
 - **Scaling a part.** Onshape's Transform can scale, and this can't, as nothing in the kernel scales a body. Nor does a Boolean offset, or does a split feature exist.
 
 ## Fuzz results
@@ -129,8 +130,34 @@ A Part Studio with several parts, as in Onshape: a body is one connected solid, 
 - **A body's name can move between pieces,** if a change makes a different piece of a split the larger one. Anything naming it then acts on the other piece. Onshape has this problem too, in its way.
 - **A sketch on a face follows its plane only.** Onshape's does too, as a sketch plane is just a plane. Its position within the plane stays as it was, so a face moved sideways leaves the sketch behind.
 - **A reversed revolve axis with part of a turn** swaps which end is called the start cap, as it's built from the far end. The shape is right.
-- **A STEP export is one product with many solids.** Every body comes back as its own solid in the same place, in this kernel and in OpenCASCADE, but an assembly's tree and part names aren't kept, nor is it known that two bolts are the same bolt. OpenCASCADE reads all 100 exports with the same solids and the same volume. It calls one of them invalid, `daratech`, for wires it finds crossing themselves, and it says the same about that file's original.
+- **A Part Studio's STEP export is one product with many solids.** Every body comes back as its own solid in the same place, in this kernel and in OpenCASCADE, but nor is it known that two bolts are the same bolt: an [assembly](#assemblies) is what says that, and its export does. OpenCASCADE reads all 100 exports with the same solids and the same volume. It calls one of them invalid, `daratech`, for wires it finds crossing themselves, and it says the same about that file's original.
 - **The page tints bodies by turns from 6 colours,** so an assembly of many has repeats, and it doesn't yet pick one out, list them, or say which one was tapped.
+
+## Assemblies
+
+Instances, mate connectors, the eight mates with connectors, limits, groups, gear, rack and pinion, screw and linear relations, sub-assemblies and tabs, as Onshape has them: see [FILE_FORMAT.md](FILE_FORMAT.md#projects-and-assemblies). The solver is checked against closed formulas for a slider-crank over two turns and a four-bar linkage. A STEP assembly goes out with each part once and a use of it for each instance, and OpenCASCADE reads it with every solid valid and where a formula says, with the part names: `scripts/check_step_assembly.sh`.
+
+How long the solver takes grows with how many moving parts are joined into one mechanism, measured on this desktop on a chain of revolutes. A drag here moves its end 1 mm:
+
+| Moving parts in one chain | Solve | Drag |
+|---|---|---|
+| 10 | 0.1 ms | 0.5 to 2 ms |
+| 30 | 3 ms | 12 to 22 ms |
+| 60 | 22 ms | 100 to 180 ms |
+| 100 | 105 ms | 0.5 to 1 s |
+| 200 | 1 s | 4 to 7 s |
+
+Parts held by a fastened mate that's already met move as one and cost next to nothing: an arm with 1,000 parts fastened to it stays well within 5 seconds for a solve and a drag, and is checked by a test. Mechanisms separated by something fixed are solved apart. So past about 30 moving parts in one connected mechanism, this stops being fit for dragging by hand, as its matrices are dense. Nothing has been measured with real part geometry or on a phone.
+
+- **A drag gets as close as it can, and says how far off that is.** A chain at full stretch can't reach a point beside its end, and `remaining` is the right distance, by formula.
+- **Whether two faces start out facing each other.** A mate brings z axes together, and Onshape's help says the same, with a flip to reverse them. I couldn't find it stated what Onshape picks by default for two faces, so here, nothing is picked for you. Two outward faces end up with one inside the other until flipped.
+- **A sub-assembly's mates keep no turn count.** Its own `turned` is kept in its own tab, so a limit or relation inside one, past a whole turn, is measured from where it starts each time it's solved from above.
+- **A sub-assembly's parts in STEP are flattened** into uses under one top product: the positions and parts are right, and its tree isn't kept. Reading a file keeps uses and part names, and also flattens.
+- **A mate connector's centroid on a curved outline** comes from 64 straight pieces per edge. On a 40 mm plate with a 10 mm hole a test holds it within 0.01 mm, which is fine for a place to put something, and it isn't used for anything measured.
+- **A connector found from a key that covers several faces** uses the first. Keys naming a piece (`#0`) avoid this.
+- **Interference is by Boolean,** so what a Boolean refuses comes back in `couldnt_tell` rather than as an answer, and every pair whose boxes meet takes a Boolean. Parts that only touch don't count. It's only as fast as the Booleans: an assembly of many complicated parts close together will take a while.
+- **Mates aren't undone by failing.** A mate that can't be met stays there, named, as in Onshape, and the rest still solve.
+- **Drive steps.** Taking a mate to a value goes in steps of 15 degrees, or 1/24 of the assembly's size, stopping at the last that worked. So stopped by a limit or a mechanism's end, it can be up to one step short of it, whereas a drag gets all the way.
 
 ## Swept spline surfaces
 

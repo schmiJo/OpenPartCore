@@ -2466,11 +2466,13 @@ struct Placements {
     frames: BTreeMap<usize, Vec<Frame>>,
     /// Those that say something about a product without being its shape.
     on_the_side: BTreeSet<usize>,
+    /// The product definition each representation is the shape of.
+    definitions: BTreeMap<usize, usize>,
 }
 
 impl Placements {
     fn of(file: &File) -> Result<Placements> {
-        let mut out = Placements { items: BTreeMap::new(), same: BTreeMap::new(), children: BTreeMap::new(), placed: BTreeSet::new(), frames: BTreeMap::new(), on_the_side: BTreeSet::new() };
+        let mut out = Placements { items: BTreeMap::new(), same: BTreeMap::new(), children: BTreeMap::new(), placed: BTreeSet::new(), frames: BTreeMap::new(), on_the_side: BTreeSet::new(), definitions: BTreeMap::new() };
         // The representations of each product definition, and which way round each assembly usage goes.
         let mut reps_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for instance in file.items.values() {
@@ -2480,6 +2482,9 @@ impl Placements {
                     if let Ok(pds) = file.part(shape, "PRODUCT_DEFINITION_SHAPE") {
                         if let Ok(pd) = File::id(pds.get(2)) {
                             reps_of.entry(pd).or_default().push(rep);
+                            if file.items.get(&pd).is_some_and(|i| i.iter().any(|(n, _)| n.starts_with("PRODUCT_DEFINITION"))) {
+                                out.definitions.insert(rep, pd);
+                            }
                         }
                     }
                 }
@@ -2600,6 +2605,31 @@ impl Placements {
         Ok(out)
     }
 
+    /// What a solid is called: its product's name if there's one, and otherwise its own.
+    fn name_of(&self, file: &File, solid: usize) -> Option<String> {
+        let text = |v: Option<&Val>| match v {
+            Some(Val::Str(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        };
+        let holders = self.items.iter().filter(|(rep, list)| list.contains(&solid) && !self.on_the_side.contains(rep)).map(|(rep, _)| *rep);
+        for rep in holders {
+            let mut group = vec![rep];
+            group.extend(self.same.get(&rep).map_or(&[][..], Vec::as_slice));
+            for g in group {
+                let Some(definition) = self.definitions.get(&g) else { continue };
+                // A product definition's formation, and the formation's product, each go by position whatever its kind.
+                let args = |id: usize, prefix: &str| file.items.get(&id).and_then(|i| i.iter().find(|(n, _)| n.starts_with(prefix))).map(|(_, a)| a.as_slice());
+                let formation = args(*definition, "PRODUCT_DEFINITION").and_then(|a| File::id(a.get(2)).ok());
+                let product = formation.and_then(|f| args(f, "PRODUCT_DEFINITION_FORMATION")).and_then(|a| File::id(a.get(2)).ok());
+                let product_args = product.and_then(|p| args(p, "PRODUCT"));
+                if let Some(name) = product_args.and_then(|a| text(a.get(1)).or_else(|| text(a.first()))) {
+                    return Some(name);
+                }
+            }
+        }
+        file.items.get(&solid).and_then(|i| i.first()).and_then(|(_, a)| text(a.first()))
+    }
+
     /// Every solid in the tree under a representation, wherever the motions put it.
     fn walk(&self, rep: usize, at: Frame, on_path: &mut Vec<usize>, solids: &BTreeSet<usize>, out: &mut Vec<(usize, Frame)>) {
         // This one and whatever's the same as it, all at this place.
@@ -2709,6 +2739,76 @@ impl Placements {
 /// in the file. An assembly's parts come out where it puts them, one body for each time each is used. A file holding
 /// anything this can't represent exactly is refused, naming what it found.
 pub fn read_step(text: &str, feature: u32) -> Result<Vec<Body>> {
+    let (file, solids) = solids_of(text)?;
+    let placements = Placements::of(&file)?;
+    let ids: BTreeSet<usize> = solids.keys().copied().collect();
+    let mut built: BTreeMap<usize, Body> = BTreeMap::new();
+    let mut out = Vec::new();
+    for (k, (id, at)) in placements.placed_solids(&ids).into_iter().enumerate() {
+        if !built.contains_key(&id) {
+            let (outer, voids) = &solids[&id];
+            built.insert(id, solid(&file, feature, *outer, voids)?);
+        }
+        let mut body = built[&id].transformed(&at);
+        // Each one has names of its own, the way a pattern's copies do.
+        if k > 0 {
+            body.mark_copy(feature, k as u32);
+        }
+        out.push(body);
+    }
+    Ok(out)
+}
+
+/// How a file's solids are used: what each distinct one is called, and each use of it, by its place in that list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepStructure {
+    pub names: Vec<String>,
+    pub instances: Vec<(usize, Frame)>,
+}
+
+/// Which distinct solids a file has, in the order `read_step_parts` gives them, and where it uses each. Nothing gets built.
+pub fn read_step_structure(text: &str) -> Result<StepStructure> {
+    let (file, solids) = solids_of(text)?;
+    let placements = Placements::of(&file)?;
+    let ids: BTreeSet<usize> = solids.keys().copied().collect();
+    Ok(structure_of(&file, &placements, &ids).0)
+}
+
+/// Each distinct solid in a STEP file once, as a body in its own coordinates. `read_step_structure` says where it's used.
+pub fn read_step_parts(text: &str, feature: u32) -> Result<Vec<Body>> {
+    let (file, solids) = solids_of(text)?;
+    let placements = Placements::of(&file)?;
+    let ids: BTreeSet<usize> = solids.keys().copied().collect();
+    let (_, order) = structure_of(&file, &placements, &ids);
+    let mut out = Vec::with_capacity(order.len());
+    for (k, id) in order.iter().enumerate() {
+        let (outer, voids) = &solids[id];
+        let mut body = solid(&file, feature, *outer, voids)?;
+        if k > 0 {
+            body.mark_copy(feature, k as u32);
+        }
+        out.push(body);
+    }
+    Ok(out)
+}
+
+/// The structure of a file, and its distinct solids in order.
+fn structure_of(file: &File, placements: &Placements, ids: &BTreeSet<usize>) -> (StepStructure, Vec<usize>) {
+    let mut order: Vec<usize> = Vec::new();
+    let mut instances = Vec::new();
+    for (id, at) in placements.placed_solids(ids) {
+        let part = order.iter().position(|o| *o == id).unwrap_or_else(|| {
+            order.push(id);
+            order.len() - 1
+        });
+        instances.push((part, at));
+    }
+    let names = order.iter().enumerate().map(|(k, id)| placements.name_of(file, *id).unwrap_or_else(|| format!("Part {}", k + 1))).collect();
+    (StepStructure { names, instances }, order)
+}
+
+/// Reads a file as far as its solids, refusing what can't be brought in.
+fn solids_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>)> {
     let items = parse(text)?;
     let (length, angle) = units(&items)?;
     let file = File { items, length, angle };
@@ -2769,21 +2869,5 @@ pub fn read_step(text: &str, feature: u32) -> Result<Vec<Body>> {
             list.join(", ")
         )));
     }
-    let placements = Placements::of(&file)?;
-    let ids: BTreeSet<usize> = solids.keys().copied().collect();
-    let mut built: BTreeMap<usize, Body> = BTreeMap::new();
-    let mut out = Vec::new();
-    for (k, (id, at)) in placements.placed_solids(&ids).into_iter().enumerate() {
-        if !built.contains_key(&id) {
-            let (outer, voids) = &solids[&id];
-            built.insert(id, solid(&file, feature, *outer, voids)?);
-        }
-        let mut body = built[&id].transformed(&at);
-        // Each one has names of its own, the way a pattern's copies do.
-        if k > 0 {
-            body.mark_copy(feature, k as u32);
-        }
-        out.push(body);
-    }
-    Ok(out)
+    Ok((file, solids))
 }

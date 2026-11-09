@@ -1,6 +1,9 @@
 //! The tools themselves, and the state they work on.
 
+mod assembly;
+
 use coreshape::{mass_properties, tessellate, validate, Body, Curve, Surface, TessParams};
+use coreshape_assembly::{Project, TabId};
 use coreshape_document::json::{self, Value};
 use coreshape_document::*;
 use coreshape_render::{render, render_four, Colors, Options, View};
@@ -42,13 +45,14 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
 ];
 
 pub fn exists(name: &str) -> bool {
-    TOOLS.iter().any(|t| t.0 == name)
+    TOOLS.iter().chain(assembly::TOOLS).any(|t| t.0 == name)
 }
 
 pub fn list() -> Value {
     Value::Arr(
         TOOLS
             .iter()
+            .chain(assembly::TOOLS)
             .map(|(name, description, properties, required)| {
                 Value::obj(vec![
                     ("name", Value::str(*name)),
@@ -119,14 +123,23 @@ fn position_arg(args: &Value, key: &str) -> R<Option<usize>> {
 
 /// The document being worked on, and the result of its last rebuild.
 pub struct Session {
+    /// The Part Studio being worked on, kept here rather than among the tabs while it is.
     doc: Document,
     outcome: Option<Outcome>,
     root: PathBuf,
+    /// All the tabs, with an empty stand-in for `doc`.
+    project: Project,
+    /// Which tab `doc` belongs to.
+    studio: TabId,
+    /// The tab that's selected, which can be an assembly.
+    active: TabId,
 }
 
 impl Session {
     pub fn new(root: PathBuf) -> Session {
-        Session { doc: Document::new(), outcome: None, root }
+        let project = Project::new();
+        let studio = project.tabs[0].id;
+        Session { doc: Document::new(), outcome: None, root, project, studio, active: studio }
     }
 
     /// The document being worked on.
@@ -165,8 +178,7 @@ impl Session {
         match name {
             "format_guide" => Ok(vec![text(GUIDE)]),
             "document_new" => {
-                self.doc = Document::new();
-                self.outcome = None;
+                self.replace_project(Project::new());
                 Ok(vec![text("A new, empty document is open.")])
             }
             "document_open" => {
@@ -179,13 +191,12 @@ impl Session {
                     (None, Some(t)) => t.as_str().ok_or("\"text\" must be text")?.to_string(),
                     (None, None) => return Err("give a path or text".to_string()),
                 };
-                self.doc = Document::load_text(&contents).map_err(e)?;
-                self.outcome = None;
+                self.replace_project(Project::load_text(&contents).map_err(e)?);
                 self.rebuilt(None)
             }
             "document_save" => {
                 let path = self.writable(string_arg(args, "path")?, &["coreshape", "json"])?;
-                let contents = self.doc.save_text();
+                let contents = self.with_project(|p| p.save_text());
                 std::fs::write(&path, &contents).map_err(|why| format!("can't write {}: {why}", path.display()))?;
                 Ok(vec![text(format!("Saved {} bytes to {}.", contents.len(), path.display()))])
             }
@@ -319,7 +330,7 @@ impl Session {
                 Err(why) => Err(why.to_json().to_text()),
             },
             "sketch_arrangement" => Ok(vec![text(read_sketch(args)?.arrangement().to_json().to_text())]),
-            other => Err(format!("there is no tool named \"{other}\"")),
+            other => self.call_assembly(other, args).unwrap_or_else(|| Err(format!("there is no tool named \"{other}\""))),
         }
     }
 
@@ -515,7 +526,13 @@ impl Session {
         let format = string_arg(args, "format")?;
         let path = args.get("path").and_then(Value::as_str);
         let (bytes, kinds): (Vec<u8>, &[&str]) = match format {
-            "coreshape" => (self.doc.save_text().into_bytes(), &["coreshape", "json"]),
+            "coreshape" => (self.with_project(|p| p.save_text()).into_bytes(), &["coreshape", "json"]),
+            "step" if args.get("body").is_none() && self.active_assembly().is_some() => {
+                let tab = self.active;
+                let label = self.project.tab(tab).map_or_else(|_| "model".to_string(), |t| t.name.clone());
+                let text = self.with_project(|p| p.step_text(tab, &label)).map_err(|x| x.to_string())?;
+                (text.into_bytes(), &["step", "stp"])
+            }
             "step" => {
                 let scope = self.scope(args)?;
                 // Each body as its own solids, unless one was asked for.
@@ -524,7 +541,7 @@ impl Session {
                 (text.into_bytes(), &["step", "stp"])
             }
             "stl" => {
-                let body = self.scope(args)?.body;
+                let body = self.view_scope(args)?.body;
                 let mesh = tessellate(&body, &TessParams::for_size(body.aabb().diagonal())).map_err(|x| x.to_string())?;
                 (coreshape::export::stl::write_binary(&mesh, "model"), &["stl"])
             }
@@ -541,8 +558,24 @@ impl Session {
         }
     }
 
+    /// What render and STL look at: the selected assembly, with each instance as a body of its own, or the Part Studio.
+    fn view_scope(&mut self, args: &Value) -> R<Scope> {
+        if args.get("body").is_some() || self.active_assembly().is_none() {
+            return self.scope(args);
+        }
+        let solved = self.solved()?;
+        let whole = solved.whole().ok_or("there are no parts in this assembly yet: instance_add puts some in")?;
+        let (mut of_face, mut of_edge) = (Vec::new(), Vec::new());
+        for p in &solved.placed {
+            let name = format!("{:?}", p.path);
+            of_face.extend(std::iter::repeat_n(name.clone(), p.body.faces.len()));
+            of_edge.extend(std::iter::repeat_n(name, p.body.edges.len()));
+        }
+        Ok(Scope { body: Arc::new(whole), of_face, of_edge })
+    }
+
     fn render(&mut self, args: &Value) -> R<Vec<Value>> {
-        let scope = self.scope(args)?;
+        let scope = self.view_scope(args)?;
         let body = scope.body.clone();
         let size = |key: &str, default: u32| -> R<u32> {
             match args.get(key).and_then(Value::as_f64) {
