@@ -2193,6 +2193,7 @@ impl Document {
         let mut current: Vec<(BodyId, Arc<Body>)> = scope.to_vec();
         let mut gone: Vec<BodyId> = Vec::new();
         let mut touched: Vec<BodyId> = Vec::new();
+        let (mut modes, mut all_made, mut mixed): (Vec<Mode>, Vec<Body>, bool) = (Vec::new(), Vec::new(), false);
         for id in of {
             if self.feature(*id).is_some_and(|f| f.suppressed) {
                 return Err(Error::InvalidInput(format!("f{} is suppressed, so it can't be copied", id.0)));
@@ -2201,8 +2202,15 @@ impl Document {
                 .cache
                 .get(id)
                 .and_then(|c| c.tools.clone())
-                .ok_or_else(|| Error::InvalidInput(format!("f{} makes no solid to copy: it must be an extrude, revolve, sweep or solid", id.0)))?;
+                .ok_or_else(|| Error::InvalidInput(format!("f{} makes no solid to copy: it must be an extrude, revolve, sweep, solid, or a pattern or mirror of those", id.0)))?;
             let made: Vec<Body> = tools.iter().flat_map(&copies).collect();
+            // Another pattern can copy these in turn, each doing what the feature it came from did.
+            if modes.iter().all(|m| *m == mode) {
+                modes.push(mode);
+                all_made.extend(made.iter().cloned());
+            } else {
+                mixed = true;
+            }
             if mode == Mode::NewBody {
                 out.added.extend(made.into_iter().map(Arc::new));
                 continue;
@@ -2232,7 +2240,9 @@ impl Document {
             }
         }
         out.changed.extend(gone.into_iter().map(|id| (id, None)));
-        Ok(out.done(None))
+        // Patterns of a cut and an add together can't be copied as one, and that's refused when something tries.
+        let tools = modes.first().filter(|_| !mixed).map(|mode| (Arc::new(all_made), *mode));
+        Ok(out.done(tools))
     }
 
     // ----- Saving and loading -----
