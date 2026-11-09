@@ -1105,3 +1105,18 @@ fn a_relation_that_cant_be_met_is_named() {
     let named = state.get("failing_relations").unwrap_or_else(|| panic!("{}", state.to_text())).as_array().unwrap();
     assert_eq!(named[0].as_f64(), Some(r));
 }
+
+#[test]
+fn the_first_end_of_a_new_mate_is_what_moves_through_the_tools() {
+    let dir = folder("assembly_first_end");
+    let mut c = Client::start(&dir);
+    let (a, b, ca, cb) = two_blocks(&mut c);
+    // Neither is held, so it could be either that moves.
+    c.ok("instance_edit", &format!(r#"{{"id":{a},"fixed":false,"at":{{"origin":[7,0,0]}}}}"#));
+    c.ok("instance_edit", &format!(r#"{{"id":{b},"at":{{"origin":[0,30,0]}}}}"#));
+    let state = parsed(&c.ok("mate_add", &format!(r#"{{"type":"fastened","a":{cb},"b":{ca}}}"#)));
+    let (fa, fb) = (frame_of(&state, "A").0, frame_of(&state, "B").0);
+    // The second stays, to within what a preference leaves, and the first has gone to it.
+    assert!((fa[0] - 7.0).abs() < 1e-2 && fa[1].abs() < 1e-2, "{fa:?}");
+    assert!((fb[0] + 43.0).abs() < 1e-2 && fb[1].abs() < 1e-2, "{fb:?}");
+}

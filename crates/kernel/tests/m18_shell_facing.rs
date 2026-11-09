@@ -84,8 +84,39 @@ fn a_thin_wall_around_nothing_is_too_close_to_call_roughly_and_gets_the_exact_an
     assert_eq!(shell_facing(&body, 0), exact, "it should have gone to the exact answer");
 }
 
+/// A file's text with every face and every loop of it turned over, which makes its shell inside out and still consistent.
+fn inside_out(text: &str) -> String {
+    let flip = |line: &str| {
+        if line.ends_with(",.T.);") {
+            format!("{},.F.);", &line[..line.len() - 6])
+        } else if line.ends_with(",.F.);") {
+            format!("{},.T.);", &line[..line.len() - 6])
+        } else {
+            line.to_string()
+        }
+    };
+    let turned = |line: &str| line.contains("=ADVANCED_FACE(") || line.contains("=FACE_BOUND(") || line.contains("=FACE_OUTER_BOUND(");
+    text.lines().map(|l| if turned(l) { flip(l) } else { l.to_string() }).collect::<Vec<_>>().join("\n")
+}
+
 #[test]
-fn a_file_with_a_shell_written_inside_out_still_reads_the_right_way_out() {
+fn a_file_with_a_shell_written_inside_out_reads_the_right_way_out() {
+    use coreshape::export::step::write_step;
+    use coreshape::import::step::read_step;
+    for body in [box_solid(&Frame::WORLD, 10.0, 20.0, 30.0, 1).unwrap(), traced()] {
+        let text = write_step(&body, "part");
+        let turned = inside_out(&text);
+        assert_ne!(turned, text);
+        let back = read_step(&turned, 1).unwrap();
+        assert_eq!(back.len(), 1);
+        let (a, b) = (mass_properties(&body).volume, mass_properties(&back[0]).volume);
+        assert!((a - b).abs() < 1e-6 * a, "{a} against {b}");
+        assert!(shell_volume(&back[0], 0) > 0.0, "it came back inside out");
+    }
+}
+
+#[test]
+fn a_file_of_a_traced_solid_and_a_void_come_back_as_they_were() {
     use coreshape::export::step::write_step;
     use coreshape::import::step::read_step;
     // Its own export, as a reader would get it, comes back the same size and facing out.
