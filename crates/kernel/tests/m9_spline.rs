@@ -204,16 +204,47 @@ fn surfaces_of_a_free_form_revolve_match_a_mesh() {
 // ----- Refusals -----
 
 #[test]
-fn offsets_on_spline_faces_are_refused_by_name() {
+fn a_draft_on_a_spline_face_is_refused() {
     let body = extrude(&Profile::new(ellipse_wire(9.0, 4.0)), &Frame::WORLD, 3.0, 1).unwrap();
-    let mentions = |e: Error| {
-        let text = e.to_string();
-        assert!(text.contains("spline") || text.contains("straight and circular"), "{text}");
-    };
-    mentions(offset(&body, 0.5).unwrap_err());
-    mentions(shell(&body, &[], 0.5, 2).unwrap_err());
     let side = body.faces.iter().position(|f| matches!(f.surface, Surface::Extruded { .. })).unwrap();
     assert!(draft(&body, &[side], Vec3::Z, Vec3::ZERO, 0.05).is_err());
+}
+
+#[test]
+fn offset_and_shell_on_a_spline_face() {
+    // A parallel curve encloses the area, plus the length times the distance, plus pi times its square.
+    let body = extrude(&Profile::new(ellipse_wire(9.0, 4.0)), &Frame::WORLD, 3.0, 1).unwrap();
+    let area = PI * 36.0;
+    let length = (mass_properties(&body).area - 2.0 * area) / 3.0;
+    let bigger = offset(&body, 0.5).unwrap();
+    validate(&bigger).unwrap();
+    let v = mass_properties(&bigger).volume;
+    let want = (area + length * 0.5 + PI * 0.25) * 4.0;
+    assert!((v - want).abs() < 1e-5 * want, "{v} against {want}");
+    let hollow = shell(&body, &[], 0.5, 2).unwrap();
+    validate(&hollow).unwrap();
+    let inner = (area - length * 0.5 + PI * 0.25) * 2.0;
+    let v = mass_properties(&hollow).volume;
+    assert!((v - (area * 3.0 - inner)).abs() < 1e-5 * inner, "{v} against {}", area * 3.0 - inner);
+}
+
+#[test]
+fn offset_of_a_revolved_spline_with_poles() {
+    // A half circle as a spline, revolved: a sphere made the hard way, whose offset is known exactly.
+    let arc = Spline::ellipse_arc(Vec3::ZERO, Vec3::X, Vec3::Y, 10.0, 10.0, -PI / 2.0, PI / 2.0).unwrap();
+    let p = Profile::new(PathBuilder::new(v2(0.0, -10.0)).spline_to(arc).close());
+    let ball = revolve(&p, &Frame::WORLD, 2.0 * PI, 1).unwrap();
+    assert!((mass_properties(&ball).volume - 4000.0 / 3.0 * PI).abs() < 1e-6);
+    for (d, r) in [(1.0, 11.0f64), (-1.0, 9.0)] {
+        let moved = offset(&ball, d).unwrap();
+        validate(&moved).unwrap();
+        let v = mass_properties(&moved).volume;
+        let want = 4.0 / 3.0 * PI * r.powi(3);
+        assert!((v - want).abs() < 1e-6 * want, "{d}: {v} against {want}");
+    }
+    let wall = shell(&ball, &[], 1.0, 2).unwrap();
+    validate(&wall).unwrap();
+    assert!((mass_properties(&wall).volume - 4.0 / 3.0 * PI * (1000.0 - 729.0)).abs() < 1e-3);
 }
 
 // ----- Booleans against known answers -----

@@ -148,6 +148,73 @@ fn nozzle(doc: &mut Document, _: usize) {
     doc.with(Op::extrude(across, 0.0, "2 * width", Mode::Remove));
 }
 
+/// The upright plane through the Z axis, whose sketch x is the distance from the axis and whose y is the height.
+fn upright() -> Placement {
+    Placement::new(point3(0.0, 0.0, 0.0), point3(0.0, -1.0, 0.0), point3(1.0, 0.0, 0.0))
+}
+
+/// A round wire carried along a helix. Each face is fitted to within a stated tolerance of the true one.
+fn spring(doc: &mut Document, _: usize) {
+    let wire = doc.with(Op::sketch(upright(), vec![Region::new(Shape::circle("coil", 0.0, "wire"))]));
+    doc.with(Op::Helix {
+        sketch: wire,
+        point: point3(0.0, 0.0, 0.0),
+        axis: point3(0.0, 0.0, 1.0),
+        pitch: "pitch".into(),
+        turns: "turns".into(),
+        left_handed: false,
+        mode: Mode::Add,
+    });
+}
+
+/// A shaft with a square thread cut along it, running off both ends.
+fn screw(doc: &mut Document, _: usize) {
+    let round = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle(0.0, 0.0, "radius"))]));
+    doc.with(Op::extrude(round, 0.0, "length", Mode::Add));
+    let groove = doc.with(Op::sketch(
+        upright(),
+        vec![Region::new(Shape::rect("radius - depth", "-pitch * 1.5", "depth + 1", "pitch * 0.5"))],
+    ));
+    doc.with(Op::Helix {
+        sketch: groove,
+        point: point3(0.0, 0.0, 0.0),
+        axis: point3(0.0, 0.0, 1.0),
+        pitch: "pitch".into(),
+        turns: "length / pitch + 2".into(),
+        left_handed: false,
+        mode: Mode::Remove,
+    });
+}
+
+/// A lofted cup: its wall is the free-form side moved inward by exactly the thickness, and its foot is that same
+/// side's lower band thickened outward.
+fn cup(doc: &mut Document, _: usize) {
+    let base = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle(0.0, 0.0, "foot"))]));
+    let waist = doc.with(Op::sketch(Placement::xy("height * 0.5"), vec![Region::new(Shape::circle(0.0, 0.0, "waist"))]));
+    let lip = doc.with(Op::sketch(Placement::xy("height"), vec![Region::new(Shape::circle(0.0, 0.0, "lip"))]));
+    let body = doc.with(Op::Loft { sections: vec![base, waist, lip], mode: Mode::Add });
+    doc.with(Op::Shell { open: vec![body.end_cap()], thickness: "wall".into() });
+}
+
+/// A plate with a row of holes and a rounded top edge, then one hole and one blend taken away again by name. Everything
+/// around them closes over the gap, and the rest keeps its names, so the sliders still drive it.
+fn healed(doc: &mut Document, _: usize) {
+    let plate = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rect(0.0, 0.0, "width", "depth"))]));
+    let block = doc.with(Op::extrude(plate, 0.0, "thick", Mode::Add));
+    let circle = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle("width / 6", "depth / 2", "bore"))]));
+    let hole = doc.with(Op::extrude(circle, -1.0, "thick + 2", Mode::Remove));
+    let row = doc.with(Op::Pattern { of: vec![hole], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: "width / 3".into() } });
+    let round = doc.with(Op::fillet(EdgeSelect::Between(block.end_cap(), block.side(0)), "round"));
+    doc.with(Op::Chamfer { edges: EdgeSelect::Between(block.end_cap(), block.side(2)), distance: "round".into(), propagate: true });
+    // The middle hole, and the fillet.
+    doc.with(Op::DeleteFace {
+        faces: vec![
+            FaceKey { face: hole.side(0), between: Vec::new(), copies: vec![coreshape::topo::CopyStep { feature: row.0, index: 1 }], piece: None },
+            FaceKey::plain(round.side(1)),
+        ],
+    });
+}
+
 /// A branch off a pipe, with the saddle between them filleted. No exact surface exists for that, so it's a fitted one.
 fn tee(doc: &mut Document, _: usize) {
     let along = doc.with(Op::sketch(
@@ -393,6 +460,32 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("lip", "Lip radius", 14.0, 30.0, 22.0),
         mm("pin", "Cross hole", 4.0, 12.0, 8.0),
     ];
+    static SPRING: [ParamDef; 4] = [
+        mm("coil", "Coil radius", 6.0, 20.0, 12.0),
+        mm("wire", "Wire radius", 0.5, 2.0, 1.5),
+        mm("pitch", "Pitch", 4.5, 14.0, 6.0),
+        count("turns", "Turns", 1.0, 8.0, 4.0),
+    ];
+    static SCREW: [ParamDef; 4] = [
+        mm("radius", "Shaft radius", 5.0, 10.0, 8.0),
+        mm("length", "Length", 15.0, 40.0, 25.0),
+        mm("pitch", "Pitch", 4.0, 8.0, 5.0),
+        mm("depth", "Thread depth", 0.5, 2.0, 1.0),
+    ];
+    static CUP: [ParamDef; 5] = [
+        mm("foot", "Foot radius", 10.0, 20.0, 15.0),
+        mm("waist", "Waist radius", 6.0, 12.0, 9.0),
+        mm("lip", "Lip radius", 10.0, 20.0, 14.0),
+        mm("height", "Height", 20.0, 50.0, 35.0),
+        mm("wall", "Wall", 0.5, 2.5, 1.5),
+    ];
+    static HEALED: [ParamDef; 5] = [
+        mm("width", "Width", 40.0, 90.0, 60.0),
+        mm("depth", "Depth", 20.0, 40.0, 30.0),
+        mm("thick", "Thickness", 5.0, 15.0, 8.0),
+        mm("bore", "Hole radius", 2.0, 5.0, 3.0),
+        mm("round", "Blend size", 0.5, 2.5, 1.5),
+    ];
     static TEE: [ParamDef; 5] = [
         mm("main", "Pipe radius", 8.0, 16.0, 12.0),
         mm("branch", "Branch radius", 3.0, 7.0, 5.0),
@@ -480,7 +573,7 @@ pub fn catalog() -> &'static [ModelDef] {
         default: 0.0,
         choices: &STRESS_NAMES,
     }];
-    static MODELS: [ModelDef; 13] = [
+    static MODELS: [ModelDef; 17] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -536,6 +629,34 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A sketched spline revolved, with a second spline cut out to hollow it. The curve stays an exact spline all the way to the STEP file.",
             params: &VASE,
             build: vase,
+        },
+        ModelDef {
+            id: "spring",
+            name: "Helical spring",
+            blurb: "A round wire carried along a helix. The section is exact, and the path is fitted to within 1e-7 of the true helix, as measured.",
+            params: &SPRING,
+            build: spring,
+        },
+        ModelDef {
+            id: "screw",
+            name: "Threaded shaft",
+            blurb: "A square groove cut along a helix through a shaft, running off both ends. Every wall of the thread is a free-form face, through a Boolean.",
+            params: &SCREW,
+            build: screw,
+        },
+        ModelDef {
+            id: "cup",
+            name: "Shelled cup",
+            blurb: "A lofted cup hollowed by a shell, whose inner wall is the free-form side moved along its own normals by exactly the wall thickness.",
+            params: &CUP,
+            build: cup,
+        },
+        ModelDef {
+            id: "healed",
+            name: "Delete face",
+            blurb: "A plate with a row of holes, a fillet and a chamfer, with the middle hole and the fillet then deleted. Their neighbours grow to close the gap.",
+            params: &HEALED,
+            build: healed,
         },
         ModelDef {
             id: "tee",

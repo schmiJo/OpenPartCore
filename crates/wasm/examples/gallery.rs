@@ -73,6 +73,59 @@ fn loft_extras() -> Vec<(&'static str, Result<Body>)> {
 }
 
 /// Fillets and chamfers with no exact surface, which OpenCASCADE then has to read.
+fn helix_extras() -> Vec<(&'static str, Result<Body>)> {
+    let upright = Frame { origin: Vec3::ZERO, x: Vec3::X, y: Vec3::Z, z: -Vec3::Y };
+    let along = |pitch: f64, turns: f64| Helix { origin: Vec3::ZERO, axis: Vec3::Z, pitch, turns, left_handed: false };
+    let rect = |a: f64, b: f64, c: f64, d: f64| Profile::new(Wire::polygon(&[v2(a, c), v2(b, c), v2(b, d), v2(a, d)]));
+    let circle = |x: f64, r: f64| Profile::new(Wire::circle(v2(x, 0.0), r));
+    let at = |z: f64| Frame::translation(v3(0.0, 0.0, z));
+    let shaft = || cylinder(&at(-2.0), 6.0, 20.0, 1).unwrap();
+    let groove = rect(5.2, 6.5, -0.6, 0.6);
+    let groove_at = Frame { origin: v3(0.0, 0.0, -4.0), ..upright };
+    let vase = || {
+        let round = |r: f64| Profile::new(Wire::circle(v2(0.0, 0.0), r));
+        loft(&[(&round(10.0), at(0.0)), (&round(7.0), at(12.0)), (&round(9.0), at(24.0))], 1).unwrap()
+    };
+    let sides = |b: &Body| -> Vec<usize> { (0..b.faces.len()).filter(|&f| !matches!(b.faces[f].surface, Surface::Plane(_))).collect() };
+    let v = vase();
+    let block = box_solid(&Frame::WORLD, 30.0, 20.0, 10.0, 1).unwrap();
+    let top = (0..6).find(|&f| block.faces[f].surface.sdf(v3(1.0, 1.0, 10.0)).abs() < 1e-9).unwrap();
+    let c = cylinder(&Frame::WORLD, 10.0, 20.0, 1).unwrap();
+    let s = sphere(&Frame::WORLD, 10.0, 1).unwrap();
+    let k = cone_frustum(&Frame::WORLD, 10.0, 5.0, 12.0, 1).unwrap();
+    let t = torus(&Frame::WORLD, 20.0, 5.0, 1).unwrap();
+    let plate = subtract(&block, &box_solid(&Frame::translation(v3(12.0, -1.0, 7.0)), 6.0, 22.0, 4.0, 2).unwrap()).unwrap();
+    let plate_faces: Vec<usize> = (0..plate.faces.len()).filter(|&f| plate.faces[f].tag.feature == 2).collect();
+    let round_edges = fillet(&block, &(0..block.edges.len()).collect::<Vec<_>>(), 2.0, 2).unwrap();
+    let round_faces: Vec<usize> = (0..round_edges.faces.len()).filter(|&f| round_edges.faces[f].tag.feature == 2).collect();
+    let lean = {
+        let f = Frame::rotation(v3(0.0, 0.0, 25.0), Vec3::X, 0.5).compose(&Frame::translation(v3(-50.0, -50.0, 25.0)));
+        subtract(&cylinder(&Frame::WORLD, 10.0, 40.0, 1).unwrap(), &box_solid(&f, 100.0, 100.0, 50.0, 2).unwrap()).unwrap()
+    };
+    let lean_sides: Vec<usize> = (0..lean.faces.len()).filter(|&f| matches!(lean.faces[f].surface, Surface::Cylinder { .. })).collect();
+    vec![
+        ("helix_square_spring", helix(&rect(8.0, 10.0, 0.0, 1.5), &upright, &along(3.0, 2.5), 1)),
+        ("helix_round_spring", helix(&circle(12.0, 1.5), &upright, &along(5.0, 4.0), 1)),
+        ("helix_hollow_spring", helix(&Profile::new(Wire::circle(v2(12.0, 0.0), 1.5)).with_hole(Wire::circle(v2(12.0, 0.0), 0.75)), &upright, &along(5.0, 2.0), 1)),
+        ("helix_twisted_bar", helix(&rect(-5.0, 5.0, -3.0, 3.0), &Frame::WORLD, &along(40.0, 1.0), 1)),
+        ("helix_thread_cut", subtract(&shaft(), &helix(&groove, &groove_at, &along(2.5, 10.0), 2).unwrap())),
+        ("helix_ridge_added", union(&shaft(), &helix(&rect(5.0, 6.8, -0.6, 0.6), &Frame { origin: v3(0.0, 0.0, 2.0), ..upright }, &along(2.5, 4.0), 2).unwrap())),
+        ("thick_flat", thicken(&block, &[top], 3.0, 5)),
+        ("thick_cylinder", thicken(&c, &sides(&c), 2.0, 5)),
+        ("thick_cylinder_in", thicken(&c, &sides(&c), -2.0, 5)),
+        ("thick_sphere", thicken(&s, &sides(&s), 1.0, 5)),
+        ("thick_cone", thicken(&k, &sides(&k), 1.0, 5)),
+        ("thick_torus", thicken(&t, &sides(&t), 1.0, 5)),
+        ("thick_vase", thicken(&v, &sides(&v), 0.5, 5)),
+        ("thick_lean", thicken(&lean, &lean_sides, 2.0, 5)),
+        ("vase_offset", offset(&v, 0.5)),
+        ("vase_offset_in", offset(&v, -0.5)),
+        ("vase_hollow", shell(&v, &[], 0.5, 5)),
+        ("healed_slot", delete_faces(&plate, &plate_faces)),
+        ("healed_rounding", delete_faces(&round_edges, &round_faces)),
+    ]
+}
+
 fn blend_extras() -> Vec<(&'static str, Result<Body>)> {
     let curved = |b: &Body| -> Vec<usize> { (0..b.edges.len()).filter(|&e| !matches!(b.edges[e].curve, Curve::Circle { .. } | Curve::Line { .. })).collect() };
     let ellipse = || {
@@ -258,7 +311,7 @@ fn main() {
         assert!(outcome.failed.is_none(), "{}: {:?}", m.id, outcome.steps);
         bodies.push((m.id.to_string(), (*outcome.body.unwrap()).clone()));
     }
-    for (name, r) in extras().into_iter().chain(spline_extras()).chain(loft_extras()).chain(blend_extras()) {
+    for (name, r) in extras().into_iter().chain(spline_extras()).chain(loft_extras()).chain(blend_extras()).chain(helix_extras()) {
         bodies.push((name.to_string(), r.unwrap()));
     }
     for (name, body) in &bodies {

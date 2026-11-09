@@ -13,7 +13,8 @@ It runs natively and in the browser through WebAssembly.
 - **Blends:** constant-radius fillets and chamfers, exact on straight and circular edges, and fitted to a stated tolerance on any other.
 - **Free-form:** lofts through sections and rational B-spline surfaces, in Booleans and in STEP files both ways.
 - **More modelling:** many tools in one Boolean, patterns, mirror, sweeps along lines and arcs,
-  offset, shell and draft, all on the same exact surfaces.
+  offset, shell and draft, all on the same exact surfaces. Springs and threads along a helix, to a stated tolerance.
+  Delete face, which closes the gap by letting the neighbours grow, and thicken.
 - **Documents:** parameters and features as plain data, saved as readable JSON. Features can
   be edited, suppressed, deleted and reordered. References go by name, and a rebuild reuses
   every step whose inputs didn't change.
@@ -105,6 +106,7 @@ The file format is described in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
 | `crates/kernel/src/boolean/` | Root finding, intersections, face tracing, classification, cleanup |
 | `crates/kernel/src/blend.rs` | Fillets and chamfers |
 | `crates/kernel/src/multi.rs`, `tweak.rs` | Many tools at once, sweeps; offset, shell and draft |
+| `crates/kernel/src/helix.rs`, `delete.rs`, `thicken.rs` | Helix, delete face and thicken |
 | `crates/kernel/src/mass.rs` | Volume and area from the B-rep through Green's theorem |
 | `crates/kernel/src/tess/` | Exact-predicate triangulator and meshing |
 | `crates/kernel/src/export/` | STL and STEP |

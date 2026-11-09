@@ -1277,6 +1277,12 @@ impl Reader<'_> {
             return Ok(Surface::Free { frame: Frame::WORLD, patch: Arc::new(patch) });
         }
         Ok(match f.name(id) {
+            "OFFSET_SURFACE" => {
+                let a = f.part(id, "OFFSET_SURFACE")?;
+                let base = self.surface(File::id(a.get(1))?)?;
+                let by = File::number(a.get(2))? * f.length;
+                crate::tweak::moved_surface(&base, by, &[])?
+            }
             "PLANE" => Surface::Plane(f.placement(File::id(f.part(id, "PLANE")?.get(1))?)?),
             "CYLINDRICAL_SURFACE" => {
                 let a = f.part(id, "CYLINDRICAL_SURFACE")?;
@@ -1548,7 +1554,7 @@ fn single_piece(flat: &Spline, what: &str) -> Result<()> {
 
 /// Everything that can't be imported, named and counted.
 fn unsupported_surfaces(file: &File, shells: &[usize]) -> Vec<(String, usize)> {
-    let known = ["B_SPLINE_SURFACE_WITH_KNOTS", "PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE", "SPHERICAL_SURFACE", "TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE", "SURFACE_OF_LINEAR_EXTRUSION", "SURFACE_OF_REVOLUTION"];
+    let known = ["B_SPLINE_SURFACE_WITH_KNOTS", "OFFSET_SURFACE", "PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE", "SPHERICAL_SURFACE", "TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE", "SURFACE_OF_LINEAR_EXTRUSION", "SURFACE_OF_REVOLUTION"];
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for &s in shells {
         let Ok(list) = file.part(s, "CLOSED_SHELL").and_then(|a| File::list(a.get(1))) else { continue };

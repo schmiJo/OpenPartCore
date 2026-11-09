@@ -123,9 +123,9 @@ fn other_units_are_converted() {
 
 #[test]
 fn surfaces_it_cant_represent_are_refused_by_name_and_count() {
-    let other = SEAMED_CYLINDER.replace("#30=PLANE('',#9);", "#30=OFFSET_SURFACE('',#9,1.,.F.);");
+    let other = SEAMED_CYLINDER.replace("#30=PLANE('',#9);", "#30=RECTANGULAR_TRIMMED_SURFACE('',#9,0.,1.,0.,1.,.T.,.T.);");
     let e = read_step(&other, 1).unwrap_err().to_string();
-    assert!(e.contains("1 on OFFSET_SURFACE"), "{e}");
+    assert!(e.contains("1 on RECTANGULAR_TRIMMED_SURFACE"), "{e}");
     assert!(e.contains("Planes, cylinders"), "{e}");
 }
 

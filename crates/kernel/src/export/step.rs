@@ -5,6 +5,7 @@
 //! cubic B-splines that pass through the samples with matching tangents. Those are
 //! approximations of the true curve, which is also how other kernels store them.
 
+use crate::error::Result;
 use crate::curve::Curve;
 use crate::mass::shell_volume;
 use crate::math::*;
@@ -54,6 +55,221 @@ fn quote(s: &str) -> String {
 /// face is on. It guessed wrong on a trimmed sphere with an ordinary loop, reading the rest of the sphere instead.
 /// With no pole inside, a loop is plainly closed and there's nothing to guess. A whole hemisphere has no such
 /// axis, since every line through the center meets it, and it keeps the one it has, which reads fine.
+/// How far a moved free-form face's fit in a file may be from the true one.
+pub const OFFSET_FIT: f64 = 1e-5;
+
+/// A moved free-form face as an ordinary B-spline, for a file. STEP has `OFFSET_SURFACE`, and this kernel reads it, but
+/// OpenCASCADE refuses one whose basis isn't C1, as "Offset with no C1 Surface", and a circle's double knots aren't. A moved
+/// face can also reach past the end of its basis, where a neighbour moved away from it, which `OFFSET_SURFACE` can't say.
+/// So it's written as a cubic through the true surface, stopping at the basis's own knots and ends, within `OFFSET_FIT`,
+/// which is well inside what files are read with. The kernel's own surface stays exact.
+fn offset_as_spline(body: &Body, f: usize) -> Option<Result<Surface>> {
+    let face = &body.faces[f];
+    let Surface::Free { patch, .. } = &face.surface else { return None };
+    if patch.offset() == 0.0 {
+        return None;
+    }
+    Some((|| {
+        let ((u0, u1), (v0, v1)) = patch.domain();
+        let corner_lo = patch.chart_of(u0, v0);
+        let corner_hi = patch.chart_of(u1, v1);
+        // The whole of the surface, and further only where the face runs past its end, along its tangent.
+        let (face_lo, face_hi) = body.face_chart_bounds(f);
+        let room = 1e-3 + 0.01 * (face_hi - face_lo).norm();
+        let past = |face: f64, end: f64, up: bool| if up == (face > end) && (face - end).abs() > 1e-7 { face + if up { room } else { -room } } else { end };
+        let lo = v2(past(face_lo.x, corner_lo.x, false), past(face_lo.y, corner_lo.y, false));
+        let hi = v2(past(face_hi.x, corner_hi.x, true), past(face_hi.y, corner_hi.y, true));
+        let inner = patch.interior_knots();
+        let stops = |a: f64, b: f64, list: Vec<f64>| -> Vec<f64> {
+            let mut out = vec![a];
+            out.extend(list.into_iter().filter(|x| *x > a + 1e-9 && *x < b - 1e-9));
+            out.push(b);
+            out.sort_by(f64::total_cmp);
+            out.dedup_by(|p, q| (*p - *q).abs() < 1e-9);
+            out
+        };
+        let (mut list_x, mut list_y) = (vec![corner_lo.x, corner_hi.x], vec![corner_lo.y, corner_hi.y]);
+        list_x.extend(inner[0].iter().map(|k| patch.chart_of(*k, v0).x));
+        list_y.extend(inner[1].iter().map(|k| patch.chart_of(u0, *k).y));
+        let (xs, ys) = (stops(lo.x, hi.x, list_x), stops(lo.y, hi.y, list_y));
+        let at = |x: f64, y: f64| face.surface.from_chart(&face.chart, v2(x, y));
+        // A polynomial through well spaced points gains digits very quickly on a smooth surface, so a low degree on few
+        // pieces is the aim. A file with thousands of small cubics in it is worse for everybody than one with a few of these.
+        let (mut xs, mut ys) = (xs, ys);
+        for _ in 0..4 {
+            for degree in [3usize, 5, 7, 9] {
+                let grid = BezierGrid::through(&xs, &ys, degree, &at)?;
+                if grid.worst_against(&at) <= OFFSET_FIT {
+                    return grid.into_patch().map(|patch| Surface::Free { frame: crate::math::Frame::WORLD, patch: std::sync::Arc::new(patch) });
+                }
+            }
+            let halved = |list: &[f64]| -> Vec<f64> {
+                let mut out = Vec::with_capacity(2 * list.len());
+                for w in list.windows(2) {
+                    out.push(w[0]);
+                    out.push((w[0] + w[1]) / 2.0);
+                }
+                out.push(list[list.len() - 1]);
+                out
+            };
+            xs = halved(&xs);
+            ys = halved(&ys);
+        }
+        Err(crate::error::Error::Unsupported(format!("a moved free-form face can't be fitted within {OFFSET_FIT:e}, even on {} pieces", (xs.len() - 1) * (ys.len() - 1))))
+    })())
+}
+
+/// Bezier pieces on a grid, of one degree, through the values of a function at Chebyshev-Lobatto points, which share their
+/// end points, so that neighbouring pieces agree all along the line between them.
+struct BezierGrid {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    degree: usize,
+    /// Control points by x, then by y.
+    points: Vec<Vec<Vec3>>,
+}
+
+impl BezierGrid {
+    fn nodes(degree: usize) -> Vec<f64> {
+        (0..=degree).map(|i| 0.5 - 0.5 * (crate::math::PI * i as f64 / degree as f64).cos()).collect()
+    }
+
+    /// The inverse of the matrix taking control points to values at the nodes. Bernstein polynomials at these nodes are
+    /// well conditioned at these degrees.
+    fn inverse(degree: usize) -> Vec<Vec<f64>> {
+        let n = degree + 1;
+        let nodes = Self::nodes(degree);
+        let mut a: Vec<Vec<f64>> = nodes
+            .iter()
+            .enumerate()
+            .map(|(row, t)| {
+                let mut line = bernstein(degree, *t);
+                line.extend((0..n).map(|c| if c == row { 1.0 } else { 0.0 }));
+                line
+            })
+            .collect();
+        for col in 0..n {
+            let pivot = (col..n).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs())).unwrap();
+            a.swap(col, pivot);
+            let head = a[col][col];
+            for v in a[col].iter_mut() {
+                *v /= head;
+            }
+            for row in 0..n {
+                if row != col {
+                    let factor = a[row][col];
+                    if factor != 0.0 {
+                        let pivot_row = a[col].clone();
+                        for (v, w) in a[row].iter_mut().zip(&pivot_row) {
+                            *v -= factor * w;
+                        }
+                    }
+                }
+            }
+        }
+        a.into_iter().map(|line| line[n..].to_vec()).collect()
+    }
+
+    fn through(xs: &[f64], ys: &[f64], degree: usize, at: &dyn Fn(f64, f64) -> Vec3) -> Result<BezierGrid> {
+        let nodes = Self::nodes(degree);
+        let inverse = Self::inverse(degree);
+        let spread = |stops: &[f64]| -> Vec<f64> {
+            let mut out = Vec::with_capacity(degree * (stops.len() - 1) + 1);
+            for (k, w) in stops.windows(2).enumerate() {
+                for (i, t) in nodes.iter().enumerate() {
+                    if i > 0 || k == 0 {
+                        out.push(w[0] + (w[1] - w[0]) * t);
+                    }
+                }
+            }
+            out
+        };
+        let (along_x, along_y) = (spread(xs), spread(ys));
+        // Turns values at the nodes of each piece of a line into that line's control points.
+        let solve = |values: &[Vec3]| -> Vec<Vec3> {
+            let pieces = (values.len() - 1) / degree;
+            let mut out = vec![Vec3::ZERO; values.len()];
+            for k in 0..pieces {
+                let part = &values[k * degree..=(k + 1) * degree];
+                for (i, row) in inverse.iter().enumerate() {
+                    out[k * degree + i] = row.iter().zip(part).fold(Vec3::ZERO, |sum, (c, v)| sum + *v * *c);
+                }
+            }
+            out
+        };
+        let lines: Vec<Vec<Vec3>> = along_x.iter().map(|x| solve(&along_y.iter().map(|y| at(*x, *y)).collect::<Vec<_>>())).collect();
+        let count_y = along_y.len();
+        let across: Vec<Vec<Vec3>> = (0..count_y).map(|j| solve(&lines.iter().map(|l| l[j]).collect::<Vec<_>>())).collect();
+        let points: Vec<Vec<Vec3>> = (0..along_x.len()).map(|i| across.iter().map(|l| l[i]).collect()).collect();
+        Ok(BezierGrid { xs: xs.to_vec(), ys: ys.to_vec(), degree, points })
+    }
+
+    fn eval(&self, x: f64, y: f64) -> Vec3 {
+        let place = |stops: &[f64], v: f64| {
+            let k = stops.partition_point(|s| *s <= v).clamp(1, stops.len() - 1) - 1;
+            (k, (v - stops[k]) / (stops[k + 1] - stops[k]))
+        };
+        let ((i, s), (j, t)) = (place(&self.xs, x), place(&self.ys, y));
+        let (bs, bt) = (bernstein(self.degree, s), bernstein(self.degree, t));
+        let mut sum = Vec3::ZERO;
+        for (a, u) in bs.iter().enumerate() {
+            for (b, w) in bt.iter().enumerate() {
+                sum = sum + self.points[i * self.degree + a][j * self.degree + b] * (u * w);
+            }
+        }
+        sum
+    }
+
+    /// The largest distance from what it fits, between the points it goes through.
+    fn worst_against(&self, at: &dyn Fn(f64, f64) -> Vec3) -> f64 {
+        let n = 2 * self.degree + 1;
+        let mut worst = 0.0f64;
+        for w in self.xs.windows(2) {
+            for z in self.ys.windows(2) {
+                for a in 0..n {
+                    for b in 0..n {
+                        let x = w[0] + (w[1] - w[0]) * (a as f64 + 0.5) / n as f64;
+                        let y = z[0] + (z[1] - z[0]) * (b as f64 + 0.5) / n as f64;
+                        worst = worst.max(self.eval(x, y).dist(at(x, y)));
+                    }
+                }
+            }
+        }
+        worst
+    }
+
+    fn into_patch(self) -> Result<crate::patch::Patch> {
+        let knots = |stops: &[f64]| -> Vec<f64> {
+            let mut out = vec![stops[0]; self.degree + 1];
+            for s in &stops[1..stops.len() - 1] {
+                out.extend(vec![*s; self.degree]);
+            }
+            out.extend(vec![stops[stops.len() - 1]; self.degree + 1]);
+            out
+        };
+        let (count_x, count_y) = (self.points.len(), self.points[0].len());
+        let points: Vec<Vec3> = self.points.iter().flatten().copied().collect();
+        let weights = vec![1.0; points.len()];
+        crate::patch::Patch::new((self.degree, self.degree), (knots(&self.xs), knots(&self.ys)), (count_x, count_y), points, weights)
+    }
+}
+
+/// The Bernstein polynomials of a degree at `t`.
+fn bernstein(degree: usize, t: f64) -> Vec<f64> {
+    let mut out = vec![0.0; degree + 1];
+    out[0] = 1.0;
+    for level in 1..=degree {
+        let mut carry = 0.0;
+        for slot in out.iter_mut().take(level) {
+            let old = *slot;
+            *slot = carry + (1.0 - t) * old;
+            carry = t * old;
+        }
+        out[level] = carry;
+    }
+    out
+}
+
 fn sphere_axis_off_face(body: &Body, index: &crate::boolean::classify::Index, f: usize) -> Option<Surface> {
     let face = &body.faces[f];
     let Surface::Sphere { frame, radius } = face.surface else {
@@ -368,7 +584,15 @@ pub fn write_step(body: &Body, name: &str) -> String {
             let face = &body.faces[f];
             let surface = match sphere_axis_off_face(body, &index, f) {
                 Some(s) => w.surface(&s),
-                None => w.surface(&face.surface),
+                None => match (offset_as_spline(body, f), &face.surface) {
+                    (Some(Ok(s)), _) => w.surface(&s),
+                    // No fit within the tolerance: the exact form, which not every reader can take, rather than a worse fit.
+                    (Some(Err(_)), Surface::Free { frame, patch }) => {
+                        let base = w.patch(frame, patch);
+                        w.entity(&format!("OFFSET_SURFACE('',#{base},{},.F.)", real(patch.offset())))
+                    }
+                    _ => w.surface(&face.surface),
+                },
             };
             let mut bounds = Vec::with_capacity(face.loops.len());
             for (l, lp) in face.loops.iter().enumerate() {

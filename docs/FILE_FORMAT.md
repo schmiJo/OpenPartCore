@@ -75,12 +75,15 @@ Common fields: `id`, `name`, and `suppressed` (default false).
 | `loft` | `sections`: a list of sketch ids, in order, each holding one outline, and `mode`. Straight between two, and a smooth cubic through three or more |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`. Profile x is the distance from the sketch's Z axis, and profile y the height along it. |
 | `sweep` | `sketch`, `path`, `mode`: see below |
+| `helix` | `sketch`, `pitch` (how far along the axis one turn goes), `turns`, `point` (default origin) and `axis` (default +z) for the axis, `left_handed` (default false), `mode`. The sketch can hold the axis, for a spring or a thread, or lie across it, for a twisted bar |
 | `solid` | `shape`, its dimensions, `at` (default XY), `mode` |
 | `pattern` | `of` (feature ids; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. |
 | `mirror` | `of` (as above), `point` (default origin), `normal` |
 | `fillet` | `edges`, `radius`, `propagate` (default true: follow tangent neighbours) |
 | `chamfer` | `edges`, `distance`, `propagate` (default true: follow tangent neighbours) |
 | `import_step` | `text`: a whole STEP file, kept in the document, and `mode`. Its faces are named by their place in the file: `f3:side.0` is the first. A wide face cut into pieces on the way in keeps one name for them all. A file it can't represent fails the feature, and says what's in the way. |
+| `delete_face` | `faces` (names or keys): those faces go, and their neighbours grow to close the gap. It takes holes, pockets, bosses, fillets, chamfers, rabbets, slots and corner notches, and refuses by name what it can't close |
+| `thicken` | `faces` (names or keys), `thickness` (outward, or inward if negative), `mode` (default `add`). A solid between the faces and a copy moved along their normals. Near faces are this feature's `start`, far ones its `end`, and walls its `side.N`. Each keeps the face it came from in its key |
 | `offset` | `distance`: every face moves out, or in if negative. Sharp edges stay sharp. |
 | `shell` | `thickness`, `open` (face names, default none). An inner wall is named for this feature, with the slot of the face it follows: `f9:side.3` lies behind `f2:side.3`. |
 | `draft` | `faces` (names), `degrees`, `pull` (default +z), `neutral` (a point on the plane where faces stay put; default the origin). A positive angle narrows the part along the pull, and widens a hole. |

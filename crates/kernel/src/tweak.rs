@@ -12,9 +12,12 @@ use crate::boolean::{subtract};
 use crate::curve::Curve;
 use crate::error::{Error, Result};
 use crate::math::*;
+use crate::patch::Patch;
+use crate::spline::Spline;
 use crate::surface::{refine_on_two, Surface};
 use crate::topo::{Body, Edge};
 use crate::validate::validate;
+use std::sync::Arc;
 
 /// How much two faces' normals can differ along an edge and still count as tangent.
 const TANGENT: f64 = 1e-7;
@@ -23,8 +26,9 @@ fn refuse(what: String) -> Error {
     Error::InvalidInput(what)
 }
 
-/// A surface moved `d` along its own normal: the one it defines, not the face's outward one.
-fn moved_surface(s: &Surface, d: f64) -> Result<Surface> {
+/// A surface moved `d` along its own normal: the one it defines, not the face's outward one. `reach` is where the
+/// surface has to go on existing, which only a swept spline needs to know.
+pub(crate) fn moved_surface(s: &Surface, d: f64, reach: &[Vec3]) -> Result<Surface> {
     let positive = |r: f64| -> Result<f64> {
         if r > MIN_FEATURE {
             Ok(r)
@@ -32,11 +36,13 @@ fn moved_surface(s: &Surface, d: f64) -> Result<Surface> {
             Err(refuse(format!("offsetting by {d} shrinks a curved face away to nothing")))
         }
     };
-    if matches!(s, Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. }) {
-        return Err(Error::Unsupported("offset and shell on spline faces aren't available yet: an offset of a spline isn't a spline, and this kernel gives an exact answer or none".into()));
-    }
     Ok(match *s {
-        Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. } => unreachable!(),
+        // A swept spline's offset is no spline, so it becomes the free-form surface it already is, moved.
+        Surface::Extruded { .. } | Surface::Revolved { .. } => {
+            let (frame, patch) = swept_as_patch(s, reach)?;
+            Surface::Free { frame, patch: Arc::new(patch.moved_by(d)?) }
+        }
+        Surface::Free { frame, ref patch } => Surface::Free { frame, patch: Arc::new(patch.moved_by(d)?) },
         Surface::Plane(f) => Surface::Plane(Frame { origin: f.origin + f.z * d, ..f }),
         Surface::Cylinder { frame, radius } => Surface::Cylinder { frame, radius: positive(radius + d)? },
         // Moving along a cone's slanted normal shifts it sideways by more than d.
@@ -44,6 +50,97 @@ fn moved_surface(s: &Surface, d: f64) -> Result<Surface> {
         Surface::Sphere { frame, radius } => Surface::Sphere { frame, radius: positive(radius + d)? },
         Surface::Torus { frame, major, minor } => Surface::Torus { frame, major, minor: positive(minor + d)? },
     })
+}
+
+/// An extruded or revolved spline as the rational patch it exactly is, over as much of it as `reach` calls for, with
+/// the normal it had.
+fn swept_as_patch(s: &Surface, reach: &[Vec3]) -> Result<(Frame, Patch)> {
+    match s {
+        Surface::Extruded { frame, curve } => {
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for p in reach {
+                let z = frame.to_local(*p).z;
+                lo = lo.min(z);
+                hi = hi.max(z);
+            }
+            let room = (hi - lo).max(1.0);
+            let (z0, z1) = (lo - room, hi + room);
+            let c = &curve.spline;
+            let (mut points, mut weights) = (Vec::with_capacity(c.points().len() * 2), Vec::with_capacity(c.points().len() * 2));
+            for (q, w) in c.points().iter().zip(c.weights()) {
+                points.push(v3(q.x, q.y, z0));
+                points.push(v3(q.x, q.y, z1));
+                weights.push(*w);
+                weights.push(*w);
+            }
+            let patch = Patch::new((c.degree(), 1), (c.knots().to_vec(), vec![z0, z0, z1, z1]), (c.points().len(), 2), points, weights)?;
+            Ok((*frame, patch))
+        }
+        Surface::Revolved { frame, curve } => {
+            // The angles it covers, measured from the middle of them, as a face is at most half a turn and a measure from
+            // one of its ends could land on either side of the half turn away.
+            let locals: Vec<Vec3> = reach.iter().map(|p| frame.to_local(*p)).filter(|l| l.x.hypot(l.y) > 1e-9).collect();
+            let sum = locals.iter().fold((0.0f64, 0.0f64), |m, l| {
+                let r = l.x.hypot(l.y);
+                (m.0 + l.y / r, m.1 + l.x / r)
+            });
+            let middle = sum.0.atan2(sum.1);
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for l in &locals {
+                let mut r = l.y.atan2(l.x) - middle;
+                while r > PI {
+                    r -= TAU;
+                }
+                while r <= -PI {
+                    r += TAU;
+                }
+                lo = lo.min(r + middle);
+                hi = hi.max(r + middle);
+            }
+            if !(hi > lo) {
+                return Err(Error::Unsupported("a revolved face with no width can't be offset".into()));
+            }
+            let room = 0.05;
+            let (a0, a1) = (lo - room, (hi + room).min(lo - room + TAU));
+            let spans = ((a1 - a0) / (PI / 2.0) - 1e-9).ceil().max(1.0) as usize;
+            let step = (a1 - a0) / spans as f64;
+            let half = (step / 2.0).cos();
+            let mut around: Vec<(f64, f64, f64)> = Vec::with_capacity(2 * spans + 1);
+            for k in 0..spans {
+                let a = a0 + step * k as f64;
+                around.push((a.cos(), a.sin(), 1.0));
+                around.push(((a + step / 2.0).cos() / half, (a + step / 2.0).sin() / half, half));
+            }
+            around.push((a1.cos(), a1.sin(), 1.0));
+            let mut knots_u = vec![a0; 3];
+            for k in 1..spans {
+                knots_u.extend(vec![a0 + step * k as f64; 2]);
+            }
+            knots_u.extend(vec![a1; 3]);
+            let c = &curve.spline;
+            let (mut points, mut weights) = (Vec::with_capacity(around.len() * c.points().len()), Vec::with_capacity(around.len() * c.points().len()));
+            for (x, y, w) in &around {
+                for (q, cw) in c.points().iter().zip(c.weights()) {
+                    points.push(v3(q.x * x, q.x * y, q.y));
+                    weights.push(cw * w);
+                }
+            }
+            let patch = Patch::new((2, c.degree()), (knots_u, c.knots().to_vec()), (around.len(), c.points().len()), points, weights)?;
+            Ok((*frame, patch))
+        }
+        _ => Err(Error::Internal("only a swept surface is converted".into())),
+    }
+}
+
+/// Points on a face's boundary.
+pub(crate) fn boundary_samples(body: &Body, f: usize) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    for c in body.faces[f].loops.iter().flatten() {
+        for i in 0..=8 {
+            out.push(body.coedge_point(*c, i as f64 / 8.0));
+        }
+    }
+    out
 }
 
 /// The new position of a vertex: nearest to where it was, on all the surfaces given. Each pass
@@ -79,9 +176,102 @@ pub(crate) fn point_on_surfaces(surfaces: &[Surface], start: Vec3) -> Option<Vec
     (worst < TOL * 0.1).then_some(p)
 }
 
+/// Where a curve meets the surfaces given, starting near `start`. A tangent edge fixes a vertex to its curve, leaving
+/// only where along it, which the other surfaces settle. A spline carries on past its ends along its tangent there, as a
+/// free-form surface does, for when a neighbour has moved away from where the curve stops.
+pub(crate) fn point_along(c: &Curve, start: Vec3, others: &[Surface]) -> Vec3 {
+    let domain = if let Curve::Spline(s) = c { Some(s.domain()) } else { None };
+    let eval = |t: f64| -> (Vec3, Vec3) {
+        if let Some((d0, d1)) = domain {
+            let inside = t.clamp(d0, d1);
+            let d = c.derivative(inside);
+            return (c.eval(inside) + d * (t - inside), d);
+        }
+        (c.eval(t), c.derivative(t))
+    };
+    let (mut t, _) = match domain {
+        Some((d0, d1)) => c.closest(start, d0, d1),
+        None => c.closest(start, -1e9f64.min(0.0), 1e9),
+    };
+    if matches!(c, Curve::Circle { .. }) {
+        t = c.closest(start, 0.0, TAU).0;
+    }
+    let (mut p, _) = eval(t);
+    for _ in 0..40 {
+        let (_, d) = eval(t);
+        let Some(s) = others.iter().find(|s| s.normal(p).dot(d).abs() > 1e-6 * d.norm()) else {
+            break;
+        };
+        let f = s.sdf(p);
+        if f.abs() < 1e-13 {
+            break;
+        }
+        t -= f / s.normal(p).dot(d);
+        p = eval(t).0;
+    }
+    p
+}
+
+/// A spline from `a` to `b` along another one, carrying on straight past its ends if they're further. Those straight pieces
+/// are joined at a knot and not smoothed in, since that's the shape of the surface there, which carries on along its tangent.
+fn spliced(c: &Curve, a: Vec3, b: Vec3) -> Option<(Curve, f64, f64)> {
+    let Curve::Spline(old) = c else { return None };
+    if old.degree() != 3 || !old.is_polynomial() {
+        return None;
+    }
+    let (d0, d1) = old.domain();
+    let reach = |p: Vec3| {
+        let (t, off) = c.closest(p, d0, d1);
+        (off <= 2.0 * TOL).then_some(t)
+    };
+    let (mut at_a, mut at_b) = (reach(a), reach(b));
+    // An end this close is the same end, and it's the fit that's a little out, as it can be at a pole.
+    let mut own = old.points().to_vec();
+    if at_a.is_none() && a.dist(own[0]) <= 1e-5 {
+        own[0] = a;
+        at_a = Some(d0);
+    }
+    let last_own = own.len() - 1;
+    if at_b.is_none() && b.dist(own[last_own]) <= 1e-5 {
+        own[last_own] = b;
+        at_b = Some(d1);
+    }
+    let mut points: Vec<Vec3> = Vec::new();
+    let mut knots: Vec<f64> = Vec::new();
+    if at_a.is_none() {
+        let first = own[0];
+        let length = a.dist(first);
+        if !(length > MIN_FEATURE) {
+            return None;
+        }
+        points.extend([a, a + (first - a) / 3.0, a + (first - a) * (2.0 / 3.0)]);
+        knots.extend(vec![d0 - length; 4]);
+        knots.extend(vec![d0; 3]);
+        knots.extend_from_slice(&old.knots()[4..]);
+    } else {
+        knots.extend_from_slice(old.knots());
+    }
+    points.extend_from_slice(&own);
+    if at_b.is_none() {
+        let last = own[last_own];
+        let length = b.dist(last);
+        if !(length > MIN_FEATURE) {
+            return None;
+        }
+        points.extend([last + (b - last) / 3.0, last + (b - last) * (2.0 / 3.0), b]);
+        knots.truncate(knots.len() - 1);
+        knots.extend(vec![d1 + length; 4]);
+    }
+    let weights = vec![1.0; points.len()];
+    let joined = Spline::new(3, knots, points, weights).ok()?;
+    let (e0, e1) = joined.domain();
+    let (t0, t1) = (at_a.unwrap_or(e0), at_b.unwrap_or(e1));
+    (t1 > t0).then(|| (Curve::Spline(Arc::new(joined)), t0, t1))
+}
+
 /// The parameter range taking a curve from `a` to `b` by the way nearest `middle`, with the curve
 /// turned round if need be so that the parameter increases along it.
-fn fitted(curve: &Curve, a: Vec3, b: Vec3, middle: Vec3) -> Option<(Curve, f64, f64)> {
+pub(crate) fn fitted(curve: &Curve, a: Vec3, b: Vec3, middle: Vec3) -> Option<(Curve, f64, f64)> {
     let tol = TOL * 10.0;
     match curve {
         Curve::Line { origin, dir } => {
@@ -119,7 +309,17 @@ fn fitted(curve: &Curve, a: Vec3, b: Vec3, middle: Vec3) -> Option<(Curve, f64, 
             }
             best.map(|b| b.1)
         }
-        Curve::Sampled(_) | Curve::Spline(_) => None,
+        // A curve with ends of its own has to reach its corners well inside what the validator allows.
+        Curve::Spline(c) => {
+            let (d0, d1) = c.domain();
+            let ((t0, off0), (t1, off1)) = (curve.closest(a, d0, d1), curve.closest(b, d0, d1));
+            (off0 < 2.0 * TOL && off1 < 2.0 * TOL && t1 > t0).then(|| (curve.clone(), t0, t1))
+        }
+        Curve::Sampled(c) => {
+            let last = (c.points.len() - 1) as f64;
+            let ((t0, off0), (t1, off1)) = (curve.closest(a, 0.0, last), curve.closest(b, 0.0, last));
+            (off0 < 2.0 * TOL && off1 < 2.0 * TOL && t1 > t0).then(|| (curve.clone(), t0, t1))
+        }
     }
 }
 
@@ -136,19 +336,24 @@ fn seam_plane(edge: &Edge, on: &Surface) -> Surface {
 
 /// The new curve for an edge between surfaces `s` and `t`, from `a` to `b`.
 fn rebuilt_curve(edge: &Edge, s: &Surface, t: &Surface, same_surface: bool, a: Vec3, b: Vec3) -> Result<(Curve, f64, f64)> {
-    let middle = edge.eval_mid();
-    let on_both = |p: Vec3, tol: f64| s.sdf(p).abs() < tol && t.sdf(p).abs() < tol;
+    let n = 24;
+    let samples: Vec<Vec3> = (1..n).map(|i| edge.curve.eval(edge.t0 + (edge.t1 - edge.t0) * i as f64 / n as f64)).collect();
+    let cutter = same_surface.then(|| seam_plane(edge, s));
+    curve_between(s, cutter.as_ref().unwrap_or(t), a, b, edge.eval_mid(), matches!(edge.curve, Curve::Line { .. }), &samples)
+}
+
+/// A curve where two surfaces meet, from `a` to `b`, by the way nearest `middle`. It's exact if the two have a closed form
+/// there, and otherwise it follows `samples`, moved onto both surfaces.
+pub(crate) fn curve_between(s: &Surface, other: &Surface, a: Vec3, b: Vec3, middle: Vec3, try_straight: bool, samples: &[Vec3]) -> Result<(Curve, f64, f64)> {
+    let on_both = |p: Vec3, tol: f64| s.sdf(p).abs() < tol && other.sdf(p).abs() < tol;
     // A straight edge often stays straight: rulings, and edges between planes. Checking is cheaper
     // than intersecting, and works where the surfaces are tangent, which intersection doesn't.
-    if matches!(edge.curve, Curve::Line { .. }) && a.dist(b) > MIN_FEATURE {
+    if try_straight && a.dist(b) > MIN_FEATURE {
         let straight = Curve::line_through(a, b);
         if [0.25, 0.5, 0.75].iter().all(|f| on_both(a + (b - a) * *f, TOL)) {
             return fitted(&straight, a, b, middle).ok_or_else(|| Error::Internal("a straight edge didn't fit its ends".into()));
         }
     }
-    // A seam between pieces of one surface lies in the plane of the old curve.
-    let cutter = same_surface.then(|| seam_plane(edge, s));
-    let other = cutter.as_ref().unwrap_or(t);
     let mut region = Aabb::EMPTY;
     region.add(a);
     region.add(b);
@@ -168,13 +373,11 @@ fn rebuilt_curve(edge: &Edge, s: &Surface, t: &Surface, same_surface: bool, a: V
             return Ok(found);
         }
     }
-    // No closed form: follow the old curve, moving samples onto both new surfaces.
-    let n = 24;
-    let mut points = Vec::with_capacity(n + 1);
+    // No closed form: follow the samples, moving them onto both new surfaces.
+    let mut points = Vec::with_capacity(samples.len() + 2);
     points.push(a);
-    for i in 1..n {
-        let p = edge.curve.eval(edge.t0 + (edge.t1 - edge.t0) * i as f64 / n as f64);
-        points.push(refine_on_two(s, other, p).ok_or_else(|| refuse("an edge can't be followed onto the new surfaces: they may have stopped meeting there".to_string()))?);
+    for p in samples {
+        points.push(refine_on_two(s, other, *p).ok_or_else(|| refuse("an edge can't be followed onto the new surfaces: they may have stopped meeting there".to_string()))?);
     }
     points.push(b);
     let curve = ssi::sampled_from_points(points, s, other)?;
@@ -200,8 +403,46 @@ fn mapped_tangent_edge(edge: &Edge, map: &mut dyn FnMut(Vec3) -> Vec3) -> Option
             let r = local.dot(frame.x);
             (r > MIN_FEATURE).then(|| Curve::Circle { frame: Frame { origin: frame.origin + frame.z * local.dot(frame.z), ..*frame }, radius: r })
         }
-        _ => None,
+        _ => {
+            // Anything else goes through points that follow the old curve, as many as it takes to be within `FIT`.
+            let at = |t: f64, map: &mut dyn FnMut(Vec3) -> Vec3| map(edge.curve.eval(t));
+            let mut n = 16usize;
+            loop {
+                let points: Vec<Vec3> = (0..=n).map(|i| at(edge.t0 + (edge.t1 - edge.t0) * i as f64 / n as f64, map)).collect();
+                let spline = Spline::through(&points).ok()?;
+                let (d0, d1) = spline.domain();
+                let worst = (0..n).map(|i| {
+                    let t = edge.t0 + (edge.t1 - edge.t0) * (i as f64 + 0.5) / n as f64;
+                    let want = at(t, map);
+                    Curve::Spline(Arc::new(spline.clone())).closest(want, d0, d1).1
+                }).fold(0.0f64, f64::max);
+                if worst <= crate::rolling::FIT || n >= 1024 {
+                    return (worst <= crate::rolling::FIT).then(|| Curve::Spline(Arc::new(spline)));
+                }
+                n *= 2;
+            }
+        }
     }
+}
+
+/// A traced curve as a spline, within `FIT`.
+fn sampled_as_spline(curve: &Curve, t0: f64, t1: f64) -> Option<(Curve, f64, f64)> {
+    if !matches!(curve, Curve::Sampled(_)) {
+        return None;
+    }
+    let mut n = 16usize;
+    while n <= 512 {
+        let points: Vec<Vec3> = (0..=n).map(|i| curve.eval(t0 + (t1 - t0) * i as f64 / n as f64)).collect();
+        let fitted = Spline::through(&points).ok()?;
+        let (d0, d1) = fitted.domain();
+        let new_curve = Curve::Spline(Arc::new(fitted));
+        let worst = (0..n).map(|i| new_curve.closest(curve.eval(t0 + (t1 - t0) * (i as f64 + 0.5) / n as f64), d0, d1).1).fold(0.0f64, f64::max);
+        if worst <= crate::rolling::FIT {
+            return Some((new_curve, d0, d1));
+        }
+        n *= 2;
+    }
+    None
 }
 
 /// How a change treats a tangent edge: its faces stay tangent to each other, so their intersection is
@@ -225,6 +466,10 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
             let p = edge.eval_mid();
             let (a, b) = (body.faces[f].surface.normal(p), body.faces[g].surface.normal(p));
             tangent[e] = a.cross(b).norm() < TANGENT;
+        } else if matches!(surfaces[f], Surface::Free { .. }) && !matches!(body.faces[f].surface, Surface::Plane(_)) {
+            // A seam on a moved free-form surface goes where its points go, which is much cheaper to use from then on
+            // than a curve found by solving onto that surface at every point.
+            tangent[e] = true;
         }
     }
     let curve_for_tangent = |e: usize| -> Result<Curve> {
@@ -241,7 +486,7 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
         if let Some(why) = failed {
             return Err(why);
         }
-        c.ok_or_else(|| Error::Unsupported("a smooth edge of this kind can't be moved yet: only straight and circular ones can".into()))
+        c.ok_or_else(|| Error::Unsupported("a smooth edge of this kind can't be moved to within the tolerance here".into()))
     };
     let mut tangent_curves: Vec<Option<Curve>> = vec![None; body.edges.len()];
     for e in 0..body.edges.len() {
@@ -280,27 +525,14 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
                     let tangent_pair = (uses[e][0].0, uses[e][1].0);
                     faces.iter().filter(|&&f| f != tangent_pair.0 && f != tangent_pair.1).map(|&f| surfaces[f].clone()).collect()
                 };
-                let (mut t, _) = c.closest(tangent_map(e, start)?, -1e9f64.min(0.0), 1e9);
-                if matches!(c, Curve::Circle { .. }) {
-                    t = c.closest(tangent_map(e, start)?, 0.0, TAU).0;
+                let p = point_along(c, tangent_map(e, start)?, &others);
+                // A fitted curve's end tangent is only so good, which shows over a long stretch past its end. The surfaces
+                // settle it from there.
+                if matches!(c, Curve::Spline(_)) {
+                    point_on_surfaces(&list, p).filter(|q| q.dist(p) < 1e-3).unwrap_or(p)
+                } else {
+                    p
                 }
-                let mut p = c.eval(t);
-                for _ in 0..40 {
-                    let Some(s) = others.iter().find(|s| {
-                        let n = s.normal(p);
-                        n.dot(c.derivative(t)).abs() > 1e-6 * c.derivative(t).norm()
-                    }) else {
-                        break;
-                    };
-                    let f = s.sdf(p);
-                    if f.abs() < 1e-13 {
-                        break;
-                    }
-                    let d = c.derivative(t);
-                    t -= f / s.normal(p).dot(d);
-                    p = c.eval(t);
-                }
-                p
             }
             None => point_on_surfaces(&list, start).ok_or_else(|| refuse("the new surfaces no longer meet at a corner".to_string()))?,
         };
@@ -317,8 +549,13 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
             return Err(refuse("an edge shrinks away to nothing: the change is too big for the part's shape".to_string()));
         }
         let (curve, t0, t1) = match &tangent_curves[e] {
-            Some(c) => fitted(c, a, b, tangent_map(e, edge.eval_mid())?).ok_or_else(|| refuse("a smooth edge didn't fit its new corners".to_string()))?,
-            None => rebuilt_curve(edge, &surfaces[f], &surfaces[g], same[e], a, b)?,
+            Some(c) => fitted(c, a, b, tangent_map(e, edge.eval_mid())?).filter(|f| f.0.eval(f.1).dist(a) <= TOL && f.0.eval(f.2).dist(b) <= TOL).or_else(|| spliced(c, a, b)).ok_or_else(|| refuse("a smooth edge didn't fit its new corners".to_string()))?,
+            None => {
+                let (c, t0, t1) = rebuilt_curve(edge, &surfaces[f], &surfaces[g], same[e], a, b)?;
+                // The same goes for a curve traced on a moved surface: fitted once, within the tolerance, if it can be.
+                let moved = [f, g].iter().any(|&h| matches!(&surfaces[h], Surface::Free { patch, .. } if patch.offset() != 0.0));
+                if moved { sampled_as_spline(&c, t0, t1).unwrap_or((c, t0, t1)) } else { (c, t0, t1) }
+            }
         };
         // An edge that has turned round means a face has turned inside out.
         let (old, new) = (edge.curve.eval(edge.t1) - edge.curve.eval(edge.t0), curve.eval(t1) - curve.eval(t0));
@@ -353,7 +590,11 @@ pub fn offset_faces(body: &Body, distances: &[f64]) -> Result<Body> {
         .faces
         .iter()
         .zip(distances)
-        .map(|(f, d)| moved_surface(&f.surface, if f.flipped { -*d } else { *d }))
+        .enumerate()
+        .map(|(i, (f, d))| {
+            let reach = if matches!(f.surface, Surface::Extruded { .. } | Surface::Revolved { .. }) { boundary_samples(body, i) } else { Vec::new() };
+            moved_surface(&f.surface, if f.flipped { -*d } else { *d }, &reach)
+        })
         .collect::<Result<Vec<Surface>>>()?;
     let uses = body.edge_uses();
     let map = |e: usize, p: Vec3| -> Result<Vec3> {
@@ -492,7 +733,7 @@ mod tests {
         let mut rng = Rng::new(5);
         for s in &list {
             for d in [1.5, -1.5] {
-                let t = moved_surface(s, d).unwrap();
+                let t = moved_surface(s, d, &[]).unwrap();
                 for _ in 0..200 {
                     let raw = f.to_world(v3(rng.range(-9.0, 9.0), rng.range(-9.0, 9.0), rng.range(1.0, 9.0)));
                     let p = s.project(raw);

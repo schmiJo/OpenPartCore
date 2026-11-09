@@ -24,6 +24,9 @@ use coreshape::math::*;
 use coreshape::profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
 use coreshape::spline::Spline;
 use coreshape::topo::{Body, FaceTag};
+use coreshape::delete::delete_faces;
+use coreshape::helix::{helix, Helix};
+use coreshape::thicken::thicken;
 use coreshape::tweak::{draft, offset, shell};
 pub use coreshape_sketch::expr::{self, Env, Expr};
 pub use coreshape_sketch::json::{self, Value};
@@ -571,6 +574,15 @@ pub enum Op {
     /// Sweeps a sketch along a smooth path of lines and arcs, starting at the sketch plane and
     /// heading along its normal.
     Sweep { sketch: FeatureId, path: Vec<SweepStep>, mode: Mode },
+    /// Sweeps a sketch along a helix around the axis through `point`: a spring, a thread or a twisted bar. `pitch` is how
+    /// far along the axis one turn goes. The sides are named from the sketch, and the ends are the start and end caps.
+    Helix { sketch: FeatureId, point: Point3, axis: Point3, pitch: Expr, turns: Expr, left_handed: bool, mode: Mode },
+    /// Deletes faces, picked by name or key, and closes the gap by letting their neighbours grow. It adds no faces, and
+    /// what's left keeps its names.
+    DeleteFace { faces: Vec<FaceKey> },
+    /// A solid between faces and a copy of them moved along their normals, `thickness` outward, or inward if negative.
+    /// Named as this feature's start cap for the near faces, its end cap for the far ones, and sides for the walls.
+    Thicken { faces: Vec<FaceKey>, thickness: Expr, mode: Mode },
     /// Repeats earlier features, or the whole body if `of` is empty. A copy keeps the names of what
     /// it copied, so a face's name covers the original and all its copies.
     Pattern { of: Vec<FeatureId>, along: PatternPath },
@@ -643,6 +655,9 @@ impl Op {
             Op::Fillet { .. } => "fillet",
             Op::Chamfer { .. } => "chamfer",
             Op::Sweep { .. } => "sweep",
+            Op::Helix { .. } => "helix",
+            Op::DeleteFace { .. } => "delete_face",
+            Op::Thicken { .. } => "thicken",
             Op::Loft { .. } => "loft",
             Op::Pattern { .. } => "pattern",
             Op::Mirror { .. } => "mirror",
@@ -667,6 +682,9 @@ impl Op {
             Op::Fillet { .. } => "Fillet",
             Op::Chamfer { .. } => "Chamfer",
             Op::Sweep { .. } => "Sweep",
+            Op::Helix { .. } => "Helix",
+            Op::DeleteFace { .. } => "Delete face",
+            Op::Thicken { .. } => "Thicken",
             Op::Loft { .. } => "Loft",
             Op::Pattern { .. } => "Pattern",
             Op::Mirror { .. } => "Mirror",
@@ -680,8 +698,13 @@ impl Op {
     pub fn references(&self) -> Vec<FeatureId> {
         let mut out = Vec::new();
         match self {
-            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } => out.push(*sketch),
+            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => out.push(*sketch),
             Op::Loft { sections, .. } => out.extend_from_slice(sections),
+            Op::DeleteFace { faces } | Op::Thicken { faces, .. } => {
+                for key in faces {
+                    key.references(&mut out);
+                }
+            }
             Op::Fillet { edges, .. } | Op::Chamfer { edges, .. } => edges.references(&mut out),
             Op::Pattern { of, .. } | Op::Mirror { of, .. } => out.extend_from_slice(of),
             Op::Shell { open: faces, .. } | Op::Draft { faces, .. } => out.extend(faces.iter().map(|f| f.feature)),
@@ -753,7 +776,13 @@ impl Op {
                     Primitive::Torus { major, minor } => out.extend([major, minor]),
                 }
             }
-            Op::Loft { .. } => {}
+            Op::Loft { .. } | Op::DeleteFace { .. } => {}
+            Op::Helix { point, axis, pitch, turns, .. } => {
+                out.extend(point.iter());
+                out.extend(axis.iter());
+                out.extend([pitch, turns]);
+            }
+            Op::Thicken { thickness, .. } => out.push(thickness),
             Op::Sweep { path, .. } => {
                 for step in path {
                     match step {
@@ -1065,7 +1094,7 @@ impl Document {
 
     fn check_sketch_refs(op: &Op, before: &[Feature]) -> Result<()> {
         let list: &[FeatureId] = match op {
-            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } => std::slice::from_ref(sketch),
+            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => std::slice::from_ref(sketch),
             Op::Loft { sections, .. } => sections,
             _ => &[],
         };
@@ -1207,7 +1236,7 @@ impl Document {
             // body so far, and on its sketch when it has one.
             let key = match &feature.op {
                 Op::Sketch { .. } | Op::ConstrainedSketch { .. } => hash_text(1, &own),
-                Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } => {
+                Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => {
                     let sketch_key = sketch_keys.get(sketch).copied().unwrap_or(0);
                     hash_text(body_key ^ sketch_key.rotate_left(17), &own)
                 }
@@ -1353,6 +1382,28 @@ impl Document {
                     .map(|(k, p)| Ok(with_region(sweep(p, &frame, &steps, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
                 applied(body.as_deref(), tools, *mode)
+            }
+            Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => {
+                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
+                let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
+                let motion = Helix { origin: at(point)?, axis: at(axis)?, pitch: num(pitch, env)?, turns: num(turns, env)?, left_handed: *left_handed };
+                let tools = list
+                    .iter()
+                    .enumerate()
+                    .map(|(k, p)| Ok(with_region(helix(p, &frame, &motion, tag)?, if by_entity { 0 } else { k as u32 })))
+                    .collect::<Result<Vec<Body>>>()?;
+                applied(body.as_deref(), tools, *mode)
+            }
+            Op::DeleteFace { faces } => {
+                let current = body.ok_or_else(|| Error::InvalidInput("deleting faces needs a body to work on".into()))?;
+                let list = keyed_faces(&current, faces)?;
+                Ok(solid(delete_faces(&current, &list)?))
+            }
+            Op::Thicken { faces, thickness, mode } => {
+                let current = body.ok_or_else(|| Error::InvalidInput("thickening needs a body to take faces from".into()))?;
+                let list = keyed_faces(&current, faces)?;
+                let made = thicken(&current, &list, num(thickness, env)?, tag)?;
+                applied(Some(&*current), vec![made], *mode)
             }
             Op::Pattern { of, along } => {
                 let moves = pattern_moves(along, env)?;
@@ -1678,6 +1729,24 @@ fn named_faces(body: &Body, names: &[FaceRef]) -> Result<Vec<usize>> {
             return Err(Error::InvalidInput(format!("the face {} no longer exists in the model", name.name())));
         }
     }
+    Ok(out)
+}
+
+/// The faces some keys pick out, each once, in face order.
+fn keyed_faces(body: &Body, keys: &[FaceKey]) -> Result<Vec<usize>> {
+    if keys.is_empty() {
+        return Err(Error::InvalidInput("this needs at least one face".into()));
+    }
+    let mut out = Vec::new();
+    for key in keys {
+        let found = find_faces(body, key);
+        if found.is_empty() {
+            return Err(Error::InvalidInput(format!("the face {} no longer exists in the model", key.text())));
+        }
+        out.extend(found);
+    }
+    out.sort_unstable();
+    out.dedup();
     Ok(out)
 }
 
@@ -2199,6 +2268,23 @@ pub fn op_value(op: &Op) -> Value {
             ("point", point3_value(point)),
             ("normal", point3_value(normal)),
         ]),
+        Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => Value::obj(vec![
+            ("type", Value::str("helix")),
+            ("sketch", Value::Num(sketch.0 as f64)),
+            ("point", point3_value(point)),
+            ("axis", point3_value(axis)),
+            ("pitch", expr_value(pitch)),
+            ("turns", expr_value(turns)),
+            ("left_handed", Value::Bool(*left_handed)),
+            ("mode", mode_value(*mode)),
+        ]),
+        Op::DeleteFace { faces } => Value::obj(vec![("type", Value::str("delete_face")), ("faces", key_list_value(faces))]),
+        Op::Thicken { faces, thickness, mode } => Value::obj(vec![
+            ("type", Value::str("thicken")),
+            ("faces", key_list_value(faces)),
+            ("thickness", expr_value(thickness)),
+            ("mode", mode_value(*mode)),
+        ]),
         Op::Offset { distance } => Value::obj(vec![("type", Value::str("offset")), ("distance", expr_value(distance))]),
         Op::Shell { open, thickness } => Value::obj(vec![
             ("type", Value::str("shell")),
@@ -2229,6 +2315,18 @@ pub fn op_value(op: &Op) -> Value {
 
 fn face_list_value(list: &[FaceRef]) -> Value {
     Value::Arr(list.iter().map(|f| Value::str(f.name())).collect())
+}
+
+fn key_list_value(list: &[FaceKey]) -> Value {
+    Value::Arr(list.iter().map(|f| Value::str(f.text())).collect())
+}
+
+fn read_key_list(v: &Value, key: &str) -> Result<Vec<FaceKey>> {
+    let bad = || Error::InvalidInput(format!("\"{key}\" must be a list of face names or keys"));
+    match v.get(key) {
+        None => Ok(Vec::new()),
+        Some(list) => list.as_array().ok_or_else(bad)?.iter().map(|n| FaceKey::parse(n.as_str().ok_or_else(bad)?)).collect(),
+    }
 }
 
 fn read_face_list(v: &Value, key: &str) -> Result<Vec<FaceRef>> {
@@ -2422,6 +2520,34 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 point: v.get("point").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
                 normal: read_point3(field(v, "normal", "a mirror")?)?,
             })
+        }
+        "helix" => {
+            with(&["type", "sketch", "point", "axis", "pitch", "turns", "left_handed", "mode"])?;
+            let sketch = field(v, "sketch", "a helix")?
+                .as_f64()
+                .filter(|n| n.fract() == 0.0 && *n >= 1.0 && *n < u32::MAX as f64)
+                .map(|n| FeatureId(n as u32))
+                .ok_or_else(|| Error::InvalidInput("\"sketch\" must be a feature id".into()))?;
+            Ok(Op::Helix {
+                sketch,
+                point: v.get("point").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
+                axis: v.get("axis").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 1.0)),
+                pitch: expr_field(v, "pitch", "a helix")?,
+                turns: expr_field(v, "turns", "a helix")?,
+                left_handed: match v.get("left_handed") {
+                    None => false,
+                    Some(b) => b.as_bool().ok_or_else(|| Error::InvalidInput("\"left_handed\" must be true or false".into()))?,
+                },
+                mode: read_mode(v)?,
+            })
+        }
+        "delete_face" => {
+            with(&["type", "faces"])?;
+            Ok(Op::DeleteFace { faces: read_key_list(v, "faces")? })
+        }
+        "thicken" => {
+            with(&["type", "faces", "thickness", "mode"])?;
+            Ok(Op::Thicken { faces: read_key_list(v, "faces")?, thickness: expr_field(v, "thickness", "a thicken")?, mode: read_mode(v)? })
         }
         "offset" => {
             with(&["type", "distance"])?;

@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 /// One outline piece in 3D, as rational Bezier pieces over 0 to 1.
 #[derive(Clone)]
-struct Chain {
-    spans: Vec<Vec<Hom>>,
-    breaks: Vec<f64>,
-    id: u32,
+pub(crate) struct Chain {
+    pub(crate) spans: Vec<Vec<Hom>>,
+    pub(crate) breaks: Vec<f64>,
+    pub(crate) id: u32,
 }
 
 fn split_span(h: &[Hom], s: f64) -> (Vec<Hom>, Vec<Hom>) {
@@ -51,7 +51,7 @@ fn elevate(h: &[Hom]) -> Vec<Hom> {
 }
 
 impl Chain {
-    fn of(seg: &Seg, frame: &Frame) -> Result<Chain> {
+    pub(crate) fn of(seg: &Seg, frame: &Frame) -> Result<Chain> {
         let lift = |q: Vec2, w: f64| Hom::of(frame.point(q.x, q.y, 0.0), w);
         let id = seg.id;
         match seg.geom {
@@ -89,11 +89,11 @@ impl Chain {
         }
     }
 
-    fn start(&self) -> Vec3 {
+    pub(crate) fn start(&self) -> Vec3 {
         self.spans[0][0].point()
     }
 
-    fn degree(&self) -> usize {
+    pub(crate) fn degree(&self) -> usize {
         self.spans[0].len() - 1
     }
 
@@ -101,7 +101,7 @@ impl Chain {
         self.spans.iter().flat_map(|h| h.windows(2)).map(|w| w[0].point().dist(w[1].point())).sum()
     }
 
-    fn reversed(&self) -> Chain {
+    pub(crate) fn reversed(&self) -> Chain {
         let spans = self.spans.iter().rev().map(|h| h.iter().rev().copied().collect()).collect();
         let breaks = self.breaks.iter().rev().map(|b| 1.0 - b).collect();
         Chain { spans, breaks, id: self.id }
@@ -129,7 +129,7 @@ impl Chain {
     }
 
     /// Control points at this degree, cut at these breaks, with each shared end kept once.
-    fn control_points(&self, degree: usize, breaks: &[f64]) -> Vec<Hom> {
+    pub(crate) fn control_points(&self, degree: usize, breaks: &[f64]) -> Vec<Hom> {
         let mut out: Vec<Hom> = Vec::new();
         for (k, span) in self.spans.iter().enumerate() {
             let mut h = span.clone();
@@ -165,7 +165,7 @@ fn wire_centroid(chains: &[Chain]) -> Vec3 {
 }
 
 /// The vector area of an outline, whose direction says which way around it runs.
-fn area_vector(chains: &[Chain]) -> Vec3 {
+pub(crate) fn area_vector(chains: &[Chain]) -> Vec3 {
     let mut points = Vec::new();
     for c in chains {
         for h in &c.spans {
@@ -190,7 +190,7 @@ fn area_vector(chains: &[Chain]) -> Vec3 {
 }
 
 /// A curve for an edge: a line if it's straight, since that's exact and much cheaper.
-fn edge_curve(degree: usize, knots: &[f64], line: &[Hom]) -> Result<(Curve, f64, f64)> {
+pub(crate) fn edge_curve(degree: usize, knots: &[f64], line: &[Hom]) -> Result<(Curve, f64, f64)> {
     let points: Vec<Vec3> = line.iter().map(|q| q.point()).collect();
     let (a, b) = (points[0], points[points.len() - 1]);
     let length = a.dist(b);

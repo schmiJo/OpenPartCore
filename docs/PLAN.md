@@ -63,6 +63,7 @@ forward. `main`, and so the main working copy, only advances to such commits. Wo
 
 | Commit | Change | What to do |
 |---|---|---|
+| Helix, delete face, thicken | `coreshape_document::Op` gained `Helix`, `DeleteFace` and `Thicken`. Offset and shell no longer refuse spline and free-form faces. A moved one becomes `Surface::Free`, with `Patch::offset()` above zero, so `Patch::iso_curve` refuses and `points()` give the unmoved surface | An exhaustive `match` needs the new arms. Code reading a patch's control points should check `offset()` |
 | Tolerant import | `coreshape::topo::Body` gained `tolerance` | Reading is unaffected, and zero means the kernel's own. Code building a `Body` by hand without `..Body::default()` has to set it |
 | Free-form surfaces | `Surface` gained `Free`, and `coreshape_document::Op` gained `Loft`. `Surface::name` gives `free-form surface`. `spline::MAX_DEGREE` went from 7 to 16 in the kernel, and stays 7 in the sketch solver | An exhaustive `match` needs the new arms. Nothing else changes for code that doesn't use them |
 | Face keys | `coreshape::topo::Face` gained `origin`, and `EdgeSelect` gained `OnFaceKey` and `BetweenKeys`. Names, tags, slots, `FaceRef` and files are unchanged | Reading is unaffected. Code building a `Face` by hand has to set `origin`, and an exhaustive `match` on `EdgeSelect` needs the new arms |
@@ -91,4 +92,4 @@ From OpenShape's list, in its order:
 3. Ellipses and elliptical arcs in the solver, regions and kernel profiles: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 4. Splines in sketches, extruded and revolved, then lofts and free-form surfaces from imported files: done, see [NURBS_DESIGN.md](NURBS_DESIGN.md).
 5. STEP import of analytic surfaces and swept curves: done, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). It refuses anything else, naming the surface type. Assemblies come next there.
-6. Modelling: offset, shell and draft that survive topology changes, helix, delete face and thicken.
+6. Modelling: helix, delete face and thicken are done, and offset and shell work on free-form faces: see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). Offset, shell and draft that survive topology changes are next.

@@ -557,6 +557,14 @@ impl BezierCell {
     }
 
     /// A stationary point of the distance, by Newton's method, in the cell's own parameters.
+    /// Whether the distance to `p` is at a minimum here, rather than a saddle or a maximum.
+    fn is_minimum(&self, s: f64, t: f64, p: Vec3) -> bool {
+        let q = self.local(s, t);
+        let r = q.p - p;
+        let (a, b, d) = (q.ds.dot(q.ds) + r.dot(q.dss), q.ds.dot(q.dt) + r.dot(q.dst), q.dt.dot(q.dt) + r.dot(q.dtt));
+        a > 0.0 && d > 0.0 && a * d - b * b > 0.0
+    }
+
     fn newton(&self, mut s: f64, mut t: f64, p: Vec3) -> Option<(f64, f64)> {
         for _ in 0..16 {
             let q = self.local(s, t);
@@ -645,18 +653,26 @@ pub struct Patch {
     lo: Vec3,
     hi: Vec3,
     min_radius: f64,
+    /// How far the surface is moved along its normal from the one the control points define. Everything about
+    /// closest points still happens on those, which is why an offset costs no precision: see `moved_by`.
+    offset: f64,
+    /// `poles`, moved with the surface. It's `poles` itself when there's no offset.
+    moved_poles: Vec<Vec3>,
+    /// The normal at each of `poles`, when something needs it exactly, as a moved surface does: a moved pole has to land
+    /// on one point, and the normal from a little way in is only nearly that.
+    pole_normals: Vec<(Vec3, Vec3)>,
 }
 
 impl std::fmt::Debug for Patch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Patch(degree {:?}, {:?} control points)", self.degree, self.count)
+        write!(f, "Patch(degree {:?}, {:?} control points, offset {})", self.degree, self.count, self.offset)
     }
 }
 
 impl PartialEq for Patch {
     fn eq(&self, o: &Patch) -> bool {
         self.id == o.id
-            || (self.degree == o.degree && self.knots == o.knots && self.points == o.points && self.weights == o.weights)
+            || (self.degree == o.degree && self.knots == o.knots && self.points == o.points && self.weights == o.weights && self.offset == o.offset)
     }
 }
 
@@ -843,12 +859,133 @@ impl Patch {
             cells,
             breaks: (breaks_u, breaks_v),
             sides,
+            moved_poles: poles.clone(),
+            pole_normals: Vec::new(),
             poles,
             scale,
             lo,
             hi,
             min_radius,
+            offset: 0.0,
         })
+    }
+
+    /// This surface moved `d` along its normal, further than it already is.
+    ///
+    /// That's exact, and no fit: a point of the moved surface is `S + d n`. The nearest point on it to anything is straight
+    /// off the nearest point of `S`, so the certified search below still does all the work, and the signed distance is the
+    /// one to `S`, less `d`. It never overstates, since moving a point by some distance can't change its distance from
+    /// anything by more than that. Refused where the surface would fold, past a center of curvature, or where it has a
+    /// crease, whose offset would leave a gap or an overlap.
+    pub fn moved_by(&self, d: f64) -> Result<Patch> {
+        let bad = |why: String| Err(Error::InvalidInput(format!("moving a free-form surface by {d}: {why}")));
+        let mut out = Patch::new(self.degree, self.knots.clone(), self.count, self.points.clone(), self.weights.clone())?;
+        out.offset = self.offset + d;
+        let total = out.offset;
+        if total == 0.0 {
+            return Ok(out);
+        }
+        const SAMPLES: usize = 9;
+        // A crease at a knot.
+        for (which, list) in [&self.breaks.0, &self.breaks.1].iter().enumerate() {
+            let other = if which == 0 { &self.breaks.1 } else { &self.breaks.0 };
+            for &k in &list[1..list.len() - 1] {
+                let (a, b) = (other[0], other[other.len() - 1]);
+                for i in 0..=SAMPLES {
+                    let at = a + (b - a) * i as f64 / SAMPLES as f64;
+                    let (lo, hi) = if which == 0 { (self.cell_normal(k, at, true, false), self.cell_normal(k, at, false, false)) } else { (self.cell_normal(at, k, false, true), self.cell_normal(at, k, false, false)) };
+                    if lo.dot(hi) < 1.0 - 1e-9 {
+                        return bad("it has a sharp crease, whose offset would need a gap filled".into());
+                    }
+                }
+            }
+        }
+        // A fold: the moved surface's own normal turns against this one's.
+        for cell in &self.cells {
+            for a in 0..=SAMPLES {
+                for b in 0..=SAMPLES {
+                    let (u, v) = (cell.u.0 + (cell.u.1 - cell.u.0) * a as f64 / SAMPLES as f64, cell.v.0 + (cell.v.1 - cell.v.0) * b as f64 / SAMPLES as f64);
+                    let (_, du, dv) = out.derivs(u, v);
+                    let n = self.normal_at(u, v);
+                    if self.base_at_pole(self.base_point(u, v)) {
+                        continue;
+                    }
+                    let (bu, bv) = self.base_derivs(u, v);
+                    if du.cross(dv).dot(n) <= 1e-6 * bu.cross(bv).norm() {
+                        return bad(format!("that passes a center of curvature near u = {u:.4}, v = {v:.4}, where the surface would fold over"));
+                    }
+                }
+            }
+        }
+        // A pole stays a point only if the normal around it is one direction.
+        let ((u0, u1), (v0, v1)) = self.domain();
+        let mut moved = Vec::with_capacity(self.poles.len());
+        for (i, side) in self.sides.iter().enumerate() {
+            if side.is_some() {
+                continue;
+            }
+            let along = |t: f64| match i {
+                0 => (u0 + (u1 - u0) * t, v0),
+                1 => (u1, v0 + (v1 - v0) * t),
+                2 => (u0 + (u1 - u0) * t, v1),
+                _ => (u0, v0 + (v1 - v0) * t),
+            };
+            let (u, v) = along(0.5);
+            let at = self.base_point(u, v);
+            // All round it from just inside. The tilt there is in proportion to how far inside, so two distances give the
+            // limit, and if it has one normal, those all agree.
+            let inside = |t: f64, by: f64| -> Vec3 {
+                let (u, v) = along(t);
+                let (u, v) = match i {
+                    0 => (u, v0 + (v1 - v0) * by),
+                    1 => (u1 - (u1 - u0) * by, v),
+                    2 => (u, v1 - (v1 - v0) * by),
+                    _ => (u0 + (u1 - u0) * by, v),
+                };
+                let (a, b) = self.base_derivs(u, v);
+                a.cross(b).normalized()
+            };
+            let around: Vec<Vec3> = (0..=8)
+                .map(|k| {
+                    let t = k as f64 / 8.0;
+                    (inside(t, 1e-5) * 2.0 - inside(t, 2e-5)).normalized()
+                })
+                .collect();
+            let mean = around.iter().fold(Vec3::ZERO, |sum, n| sum + *n).normalized();
+            if around.iter().any(|n| n.dot(mean) < 1.0 - 1e-6) {
+                return bad("it has a pole with a point to it, whose offset would need a gap filled".into());
+            }
+            moved.push(at + mean * total);
+            out.pole_normals.push((at, mean));
+        }
+        out.moved_poles = moved;
+        out.lo = out.lo - Vec3::splat(total.abs());
+        out.hi = out.hi + Vec3::splat(total.abs());
+        // Moving out along a bend stretches it by at most this.
+        let stretch = 1.0 + total.abs() / self.min_radius.max(1e-9);
+        out.scale = (out.scale.0 * stretch, out.scale.1 * stretch);
+        out.min_radius = (self.min_radius - total.abs()).max(self.min_radius * 0.1);
+        Ok(out)
+    }
+
+    /// How far it's moved along its normal from what its control points define.
+    pub fn offset(&self) -> f64 {
+        self.offset
+    }
+
+    /// The normal from one side of a knot, for looking for creases.
+    fn cell_normal(&self, u: f64, v: f64, before_u: bool, before_v: bool) -> Vec3 {
+        let find = |list: &[f64], x: f64, before: bool| {
+            let k = list.partition_point(|b| *b <= x).clamp(1, list.len() - 1) - 1;
+            if before && k > 0 && (x - list[k]).abs() < 1e-12 { k - 1 } else { k }
+        };
+        let (a, b) = (find(&self.breaks.0, u, before_u), find(&self.breaks.1, v, before_v));
+        let cell = &self.cells[a * (self.breaks.1.len() - 1) + b];
+        // A little way in from the knot along the other direction too, so that a pole's neighbourhood still has a normal.
+        let s = ((u - cell.u.0) / (cell.u.1 - cell.u.0)).clamp(1e-6, 1.0 - 1e-6);
+        let t = ((v - cell.v.0) / (cell.v.1 - cell.v.0)).clamp(1e-6, 1.0 - 1e-6);
+        let (_, ds, dt) = cell.first(s, t);
+        ds.cross(dt).normalized()
     }
 
     pub fn degree(&self) -> (usize, usize) {
@@ -884,6 +1021,7 @@ impl Patch {
     /// can bulge past its own edges here, so the edges alone don't give this.
     pub fn bounds_over(&self, u: (f64, f64), v: (f64, f64)) -> (Vec3, Vec3) {
         let (mut lo, mut hi) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
+        let room = Vec3::splat(self.offset.abs());
         for cell in &self.cells {
             if cell.u.1 < u.0 || cell.u.0 > u.1 || cell.v.1 < v.0 || cell.v.0 > v.1 {
                 continue;
@@ -893,8 +1031,8 @@ impl Patch {
                 let (a, b) = (cell.u.0 + du * leaf.s.0, cell.u.0 + du * leaf.s.1);
                 let (c, d) = (cell.v.0 + dv * leaf.t.0, cell.v.0 + dv * leaf.t.1);
                 if b >= u.0 && a <= u.1 && d >= v.0 && c <= v.1 {
-                    lo = lo.min(leaf.lo);
-                    hi = hi.max(leaf.hi);
+                    lo = lo.min(leaf.lo - room);
+                    hi = hi.max(leaf.hi + room);
                 }
             }
         }
@@ -912,19 +1050,38 @@ impl Patch {
 
     /// Whether a point is at one of this surface's poles, where a whole side has shrunk to a point.
     pub fn at_pole(&self, p: Vec3) -> bool {
+        self.moved_poles.iter().any(|q| q.dist(p) <= 1e-7)
+    }
+
+    fn base_at_pole(&self, p: Vec3) -> bool {
         self.poles.iter().any(|q| q.dist(p) <= 1e-7)
     }
 
     /// The normal at these parameters. At a pole there isn't one, so it's the limit from a little way in.
     fn normal_at(&self, u: f64, v: f64) -> Vec3 {
-        let (_, du, dv) = self.derivs(u, v);
+        let (du, dv) = self.base_derivs(u, v);
         let n = du.cross(dv);
-        if n.norm() > 1e-12 * du.norm().max(dv.norm()).max(1e-300) * du.norm().max(dv.norm()) && !self.at_pole(self.eval(u, v)) {
+        let at = self.base_point(u, v);
+        if n.norm() > 1e-12 * du.norm().max(dv.norm()).max(1e-300) * du.norm().max(dv.norm()) && !self.base_at_pole(at) {
             return n.normalized();
         }
+        if let Some((_, known)) = self.pole_normals.iter().find(|(q, _)| q.dist(at) <= 1e-7) {
+            return *known;
+        }
         let ((u0, u1), (v0, v1)) = self.domain();
-        let (_, a, b) = self.derivs(u + (0.5 * (u0 + u1) - u) * 1e-3, v + (0.5 * (v0 + v1) - v) * 1e-3);
+        let (a, b) = self.base_derivs(u + (0.5 * (u0 + u1) - u) * 1e-6, v + (0.5 * (v0 + v1) - v) * 1e-6);
         a.cross(b).normalized()
+    }
+
+    fn base_point(&self, u: f64, v: f64) -> Vec3 {
+        let (cell, s, t) = self.cell_at(u, v);
+        cell.point(s, t)
+    }
+
+    fn base_derivs(&self, u: f64, v: f64) -> (Vec3, Vec3) {
+        let (cell, s, t) = self.cell_at(u, v);
+        let (_, ds, dt) = cell.first(s, t);
+        (ds / (cell.u.1 - cell.u.0), dt / (cell.v.1 - cell.v.0))
     }
 
     /// The same surface reflected in local y, with `v` running the other way, which makes its normal the
@@ -942,7 +1099,12 @@ impl Patch {
         }
         let (v0, v1) = self.domain().1;
         let knots_v: Vec<f64> = self.knots.1.iter().rev().map(|k| v0 + v1 - k).collect();
-        Patch::new(self.degree, (self.knots.0.clone(), knots_v), self.count, points, weights)
+        let plain = Patch::new(self.degree, (self.knots.0.clone(), knots_v), self.count, points, weights)?;
+        if self.offset != 0.0 {
+            plain.moved_by(self.offset)
+        } else {
+            Ok(plain)
+        }
     }
 
     /// Whether its two `u` sides, or `v` sides, are the same curve in space, so that it closes up.
@@ -961,6 +1123,9 @@ impl Patch {
 
     /// The curve at a fixed `u`, running along `v`, or at a fixed `v` running along `u`.
     pub fn iso_curve(&self, at: f64, along_v_at_u: bool) -> Result<Spline> {
+        if self.offset != 0.0 {
+            return Err(Error::Unsupported("a line of constant parameter on an offset surface isn't a spline".into()));
+        }
         let (nu, nv) = self.count;
         let (degree, knots, count, other_degree, other_knots) = if along_v_at_u {
             (self.degree.0, &self.knots.0, nu, self.degree.1, &self.knots.1)
@@ -1006,7 +1171,12 @@ impl Patch {
                 weights.push(q.w);
             }
         }
-        Patch::new(self.degree, (knots_u, knots_v), (across.len(), keep_v.1 - keep_v.0 + 1), points, weights)
+        let plain = Patch::new(self.degree, (knots_u, knots_v), (across.len(), keep_v.1 - keep_v.0 + 1), points, weights)?;
+        if self.offset != 0.0 {
+            plain.moved_by(self.offset)
+        } else {
+            Ok(plain)
+        }
     }
 
     fn cell_at(&self, u: f64, v: f64) -> (&BezierCell, f64, f64) {
@@ -1019,14 +1189,43 @@ impl Patch {
     /// The point at these parameters, which must be in the domain.
     pub fn eval(&self, u: f64, v: f64) -> Vec3 {
         let (cell, s, t) = self.cell_at(u, v);
-        cell.point(s, t)
+        let p = cell.point(s, t);
+        if self.offset == 0.0 {
+            return p;
+        }
+        p + self.normal_at(u, v) * self.offset
     }
 
     /// The point and its derivatives with respect to `u` and `v`.
     pub fn derivs(&self, u: f64, v: f64) -> (Vec3, Vec3, Vec3) {
         let (cell, s, t) = self.cell_at(u, v);
         let (p, ds, dt) = cell.first(s, t);
-        (p, ds / (cell.u.1 - cell.u.0), dt / (cell.v.1 - cell.v.0))
+        let (du, dv) = (ds / (cell.u.1 - cell.u.0), dt / (cell.v.1 - cell.v.0));
+        if self.offset == 0.0 {
+            return (p, du, dv);
+        }
+        // The normal's rate of change, by differences within this cell, which are good to about ten digits here.
+        let step = 1e-5;
+        let normal = |s: f64, t: f64| -> Vec3 {
+            let (_, a, b) = cell.first(s, t);
+            let n = a.cross(b);
+            if n.norm() > 1e-12 * a.norm() * b.norm() {
+                n.normalized()
+            } else {
+                Vec3::ZERO
+            }
+        };
+        let (s0, s1) = ((s - step).max(0.0), (s + step).min(1.0));
+        let (t0, t1) = ((t - step).max(0.0), (t + step).min(1.0));
+        let (na, nb) = (normal(s0, t), normal(s1, t));
+        let (nc, ne) = (normal(s, t0), normal(s, t1));
+        let (nu, nv) = if na == Vec3::ZERO || nb == Vec3::ZERO || nc == Vec3::ZERO || ne == Vec3::ZERO {
+            // At a pole the surface isn't regular, and it stays a point when moved.
+            (Vec3::ZERO, Vec3::ZERO)
+        } else {
+            ((nb - na) / ((s1 - s0) * (cell.u.1 - cell.u.0)), (ne - nc) / ((t1 - t0) * (cell.v.1 - cell.v.0)))
+        };
+        (p + self.normal_at(u, v) * self.offset, du + nu * self.offset, dv + nv * self.offset)
     }
 
     /// The closest point of the patch, found with certainty as the module's notes describe.
@@ -1038,8 +1237,17 @@ impl Patch {
             }
         }
         let foot = self.search(p);
+        let foot = if self.offset == 0.0 { foot } else { self.moved_foot(p, foot) };
         LAST.with(|c| c.set(Some((self.id, key, foot))));
         foot
+    }
+
+    /// The nearest point on the moved surface, from the nearest on the one it was moved from. The distance goes by where
+    /// that point is. What a search that ran out of budget could prove about the unmoved surface is no use here, as the
+    /// difference between that and the offset would look like a real gap.
+    fn moved_foot(&self, p: Vec3, foot: PatchFoot) -> PatchFoot {
+        let at = foot.at + foot.normal * self.offset;
+        PatchFoot { at, distance: p.dist(at), ..foot }
     }
 
     fn search(&self, p: Vec3) -> PatchFoot {
@@ -1052,6 +1260,7 @@ impl Patch {
         let nearest = self.cells.iter().min_by(|a, b| a.center.dist(p).total_cmp(&b.center.dist(p)));
         // The stationary point Newton found, which a box can recognise as its one root without looking again.
         let mut root = None;
+        let mut minimum = false;
         if let Some(cell) = nearest {
             consider(cell, 0.5, 0.5, p, &mut best);
             if let Some(leaf) = cell.leaves().iter().min_by(|a, b| a.center.dist(p).total_cmp(&b.center.dist(p))) {
@@ -1060,6 +1269,7 @@ impl Patch {
                 if let Some((s, t)) = cell.newton(s, t, p) {
                     consider(cell, s, t, p, &mut best);
                     root = Some((std::ptr::from_ref(cell), s, t));
+                    minimum = cell.is_minimum(s, t, p);
                 }
             }
         }
@@ -1067,8 +1277,18 @@ impl Patch {
         // that close aren't something this kernel can have. This is how every point on the surface goes, such as
         // those along a face's own edges, and it's most queries while building something.
         if root.is_some() && best.0 < TOL {
-            let (at, _, _) = self.derivs(best.1, best.2);
+            let at = self.base_point(best.1, best.2);
             return PatchFoot { u: best.1, v: best.2, at, normal: self.normal_at(best.1, best.2), distance: best.0, boundary: false };
+        }
+        // The same for a surface moved by a distance: a point on it is that far straight off the unmoved one. A nearer part
+        // of the unmoved surface would mean the moved one had run into itself.
+        if root.is_some() && self.offset != 0.0 && (best.0 - self.offset.abs()).abs() < TOL {
+            let at = self.base_point(best.1, best.2);
+            let normal = self.normal_at(best.1, best.2);
+            // Close to a pole, every direction around it is about the same distance away, so only a true minimum will do.
+            if minimum && (p - at).dot(normal) * self.offset > 0.0 {
+                return PatchFoot { u: best.1, v: best.2, at, normal, distance: best.0, boundary: false };
+            }
         }
         // A boundary point closer than the best so far is in a leaf on that side whose box is closer too.
         let ((u0, u1), (v0, v1)) = self.domain();
@@ -1104,7 +1324,7 @@ impl Patch {
                 }
             }
         }
-        let (at, _, _) = self.derivs(best.1, best.2);
+        let at = self.base_point(best.1, best.2);
         let normal = self.normal_at(best.1, best.2);
         // Where the surface is stationary, the offset is along the normal. Anything else is a boundary point,
         // whichever way it was reached, and there the height above the tangent plane is what's used.
@@ -1193,20 +1413,33 @@ impl Patch {
         let (u, v) = ((uv.x / self.scale.0).clamp(u0, u1), (uv.y / self.scale.1).clamp(v0, v1));
         let (cell, s, t) = self.cell_at(u, v);
         match cell.newton(s, t, p) {
-            Some((s, t)) => cell.point(s, t).dist(p),
+            Some((s, t)) if self.offset == 0.0 => cell.point(s, t).dist(p),
+            Some((s, t)) => {
+                let (q, ds, dt) = cell.first(s, t);
+                let n = ds.cross(dt);
+                if n.norm() > 1e-12 * ds.norm() * dt.norm() {
+                    ((p - q).dot(n.normalized()) - self.offset).abs()
+                } else {
+                    self.signed_distance(p).abs()
+                }
+            }
             None => self.signed_distance(p).abs(),
         }
     }
 
     /// The normal at a chart position in the domain.
     pub fn normal_at_chart(&self, uv: Vec2) -> Vec3 {
+        if self.offset != 0.0 {
+            let ((u0, u1), (v0, v1)) = self.domain();
+            return self.normal_at((uv.x / self.scale.0).clamp(u0, u1), (uv.y / self.scale.1).clamp(v0, v1));
+        }
         let (_, dx, dy) = self.from_chart(uv);
         dx.cross(dy).normalized()
     }
 
     /// How many Gauss points integrate one chart direction of a flux or area exactly, or nearly.
     pub fn quadrature_points(&self) -> usize {
-        if self.is_polynomial() {
+        if self.is_polynomial() && self.offset == 0.0 {
             // A flux density is a polynomial of three times the degree here, and an n-point rule is exact to 2n - 1.
             (3 * self.degree.0 + 2) / 2 + 1
         } else {
@@ -1238,13 +1471,33 @@ impl Patch {
         let (u, v) = (uv.x / self.scale.0, uv.y / self.scale.1);
         let (cu, cv) = (u.clamp(u0, u1), v.clamp(v0, v1));
         let (q, du, dv) = self.derivs(cu, cv);
-        (q + du * (u - cu) + dv * (v - cv), du / self.scale.0, dv / self.scale.1)
+        let (over_u, over_v) = (u - cu, v - cv);
+        // Past one side, the tangent it carries on along turns as you go along that side, which is a real part of the
+        // surface's slope there. Past a corner, the tangent plane is flat.
+        let (mut along_u, mut along_v) = (du, dv);
+        if over_v != 0.0 && over_u == 0.0 {
+            let h = 1e-5 * (u1 - u0);
+            let (a, b) = ((cu - h).max(u0), (cu + h).min(u1));
+            let turn = (self.derivs(b, cv).2 - self.derivs(a, cv).2) / (b - a);
+            along_u = du + turn * over_v;
+        } else if over_u != 0.0 && over_v == 0.0 {
+            let h = 1e-5 * (v1 - v0);
+            let (a, b) = ((cv - h).max(v0), (cv + h).min(v1));
+            let turn = (self.derivs(cu, b).1 - self.derivs(cu, a).1) / (b - a);
+            along_v = dv + turn * over_u;
+        }
+        (q + du * over_u + dv * over_v, along_u / self.scale.0, along_v / self.scale.1)
     }
 
     /// The knots strictly inside the range, along `u` and along `v`.
     pub fn interior_knots(&self) -> [&[f64]; 2] {
         let inner = |list: &'_ Vec<f64>| -> std::ops::Range<usize> { 1..list.len() - 1 };
         [&self.breaks.0[inner(&self.breaks.0)], &self.breaks.1[inner(&self.breaks.1)]]
+    }
+
+    /// The chart position of these parameters.
+    pub fn chart_of(&self, u: f64, v: f64) -> Vec2 {
+        v2(u * self.scale.0, v * self.scale.1)
     }
 
     /// The parameters at a chart position.

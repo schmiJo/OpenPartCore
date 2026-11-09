@@ -1,7 +1,7 @@
 # Known limits and open defects
 
 What the kernel refuses, what it only approximates, and what hasn't been tested. The sketch solver's limits and results are in
-[SKETCH_SOLVER.md](SKETCH_SOLVER.md), and the MCP server's in [MCP.md](MCP.md). Every section was last compared with the code on 2026-11-08.
+[SKETCH_SOLVER.md](SKETCH_SOLVER.md), and the MCP server's in [MCP.md](MCP.md). Every section was last compared with the code on 2026-11-09.
 
 Numbers come from the runs described here. To replay any fuzz case:
 
@@ -14,8 +14,9 @@ cargo run --release -p coreshape --example replay -- <grid|rot|prism|gen|al|ext|
 These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 
 - **More kinds of loft.** No loft to a point, closed loop, guide curve or tangency at the ends: see [below](#free-form-surfaces-and-lofts).
-- **Helix, delete face and thicken.** Not started. A sweep path can only be lines and arcs.
 - **Offset, shell and draft that change a body's topology.** They refuse instead: see [below](#offset-shell-and-draft).
+- **Draft on spline and free-form faces.** Offset and shell work on those now, and draft is still refused.
+- **Sheet bodies.** Everything here is a closed solid, so thicken takes faces of a solid, and a surface can't exist alone.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
 - **Assemblies and drawings.** A STEP assembly is refused.
 
@@ -93,7 +94,7 @@ Checked further by `scripts/check_step_import.sh`, which has OpenCASCADE write 3
 
 Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.md).
 
-- **Refused by name:** offset, shell and draft on these faces, because the true result isn't a spline. Fillets and chamfers are fitted: see [below](#fillets-and-chamfers).
+- **Refused by name:** draft on these faces. Offset and shell turn the face into the free-form surface it exactly is, moved: see [below](#offset-shell-and-draft). Fillets and chamfers are fitted: see [below](#fillets-and-chamfers).
 - **Two different splines sharing part of their length** are refused when their faces overlap there. Identical curves are fine, so two extrusions from one profile work.
 - **A spline can touch a revolve axis only at its ends.**
 - **An outline that crosses itself is found by sampling,** 16 pieces per knot interval and closer toward its ends, so a crossing much smaller than that could get through to the mesher, which
@@ -105,7 +106,7 @@ Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.
 
 Rational B-spline patches, from a loft or a file: see [NURBS_DESIGN.md](NURBS_DESIGN.md#phase-3-free-form-patches).
 
-- **Refused by name:** offset, shell and draft on these faces, as on swept splines. A pole or a fold, found by sampling each knot interval at 169 points for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
+- **Refused by name:** draft on these faces, as on swept splines. A pole or a fold, found by sampling each knot interval at 169 points for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
 - **Two surfaces lying on each other are refused unless they're the same patch.** A patch that's exactly a cylinder, against a real cylinder of that size, is refused as a tangency, and nothing guesses that they're the same.
 - **The proof has edges.** The closest point is proven for every point of the patch. Past its boundary the surface carries on along its tangent planes, where the value is only a height, and that's only used near faces' edges. Far from a surface, if a great many points are almost equally close, a search can run out of budget and report a smaller distance it can prove. A patch's tightest bend, which sets how fine a trace is, is sampled and not proven, so a very small feature between samples could be stepped over. The checks on every result still apply.
 - **Lofts take one outline per section, with the same number of holes,** and they can't end in a point, close into a ring, follow guide curves or set tangency at the ends.
@@ -207,6 +208,13 @@ hadn't found it because its curves have several spans, while the vase's single s
 
 These keep a body's topology and move its surfaces, so they are exact. OpenShape has asked for versions that survive a change of topology, which aren't started. Today:
 
+- **A free-form or swept spline face moves exactly.** Its offset isn't a spline, so it isn't stored as one: the surface is the patch plus a distance, and the distance to it is the distance to the patch less that one. Checked on a vase, by a one-dimensional integral from its own profile, at offsets from 0.25 to 3: 6152.276608 against 6152.276661 at 0.75, and 12447.1833 against 12447.1844 at 3. On a spline sphere, 5575.279763 against 5575.279763.
+- **Past the end of a free-form face, a moved surface carries on along its tangent.** An outward offset of a part with caps needs that, as a side has to reach a cap that has moved away from it, and the true offset of the side isn't defined there. The extended part is a ruled surface and not a continuation of the curvature.
+- **Refused on a free-form surface:** a move past a center of curvature, found by sampling, where it would fold; a surface with a sharp crease at a knot; and a pole with a point to it, like the tip of a cone, as each of those would need a gap filled. A smooth pole is fine.
+- **The never-overstating promise is weaker on a moved surface.** It holds as long as the moved surface hasn't come back near its own unmoved one, which is what a fold or a thin neck does. A search out of budget reports where it got to, rather than a lower bound, as the difference between a lower bound and the offset would look like a real gap.
+- **In a STEP file a moved free-form face is a fit, within 1e-5.** STEP has `OFFSET_SURFACE`, which this kernel reads, but OpenCASCADE refuses one on a surface that isn't C1 ("Offset with no C1 Surface"), and a circle's double knots aren't. So it's a B-spline of up to degree 9 on few pieces. A two-face vase goes from 10 KB to 185 KB, and reading that back here takes about 5 s, as closest points on degree 9 are slow to set up. The kernel's own copy stays exact.
+- **OpenCASCADE disagrees about thin moved solids.** On `thick_vase` it gets a volume of 617.12, and on `vase_hollow` 843.71. Both differ by about 1%, and the same one-dimensional integral gives 623.19315 and 836.33638, which is what this kernel gets. The gallery flags these two, with the three lofts it has flagged before, for the same reason.
+
 - **A change big enough to alter the topology is refused,** such as an offset that makes a small face vanish or
   closes a hole. Commercial kernels restructure the neighbours. This one says the change is too big.
 - **Outward offsets keep sharp edges sharp,** meeting further out. There are no rounded joins.
@@ -221,9 +229,42 @@ These keep a body's topology and move its surfaces, so they are exact. OpenShape
 Checked in OpenCASCADE: `offset_out` and `offset_in` on a fully rounded box match its own `makeOffsetShape` volumes (12497.7143
 and 5404.3606), and all the results read as valid solids.
 
+## Helix
+
+A profile carried by a screw motion: a spring, a thread, or with the section across the axis, a twisted bar.
+
+- **Stated tolerance, not exact.** Each section is exact, as a section is carried rigidly. Between them the true surface has no rational form, so each control point follows a quintic matching its true position and first two derivatives at both ends of a piece, with enough pieces to keep the bound `r h^6 / 46080` under 1e-7. Measured at radii from 1 to 1000: 8.7e-8 to 9.5e-8 from the true helix.
+- **Neighbouring faces share their control points,** so the fit can't open a gap between them.
+- **A side is one face per half turn, counted from the start,** so more turns leave the earlier faces where they were. Each half turn has a key of its own, as `f4:side.0@f4.3`, and those are kept. What a thread cuts from a shaft isn't so lucky: the wall is many pieces under one name, numbered by position, so a slider move can change which is `#2`. Name a piece of a cut-up wall only if nothing moves it.
+- **Checks that the turns clear each other,** by following 8 points per curve piece around their helixes to see whether any lands back inside the section, at 64 steps a turn. A section touching itself exactly counts as a collision. A narrower collision than those samples could get through.
+- **Refused by name:** a section touching or crossing the axis while holding it, a section lying along the path, a pitch of zero, and over 200 turns.
+- **A thread on a shaft of the same radius is a tangency,** as a helical face isn't exactly on the cylinder, so a ridge has to bury itself in the shaft, as the tests' does, and a groove has to reach past its surface.
+- **Fuzz:** 300 random helixes (`--example fuzz_features -- 300 helix`) against the closed-form volume: 259 right, 0 refused, 0 wrong, and 41 skipped as too tall for their pitch, where a refusal is right.
+- **OpenCASCADE:** the square spring's volume and area match it to 1.5e-11, the twisted bar's to 1.7e-10, and the thread to 9.6e-7. On round wire it differs by 7.6e-5 at 2131.67, where the closed form is 2131.8345, which is also what this kernel gets.
+
+## Delete face
+
+- **Takes:** holes, pockets, bosses and dimples, as islands whose whole border is inner loops of their neighbours. A void or one of several separate pieces. Fillets, chamfers and rabbets, as strips, including chains around a closed rim and corner patches where three chains meet. Corner notches and cut corners, with three sides. Slots across a face, with one plane on both sides.
+- **Oracle:** taking away what a feature added has to give the part as it was, in volume and area. All 11 test groups do that, including fitted fillets on an elliptical rim and a free-form rim. Every combination of the 4 top edges of a block, with fillets and chamfers, comes back to exactly its volume.
+- **Faces only grow,** along surfaces that are already there, so nothing new is approximate unless the two faces that now meet have no exact intersection.
+- **Refused by name:** any other shape of gap. The commonest in practice is **a slot or boss cut through an earlier fillet,** whose gap has more sides than this handles. For example, `subtract(fillet(block, edge), slot_box)`, and delete the slot's faces.
+- **Half a surface is refused** when what's left of it can't close, such as one half of a hole's wall. The hole has to go whole.
+- **It doesn't check the faces that grew against the rest of the body.** Extending a face far enough to run into a distant part of the same solid isn't caught, except for a vertex that would land over three times the part's size away.
+- **Fuzz:** 300 random parts with a random feature (`--example fuzz_features -- 300 delete`): 276 given back exactly, 16 refused, 0 wrong and 8 skipped. All 16 refusals are the case above.
+
+## Thicken
+
+A solid between faces of a body and a copy of them moved along their normals, with walls along those normals.
+
+- **Faces of a solid only,** as there are no sheet bodies. Several faces have to meet smoothly. Faces meeting at a sharp edge are refused, and can be thickened one at a time.
+- **Far faces are exact on every surface type,** including free-form ones, as those are a surface moved by a distance.
+- **Walls are exact where they have a form of their own:** a plane from a straight edge whose normal doesn't change, and a plane, cylinder or cone from a round edge whose normal keeps its angle to the axis. Elsewhere they're ruled patches through the true normals, fitted to within 1.5e-7, with up to 1024 stations.
+- **Oracles, all met to 1e-9 or better:** a flat face's area times the thickness, tube walls, spherical and toroidal shells, and a free-form cylinder against a true one. A thin layer on a free-form vase settles to its area. Steiner's formula checks a cone, and a 1D integral gives 623.19315 for the vase at 0.5, which is what comes out.
+- **Fuzz:** 300 random faces (`--example fuzz_features -- 300 thicken`): 296 fine, 4 refused and 0 wrong, the refusals being an edge whose radius would go to nothing inward. Those are checked for validity and against their own mesh, since no closed form exists for most.
+
 ## Sweeps
 
-- **The path is lines and arcs,** and each step carries on from the last one's direction, so there are no corners, free curves or helices.
+- **The path is lines and arcs,** and each step carries on from the last one's direction, so there are no corners or free curves. A helix is its own feature: see [above](#helix).
 - **A bend tighter than the profile is wide is refused,** since the profile would cross the bend's center.
 - **Each step is built separately and joined by a Boolean,** so a path that runs into itself gives the union of its pieces and isn't refused, and it can hit the Boolean's limits above.
 - **Spline profiles along a path have no test of their own.** Free-form sweeps along a free path aren't built.

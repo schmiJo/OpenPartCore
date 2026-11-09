@@ -59,7 +59,9 @@ pub(crate) fn edge_winding(surface: &Surface, chart: &Chart, e: &Edge, reversed:
         let tm = (ta + tb) / 2.0;
         let m = at(tm);
         let reach = a.dist(m).max(b.dist(m));
-        if target.dist(m) > 1.5 * reach || depth >= 44 {
+        // By 20 halvings a curve is straight to far less than rounding, so a piece still reaching this far is a jump in the
+        // chart and not a curve. A jump is one straight step, and refining it further would just cost time.
+        if target.dist(m) > 1.5 * reach || depth >= 20 {
             let (u, v) = (a - target, b - target);
             u.cross(v).atan2(u.dot(v))
         } else {
@@ -75,10 +77,28 @@ pub(crate) fn edge_winding(surface: &Surface, chart: &Chart, e: &Edge, reversed:
             _ => 8,
         }
     };
-    let dt = (e.t1 - e.t0) / pieces as f64;
+    // Where an edge runs into a pole of a free-form surface, its chart position jumps along the side that shrank to a point,
+    // however close it gets. No amount of refining can close that up, so that last sliver is one straight step in the chart.
+    let at_pole = |t: f64| match surface {
+        Surface::Free { frame, patch } => patch.at_pole(frame.to_local(e.curve.eval(t))),
+        _ => false,
+    };
+    let sliver = 1e-6 * (e.t1 - e.t0);
+    let (from, to) = (if at_pole(e.t0) { e.t0 + sliver } else { e.t0 }, if at_pole(e.t1) { e.t1 - sliver } else { e.t1 });
+    let dt = (to - from) / pieces as f64;
+    let chord = |p: Vec2, q: Vec2| {
+        let (u, v) = (p - target, q - target);
+        u.cross(v).atan2(u.dot(v))
+    };
     let mut total = 0.0;
+    if from > e.t0 {
+        total += chord(at(e.t0), at(from));
+    }
+    if to < e.t1 {
+        total += chord(at(to), at(e.t1));
+    }
     for i in 0..pieces {
-        let (ta, tb) = (e.t0 + dt * i as f64, e.t0 + dt * (i + 1) as f64);
+        let (ta, tb) = (from + dt * i as f64, from + dt * (i + 1) as f64);
         total += if straight {
             let (u, v) = (at(ta) - target, at(tb) - target);
             u.cross(v).atan2(u.dot(v))
