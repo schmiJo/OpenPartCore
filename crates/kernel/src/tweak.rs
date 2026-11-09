@@ -856,6 +856,7 @@ fn meshes_closed(body: &Body) -> Result<()> {
 /// Moves each face outward by its own distance, negative for inward. Sharp edges stay sharp: neighbouring
 /// faces simply meet further out or in. Faces that share a smooth edge must move by the same distance.
 pub fn offset_faces(body: &Body, distances: &[f64]) -> Result<Body> {
+    body.needs_solid("an offset")?;
     if distances.len() != body.faces.len() {
         return Err(refuse(format!("{} distances for {} faces", distances.len(), body.faces.len())));
     }
@@ -1058,6 +1059,7 @@ pub fn offset(body: &Body, distance: f64) -> Result<Body> {
 /// Hollows a body to walls of `thickness`, inward from every face, leaving the listed faces open.
 /// Inner faces are named for feature `feature`, with the slot of the face they follow.
 pub fn shell(body: &Body, open: &[usize], thickness: f64, feature: u32) -> Result<Body> {
+    body.needs_solid("a shell")?;
     if !(thickness >= MIN_FEATURE) {
         return Err(refuse(format!("a wall thickness of {thickness} is too small")));
     }
@@ -1103,6 +1105,7 @@ pub fn shell(body: &Body, open: &[usize], thickness: f64, feature: u32) -> Resul
 /// and cylinders along it become cones. A positive angle makes the part narrower going along the pull, and
 /// a hole wider, so that it releases from a mould drawn that way.
 pub fn draft(body: &Body, faces: &[usize], pull: Vec3, neutral: Vec3, angle: f64) -> Result<Body> {
+    body.needs_solid("a draft")?;
     if !(pull.norm() > 1e-12) {
         return Err(refuse("a pull direction must have a non-zero length".to_string()));
     }

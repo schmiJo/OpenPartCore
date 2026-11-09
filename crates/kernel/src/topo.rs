@@ -6,6 +6,7 @@
 //! reference bugs and makes feature history trivial to cache.
 
 use crate::curve::Curve;
+use crate::error::{Error, Result};
 use crate::math::*;
 use crate::surface::{Chart, Surface};
 
@@ -79,7 +80,7 @@ pub struct Face {
 }
 
 /// A solid: any number of closed shells. Outer shells enclose positive volume
-/// and voids enclose negative volume.
+/// and voids enclose negative volume. Or, with `sheet` set, open surfaces: see that field.
 #[derive(Clone, Debug, Default)]
 pub struct Body {
     pub vertices: Vec<Vec3>,
@@ -89,6 +90,10 @@ pub struct Body {
     /// How far this body's edges may be from their faces. Zero, which means the kernel's own tolerance, unless it came
     /// from a file whose surfaces don't quite meet, where this is the widest gap it was read with.
     pub tolerance: f64,
+    /// A sheet: open surfaces and not a solid, with no inside. An edge used by one face is its boundary here, and a defect
+    /// anywhere else, so this is declared by what makes a sheet and never worked out from the edges. A solid with a hole in
+    /// it must not pass for one. See docs/SHEET_BODIES_DESIGN.md.
+    pub sheet: bool,
 }
 
 impl Edge {
@@ -221,6 +226,21 @@ impl Body {
         uses
     }
 
+    /// The edges only one face uses: a sheet's boundary. A valid solid has none.
+    pub fn boundary_edges(&self) -> Vec<usize> {
+        self.edge_uses().iter().enumerate().filter(|(_, uses)| uses.len() == 1).map(|(e, _)| e).collect()
+    }
+
+    /// Refuses a sheet, for what only works on a solid.
+    pub fn needs_solid(&self, what: &str) -> Result<()> {
+        if self.sheet {
+            return Err(Error::InvalidInput(format!(
+                "{what} needs a solid, and this is a sheet, an open surface with no inside. A sheet can be cut with a trim, thickened into a solid, or sewn into one if it closes"
+            )));
+        }
+        Ok(())
+    }
+
     /// Groups faces into shells by edge connectivity.
     /// Several bodies held as one, each keeping its own shells, with nothing done about where they touch or overlap. It's
     /// for showing, measuring and exporting them together. Faces and edges keep their order, body by body.
@@ -239,6 +259,7 @@ impl Body {
             }));
             out.shells.extend(part.shells.iter().map(|s| s.iter().map(|f| f + faces).collect::<Vec<usize>>()));
             out.tolerance = out.tolerance.max(part.tolerance);
+            out.sheet |= part.sheet;
         }
         out
     }
@@ -253,7 +274,7 @@ impl Body {
         } else {
             self
         };
-        (0..body.shells.len()).filter(|&s| crate::mass::shell_volume(body, s) >= 0.0).count()
+        (0..body.shells.len()).filter(|&s| body.sheet || crate::mass::shell_volume(body, s) >= 0.0).count()
     }
 
     /// This body as connected solids, each with the voids inside it, in the order of their first faces. A body of one
@@ -268,14 +289,15 @@ impl Body {
             self
         };
         let volumes: Vec<f64> = (0..body.shells.len()).map(|s| crate::mass::shell_volume(body, s)).collect();
-        let outers: Vec<usize> = (0..body.shells.len()).filter(|&s| volumes[s] >= 0.0).collect();
+        // A sheet has no voids: each of its shells is a piece of its own.
+        let outers: Vec<usize> = (0..body.shells.len()).filter(|&s| body.sheet || volumes[s] >= 0.0).collect();
         if outers.len() < 2 {
             return vec![body.clone()];
         }
         let extract = |shells: &[usize]| -> Body {
             let mut faces: Vec<usize> = shells.iter().flat_map(|&s| body.shells[s].iter().copied()).collect();
             faces.sort_unstable();
-            let mut out = Body { tolerance: body.tolerance, ..Body::default() };
+            let mut out = Body { tolerance: body.tolerance, sheet: body.sheet, ..Body::default() };
             let (mut vertices, mut edges) = (std::collections::HashMap::new(), std::collections::HashMap::new());
             for &f in &faces {
                 let mut face = body.faces[f].clone();
@@ -365,7 +387,7 @@ impl Body {
     /// The body's reflection across a plane. A reflection turns loops the other way round, so each
     /// face's loops are reversed to keep material on the same side of them.
     pub fn mirrored(&self, m: &crate::math::Mirror) -> Body {
-        let mut out = Body { vertices: self.vertices.iter().map(|p| m.of_point(*p)).collect(), tolerance: self.tolerance, ..Body::default() };
+        let mut out = Body { vertices: self.vertices.iter().map(|p| m.of_point(*p)).collect(), tolerance: self.tolerance, sheet: self.sheet, ..Body::default() };
         out.edges = self
             .edges
             .iter()

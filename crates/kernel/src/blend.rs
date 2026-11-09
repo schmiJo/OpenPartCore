@@ -85,6 +85,7 @@ pub fn fillet(body: &Body, edges: &[usize], radius: f64, feature: u32) -> Result
 
 /// Rounds edges to a radius, with control over tangent propagation.
 pub fn fillet_with(body: &Body, edges: &[usize], radius: f64, options: BlendOptions, feature: u32) -> Result<Body> {
+    body.needs_solid("a fillet")?;
     if !(radius.is_finite() && radius >= MIN_FEATURE) {
         return Err(Error::InvalidInput(format!("fillet radius {radius} is too small")));
     }
@@ -163,6 +164,7 @@ pub fn chamfer(body: &Body, edges: &[usize], distance: f64, feature: u32) -> Res
 
 /// Bevels edges, with control over tangent propagation.
 pub fn chamfer_with(body: &Body, edges: &[usize], distance: f64, options: BlendOptions, feature: u32) -> Result<Body> {
+    body.needs_solid("a chamfer")?;
     if !(distance.is_finite() && distance >= MIN_FEATURE) {
         return Err(Error::InvalidInput(format!("chamfer distance {distance} is too small")));
     }

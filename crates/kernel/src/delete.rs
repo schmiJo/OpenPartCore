@@ -652,6 +652,7 @@ fn strips_of(body: &Body, uses: &Uses, group: &[usize]) -> Option<Vec<Plan>> {
 /// Deletes faces and closes the gap by letting their neighbours grow, or refuses and says why. Faces that keep their place
 /// keep their names, so nothing new gets named, and a face that had a neighbour deleted is still the same face.
 pub fn delete_faces(body: &Body, faces: &[usize]) -> Result<Body> {
+    body.needs_solid("deleting a face")?;
     let (current, _) = delete_faces_mapped(body, faces)?;
     let tidy = simplify(current)?;
     validate(&tidy).map_err(|why| refuse(format!("the result wouldn't be a valid solid: {}", why.join("; "))))?;

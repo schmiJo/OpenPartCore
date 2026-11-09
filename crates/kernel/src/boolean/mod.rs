@@ -145,6 +145,64 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body> {
 }
 
 pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Body> {
+    a.needs_solid("a Boolean")?;
+    b.needs_solid("a Boolean")?;
+    run(a, b, Plan::Solids(op, checks))
+}
+
+/// Which part of a sheet a trim keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// What's outside the solid.
+    Outside,
+    /// What's inside the solid.
+    Inside,
+}
+
+/// Cuts a sheet where a solid's surface crosses it, and keeps the part outside the solid or the part inside. Whatever lies
+/// exactly on the solid's surface is kept either way. The result can be several pieces, as shells of one body.
+pub fn trim_sheet(sheet: &Body, solid: &Body, keep: Keep) -> Result<Body> {
+    if !sheet.sheet {
+        return Err(Error::InvalidInput("a trim cuts a sheet, and this is a solid. A Boolean cuts a solid".into()));
+    }
+    if solid.sheet {
+        return Err(Error::Unsupported(
+            "cutting a sheet with another sheet isn't built, as a sheet has no inside to tell the two sides apart by, and a cut can stop partway across a face. A solid, a plane or a sketch's outline can cut one".into(),
+        ));
+    }
+    run(sheet, solid, Plan::Trim(keep))
+}
+
+/// Cuts a sheet along a plane, and keeps the side the normal points to.
+pub fn trim_sheet_by_plane(sheet: &Body, point: Vec3, normal: Vec3) -> Result<Body> {
+    if !(normal.norm() >= 1e-12 && normal.norm() <= 1e150) {
+        return Err(Error::InvalidInput("a plane's normal must have a sensible, non-zero length".into()));
+    }
+    let up = normal.normalized();
+    let bounds = sheet.aabb();
+    // A block behind the plane, reaching well past the sheet on all sides, so that only its face on the plane can touch it.
+    let reach = 2.0 * bounds.diagonal() + 10.0;
+    let centre = bounds.center();
+    let on_plane = centre - up * (centre - point).dot(up);
+    let (x, y) = {
+        let x = up.any_perpendicular();
+        (x, up.cross(x))
+    };
+    let frame = Frame { origin: on_plane - x * reach - y * reach, x: y, y: x, z: -up };
+    let behind = crate::build::box_solid(&frame, 2.0 * reach, 2.0 * reach, reach + (centre - point).dot(up).abs(), 0)?;
+    trim_sheet(sheet, &behind, Keep::Outside)
+}
+
+/// What a run through the arrangement is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Plan {
+    /// A Boolean between two solids.
+    Solids(BoolOp, Checks),
+    /// The first is a sheet, cut by the second, a solid. Only the sheet's pieces are traced, classified or kept.
+    Trim(Keep),
+}
+
+fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
     for p in a.vertices.iter().chain(&b.vertices) {
         // Written so that a NaN fails too.
         if !(p.x.abs().max(p.y.abs()).max(p.z.abs()) <= MAX_COORD) {
@@ -281,6 +339,9 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
     // Step 5: cut each face into regions.
     let mut pieces: Vec<Piece> = Vec::new();
     for s in 0..2 {
+        if s == 1 && matches!(plan, Plan::Trim(_)) {
+            continue;
+        }
         for f in 0..bodies[s].faces.len() {
             let face = &bodies[s].faces[f];
             let boundary = &boundaries[s][f];
@@ -309,14 +370,21 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
     let mut selected: Vec<(usize, bool)> = Vec::new(); // (piece, flip)
     for (i, piece) in pieces.iter().enumerate() {
         let class = classify_piece(piece, bodies, &index, &arr)?;
-        let keep = match (op, piece.source, class) {
-            (BoolOp::Union, 0, Class::Out | Class::OnSame) => Some(false),
-            (BoolOp::Union, 1, Class::Out) => Some(false),
-            (BoolOp::Intersect, 0, Class::In | Class::OnSame) => Some(false),
-            (BoolOp::Intersect, 1, Class::In) => Some(false),
-            (BoolOp::Subtract, 0, Class::Out | Class::OnOpposite) => Some(false),
-            (BoolOp::Subtract, 1, Class::In) => Some(true),
-            _ => None,
+        let keep = match plan {
+            Plan::Solids(op, _) => match (op, piece.source, class) {
+                (BoolOp::Union, 0, Class::Out | Class::OnSame) => Some(false),
+                (BoolOp::Union, 1, Class::Out) => Some(false),
+                (BoolOp::Intersect, 0, Class::In | Class::OnSame) => Some(false),
+                (BoolOp::Intersect, 1, Class::In) => Some(false),
+                (BoolOp::Subtract, 0, Class::Out | Class::OnOpposite) => Some(false),
+                (BoolOp::Subtract, 1, Class::In) => Some(true),
+                _ => None,
+            },
+            Plan::Trim(side) => match (side, class) {
+                (Keep::Outside, Class::Out | Class::OnSame | Class::OnOpposite) => Some(false),
+                (Keep::Inside, Class::In | Class::OnSame | Class::OnOpposite) => Some(false),
+                _ => None,
+            },
         };
         if let Some(flip) = keep {
             selected.push((i, flip));
@@ -324,17 +392,56 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
     }
 
     // Step 7: assemble.
-    let body = assemble(&pieces, &selected, bodies, &arr)?;
+    let body = assemble(&pieces, &selected, bodies, &arr, matches!(plan, Plan::Trim(_)))?;
     let body = simplify::simplify(body)?;
     validate(&body).map_err(Error::InvalidBody)?;
-    match checks {
-        Checks::Full => {
+    match plan {
+        Plan::Solids(op, Checks::Full) => {
             verify_meshable(&body, bodies)?;
             verify_membership(&index, &body, op, 40)?;
         }
-        Checks::Interim => verify_membership(&index, &body, op, 12)?,
+        Plan::Solids(op, Checks::Interim) => verify_membership(&index, &body, op, 12)?,
+        Plan::Trim(side) => {
+            verify_meshable(&body, bodies)?;
+            verify_trim(a, &index[1], &body, side)?;
+        }
     }
     Ok(body)
+}
+
+/// Checks a cut sheet against what a cut is, by points on the original: one on the side kept has to be on the result, and one
+/// that isn't must not be. This looks only at the original, the solid and the result, and so doesn't depend on how pieces
+/// were found.
+fn verify_trim(sheet: &Body, solid: &Index, result: &Body, side: Keep) -> Result<()> {
+    let out = Index::new(result);
+    let on_result = |p: Vec3| (0..result.faces.len()).any(|f| out.face_boxes[f].inflated(4.0 * TOL).contains(p) && out.locate_on_face(f, p, 4.0 * TOL) != FaceLoc::Outside);
+    let of_sheet = Index::new(sheet);
+    for f in 0..sheet.faces.len() {
+        let face = &sheet.faces[f];
+        let (lo, hi) = sheet.face_chart_bounds(f);
+        const GRID: usize = 7;
+        for i in 0..GRID {
+            for j in 0..GRID {
+                let uv = v2(lo.x + (hi.x - lo.x) * (i as f64 + 0.5) / GRID as f64, lo.y + (hi.y - lo.y) * (j as f64 + 0.5) / GRID as f64);
+                let p = face.surface.from_chart(&face.chart, uv);
+                if of_sheet.locate_on_face(f, p, TOL) != FaceLoc::Inside {
+                    continue;
+                }
+                let kept = match solid.locate_in_body(p) {
+                    BodyLoc::Inside => side == Keep::Inside,
+                    BodyLoc::Outside => side == Keep::Outside,
+                    BodyLoc::OnFace(_) => continue,
+                };
+                if kept != on_result(p) {
+                    return Err(Error::NearDegenerate(format!(
+                        "the cut sheet is wrong at ({:.4}, {:.4}, {:.4}): a cut was probably missed at a tangency",
+                        p.x, p.y, p.z
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Identifies an edge by its geometry, so that an edge can be recognised across a
@@ -395,7 +502,7 @@ fn verify_meshable(result: &Body, inputs: [&Body; 2]) -> Result<()> {
 fn verify_by_meshing(body: &Body, params: &crate::tess::TessParams) -> Result<()> {
     let mesh = crate::tess::tessellate(body, params)
         .map_err(|e| Error::NearDegenerate(format!("the result has edges too close to tell apart: {e}")))?;
-    let open = mesh.open_edge_count();
+    let open = if body.sheet && crate::tess::open_only_at_boundary(body, &mesh) { 0 } else { mesh.open_edge_count() };
     if open != 0 {
         let (p, _) = mesh.open_edges()[0];
         return Err(Error::NearDegenerate(format!(
@@ -865,7 +972,7 @@ fn verify_membership(index: &[Index; 2], result: &Body, op: BoolOp, points: usiz
 }
 
 /// Builds the result body from the selected regions.
-fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], arr: &Arrangement) -> Result<Body> {
+fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], arr: &Arrangement, open: bool) -> Result<Body> {
     // Final loops per selected region.
     struct Out {
         surface: Surface,
@@ -897,7 +1004,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
         }
     }
 
-    let mut body = Body { tolerance: bodies[0].tolerance.max(bodies[1].tolerance), ..Body::default() };
+    let mut body = Body { tolerance: bodies[0].tolerance.max(bodies[1].tolerance), sheet: open, ..Body::default() };
     // Build edges. Normally one per arrangement edge. Where several faces meet at
     // an edge, pair them around it so each wedge of material gets its own copy.
     let mut assign: HashMap<(usize, usize, usize), usize> = HashMap::default();
@@ -906,7 +1013,7 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
     for ae in edge_ids {
         let list = &uses[&ae];
         let e = &arr.edges[ae];
-        let pairs: Vec<Vec<(usize, usize, usize, bool)>> = if list.len() == 2 {
+        let pairs: Vec<Vec<(usize, usize, usize, bool)>> = if list.len() == 2 || (open && list.len() == 1) {
             vec![list.clone()]
         } else if list.len().is_multiple_of(2) && list.len() >= 4 {
             let mid = e.curve.eval((e.t0 + e.t1) / 2.0);

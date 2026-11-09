@@ -50,6 +50,13 @@ fn check_frame(frame: &Frame) -> Result<()> {
 
 pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> Result<Body> {
     profile.validate()?;
+    let body = extrude_faces(profile, frame, height, feature)?;
+    validate(&body).map_err(Error::InvalidBody)?;
+    Ok(body)
+}
+
+/// The faces of an extrude, unchecked, for a sheet to take what it wants of them.
+pub(crate) fn extrude_faces(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> Result<Body> {
     check_frame(frame)?;
     if !height.is_finite() || height.abs() < MIN_FEATURE {
         return Err(Error::InvalidInput(format!("extrude height {height} is too small")));
@@ -132,7 +139,6 @@ pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> R
     let top_frame = Frame { origin: frame.origin + frame.z * height, ..frame };
     body.add_face(Surface::Plane(top_frame), false, top_loops, tag(SLOT_END_CAP));
     body.compute_shells();
-    validate(&body).map_err(Error::InvalidBody)?;
     Ok(body)
 }
 
@@ -144,6 +150,13 @@ pub fn extrude(profile: &Profile, frame: &Frame, height: f64, feature: u32) -> R
 /// closed revolution with no end caps.
 pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Result<Body> {
     profile.validate()?;
+    let body = revolve_faces(profile, frame, angle, feature)?;
+    validate(&body).map_err(Error::InvalidBody)?;
+    Ok(body)
+}
+
+/// The faces of a revolve, unchecked, for a sheet to take what it wants of them.
+pub(crate) fn revolve_faces(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Result<Body> {
     check_frame(frame)?;
     if !(angle > 1e-6 && angle <= TAU + 1e-9) {
         return Err(Error::InvalidInput(format!("revolve angle {angle} is out of range")));
@@ -376,7 +389,6 @@ pub fn revolve(profile: &Profile, frame: &Frame, angle: f64, feature: u32) -> Re
     }
 
     body.compute_shells();
-    validate(&body).map_err(Error::InvalidBody)?;
     Ok(body)
 }
 
