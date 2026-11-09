@@ -21,8 +21,8 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("document_show", "The whole document as JSON, in the file format.", "{}", "[]"),
     ("parameter_set", "Creates or changes a named parameter, then rebuilds. The value is a number or an expression over other parameters.", r#"{"name": {"type": "string"}, "value": {"type": ["number", "string"]}}"#, r#"["name", "value"]"#),
     ("parameter_remove", "Removes a parameter nothing uses.", r#"{"name": {"type": "string"}}"#, r#"["name"]"#),
-    ("feature_add", "Adds a feature, then rebuilds. Gives its permanent id and what the rebuild did. See format_guide for the fields. With several bodies it acts on the last one made, unless the feature has a \"body\", like \"f3.2\". The mode new_body makes a body of its own, so that parts can touch or overlap.", r#"{"feature": {"type": "object", "description": "A feature, without id: {\"type\": \"extrude\", \"sketch\": 1, \"length\": 10}."}, "name": {"type": "string"}, "position": {"type": "integer", "description": "Where in the history. The end, if left out."}}"#, r#"["feature"]"#),
-    ("feature_edit", "Replaces what a feature does, keeping its id, name and position, then rebuilds. It keeps the body it acts on unless the feature gives a \"body\", or null for the last one made.", r#"{"id": {"type": "integer"}, "feature": {"type": "object"}}"#, r#"["id", "feature"]"#),
+    ("feature_add", "Adds a feature, then rebuilds. Gives its permanent id and what the rebuild did. See format_guide for the fields. With several bodies it acts on all of them unless the feature lists \"bodies\", like [\"f3.2\"], and it leaves alone any it doesn't reach. The mode new_body makes bodies of their own, so that parts can touch or overlap.", r#"{"feature": {"type": "object", "description": "A feature, without id: {\"type\": \"extrude\", \"sketch\": 1, \"length\": 10}."}, "name": {"type": "string"}, "position": {"type": "integer", "description": "Where in the history. The end, if left out."}}"#, r#"["feature"]"#),
+    ("feature_edit", "Replaces what a feature does, keeping its id, name and position, then rebuilds. It keeps the bodies it acts on unless the feature lists \"bodies\", and an empty list means all of them.", r#"{"id": {"type": "integer"}, "feature": {"type": "object"}}"#, r#"["id", "feature"]"#),
     ("feature_rename", "Renames a feature.", r#"{"id": {"type": "integer"}, "name": {"type": "string"}}"#, r#"["id", "name"]"#),
     ("feature_suppress", "Turns a feature off or on, then rebuilds.", r#"{"id": {"type": "integer"}, "suppressed": {"type": "boolean"}}"#, r#"["id", "suppressed"]"#),
     ("feature_delete", "Deletes a feature nothing refers to, then rebuilds.", r#"{"id": {"type": "integer"}}"#, r#"["id"]"#),
@@ -30,6 +30,7 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("features_list", "The history: each feature's id, name, type, state and any error.", "{}", "[]"),
     ("rebuild", "Rebuilds, reusing whatever didn't change. Gives each feature's state and the solid's volume, area, size and validity.", r#"{"upto": {"type": "integer", "description": "Stop after the feature at this position, to see an earlier state."}}"#, "[]"),
     ("bodies_list", "The document's bodies: each one's name, the feature that made it, volume, area, faces and size. Separate bodies can touch or overlap, as an assembly's parts do.", "{}", "[]"),
+    ("app_set", "Keeps data for an app with a feature, or with the document if no id is given. It's stored as it is and changes nothing in the model, so it's for things like where a dimension's label sits.", r#"{"id": {"type": "integer"}, "app": {"description": "Anything. Leave it out to clear what's there."}}"#, "[]"),
     ("faces_list", "The solid's faces with their stable names, surface type, area, center and outward normal. One name can cover several faces, such as a pattern's copies. Each face's key is its own, and an edge selection takes a key wherever it takes a face name.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
     ("edges_list", "The solid's edges with their stable names, curve type, length and ends, and a selection for each, ready to use in a fillet or chamfer.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
     ("export", "Exports the solid. STEP and the native format can come back as text; STL needs a path. Paths are under the server's root folder.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}, "format": {"type": "string", "enum": ["step", "stl", "coreshape"]}, "path": {"type": "string"}}"#, r#"["format"]"#),
@@ -128,6 +129,22 @@ impl Session {
         Session { doc: Document::new(), outcome: None, root }
     }
 
+    /// The document being worked on.
+    pub fn document(&self) -> &Document {
+        &self.doc
+    }
+
+    /// The result of the last rebuild, rebuilding if there hasn't been one. For showing what the tools have made, without
+    /// keeping a second copy of the document. Nothing that's unchanged gets rebuilt.
+    pub fn outcome(&mut self) -> &Outcome {
+        self.outcome.get_or_insert_with(|| self.doc.rebuild(None))
+    }
+
+    /// The document as it was up to a feature, for rolling back a view. That's only for looking, and tools still see all of it.
+    pub fn outcome_upto(&mut self, upto: Option<usize>) -> Outcome {
+        self.doc.rebuild(upto)
+    }
+
     /// Calls a tool. Whatever happens, the server carries on: a refusal or even a kernel bug comes
     /// back as a failed result, not a dead connection.
     pub fn call_safely(&mut self, name: &str, args: &Value) -> Value {
@@ -188,17 +205,18 @@ impl Session {
             }
             "feature_add" => {
                 let spec = args.get("feature").ok_or("\"feature\" is needed")?;
-                let op = read_op(spec, &["body"]).map_err(e)?;
-                let body = read_body(spec)?;
+                let op = read_op(spec, &["bodies", "app"]).map_err(e)?;
+                let scope = read_body_list(spec, "bodies").map_err(e)?;
                 let at = position_arg(args, "position")?.unwrap_or(self.doc.features().len());
                 let name = args.get("name").and_then(Value::as_str).map(str::to_string);
                 let id = self.doc.insert(op, name, at).map_err(e)?;
-                if let Some(body) = body {
-                    // It's no use with a body it can't have.
-                    if let Err(why) = self.doc.set_body(id, body) {
-                        self.doc.delete(id).map_err(e)?;
-                        return Err(why.to_string());
-                    }
+                // It's no use with a body it can't have.
+                if let Err(why) = self.doc.set_scope(id, scope) {
+                    self.doc.delete(id).map_err(e)?;
+                    return Err(why.to_string());
+                }
+                if let Some(app) = spec.get("app") {
+                    self.doc.set_app(Some(id), Some(app.clone())).map_err(e)?;
                 }
                 let mut out = vec![text(format!("Added feature f{} (id {}).", id.0, id.0))];
                 out.extend(self.rebuilt(None)?);
@@ -206,19 +224,23 @@ impl Session {
             }
             "feature_edit" => {
                 let spec = args.get("feature").ok_or("\"feature\" is needed")?;
-                let op = read_op(spec, &["body"]).map_err(e)?;
-                let body = read_body(spec)?;
+                let op = read_op(spec, &["bodies", "app"]).map_err(e)?;
                 let id = id_arg(args)?;
                 let before = self.doc.feature(id).cloned();
                 self.doc.edit(id, op).map_err(e)?;
-                if let Some(body) = body {
-                    if let Err(why) = self.doc.set_body(id, body) {
+                // What it says about its bodies and its app data changes; what it doesn't say stays.
+                if spec.get("bodies").is_some() {
+                    let scope = read_body_list(spec, "bodies").map_err(e);
+                    if let Err(why) = scope.and_then(|list| self.doc.set_scope(id, list).map_err(e)) {
                         // All of it or none of it.
                         if let Some(old) = before {
                             self.doc.edit(id, old.op).map_err(e)?;
                         }
-                        return Err(why.to_string());
+                        return Err(why);
                     }
+                }
+                if let Some(app) = spec.get("app") {
+                    self.doc.set_app(Some(id), Some(app.clone())).map_err(e)?;
                 }
                 self.rebuilt(None)
             }
@@ -248,6 +270,11 @@ impl Session {
                 Ok(vec![text(self.steps_value().to_pretty())])
             }
             "rebuild" => self.rebuilt(position_arg(args, "upto")?),
+            "app_set" => {
+                let id = if args.get("id").is_some() { Some(id_arg(args)?) } else { None };
+                self.doc.set_app(id, args.get("app").cloned()).map_err(e)?;
+                Ok(vec![text("Kept.")])
+            }
             "bodies_list" => {
                 self.body()?;
                 Ok(vec![text(self.bodies_value().to_pretty())])
@@ -400,7 +427,7 @@ impl Session {
                 for s in &o.steps {
                     let built = matches!(s.state, StepState::Rebuilt | StepState::Reused);
                     // Copies keep the names of what they copied, so these have no faces of their own.
-                    let names_none = matches!(s.kind, "sketch" | "constrained_sketch" | "pattern" | "mirror" | "offset" | "draft" | "delete_face");
+                    let names_none = matches!(s.kind, "transform" | "delete_bodies" | "boolean" | "sketch" | "constrained_sketch" | "pattern" | "mirror" | "offset" | "draft" | "delete_face");
                     if built && !names_none && !body.faces.iter().any(|f| f.tag.feature == s.id.0) {
                         notes.push(Value::str(format!("f{} ({}) left no faces on the solid, so it may not have touched it", s.id.0, s.name)));
                     }
@@ -638,18 +665,6 @@ struct Scope {
     body: Arc<Body>,
     of_face: Vec<String>,
     of_edge: Vec<String>,
-}
-
-/// A feature's choice of body. `None` if it doesn't say, and a null for going back to the last one made.
-fn read_body(spec: &Value) -> R<Option<Option<BodyId>>> {
-    match spec.get("body") {
-        None => Ok(None),
-        Some(Value::Null) => Ok(Some(None)),
-        Some(v) => {
-            let name = v.as_str().ok_or("\"body\" must be the name of a body, like f3 or f3.2")?;
-            Ok(Some(Some(BodyId::parse(name).map_err(|x| x.to_string())?)))
-        }
-    }
 }
 
 fn faces_value(body: &Body, of_face: &[String]) -> R<Value> {

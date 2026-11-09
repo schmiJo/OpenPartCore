@@ -32,7 +32,7 @@ would fit several edges: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
 
 ## Several bodies
 
-A feature with `"mode": "new_body"` makes a body of its own, and `import_step` with that mode makes one for each solid in the file, which is what an assembly wants. A feature acts on the last body made, unless it has `"body": "f3.2"`, and `bodies_list` gives the names. `render` tints each body differently unless told otherwise with `colors`, and takes `body` to show just one. See the format guide for the details.
+A body is a part, as in Onshape: one connected solid. A feature acts on all of them unless it lists `"bodies": ["f3.2"]`, and leaves alone any it doesn't reach. `"mode": "new_body"` makes parts that stay separate, and `import_step` with that mode makes one for each solid in the file. `transform`, `delete_bodies` and `boolean` are features too. `bodies_list` gives the names, and `render` tints each body differently unless told otherwise with `colors`, and takes `body` to show just one. `app_set` keeps data for an app with a feature or the document, without touching the model. See the format guide for the details.
 
 ## How a session goes
 

@@ -339,7 +339,7 @@ fn a_drawn_spline_extrudes_and_revolves() {
     let (s, _) = build();
     let mut doc = Document::new();
     let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
-    doc.add(Op::Revolve { sketch: f, degrees: 360.0.into(), mode: Mode::Add }).unwrap();
+    doc.add(Op::revolve(f, 360.0, Mode::Add)).unwrap();
     let o = doc.rebuild(None);
     assert!(o.failed.is_none(), "{:?}", o.steps);
     assert!(vol(&o) > 0.0);
@@ -353,7 +353,7 @@ fn an_ellipse_with_a_hole_revolves() {
     s.ellipse([20.0, 0.0], [26.0, 0.0], 3.0);
     let mut doc = Document::new();
     let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
-    doc.add(Op::Revolve { sketch: f, degrees: 360.0.into(), mode: Mode::Add }).unwrap();
+    doc.add(Op::revolve(f, 360.0, Mode::Add)).unwrap();
     let o = doc.rebuild(None);
     assert!(o.failed.is_none(), "{:?}", o.steps);
     let want = TAU * 20.0 * PI * 6.0 * 3.0;

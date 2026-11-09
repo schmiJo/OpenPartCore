@@ -14,7 +14,7 @@
 //! changes, edits, suppression and reordering alike.
 
 use coreshape::blend::{chamfer_with, fillet_with, BlendOptions};
-use coreshape::boolean::BoolOp;
+use coreshape::boolean::{intersect, union, BoolOp};
 use coreshape::multi::{boolean_many, merged_tools, sweep, PathStep};
 use coreshape::build::{
     box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus, SLOT_END_CAP, SLOT_SEG_BASE, SLOT_START_CAP,
@@ -23,6 +23,7 @@ use coreshape::error::{Error, Result};
 use coreshape::math::*;
 use coreshape::profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
 use coreshape::spline::Spline;
+use coreshape::surface::Surface;
 use coreshape::topo::{Body, FaceTag};
 use coreshape::delete::delete_faces;
 use coreshape::helix::{helix, Helix};
@@ -185,21 +186,25 @@ pub struct Placement {
     pub z: Point3,
     /// Direction of the sketch's x axis. Made perpendicular to `z`.
     pub x: Point3,
+    /// A flat face this follows, for a sketch: at each rebuild the plane is that face's plane, wherever it's got to. The
+    /// origin keeps its place within the plane, as a sketch's position on a face is its own, and the normal keeps the
+    /// side of the face it started on.
+    pub on_face: Option<FaceKey>,
 }
 
 impl Placement {
     /// The XY plane, offset along Z.
     pub fn xy(z: impl Into<Expr>) -> Placement {
-        Placement { origin: point3(0.0, 0.0, z), z: point3(0.0, 0.0, 1.0), x: point3(1.0, 0.0, 0.0) }
+        Placement { origin: point3(0.0, 0.0, z), z: point3(0.0, 0.0, 1.0), x: point3(1.0, 0.0, 0.0), on_face: None }
     }
 
     pub fn at(origin: Point3) -> Placement {
-        Placement { origin, z: point3(0.0, 0.0, 1.0), x: point3(1.0, 0.0, 0.0) }
+        Placement { origin, z: point3(0.0, 0.0, 1.0), x: point3(1.0, 0.0, 0.0), on_face: None }
     }
 
     /// Placed with the given axis and x direction.
     pub fn new(origin: Point3, z: Point3, x: Point3) -> Placement {
-        Placement { origin, z, x }
+        Placement { origin, z, x, on_face: None }
     }
 
     /// The placement of a frame computed in code.
@@ -208,7 +213,14 @@ impl Placement {
             origin: point3(f.origin.x, f.origin.y, f.origin.z),
             z: point3(f.z.x, f.z.y, f.z.z),
             x: point3(f.x.x, f.x.y, f.x.z),
+            on_face: None,
         }
+    }
+
+    /// This placement, following a flat face from here on.
+    pub fn following(mut self, face: FaceKey) -> Placement {
+        self.on_face = Some(face);
+        self
     }
 
     fn resolve(&self, env: &Env) -> Result<Frame> {
@@ -532,20 +544,20 @@ impl EdgeSelect {
 
 // ----- Features -----
 
-/// How a new solid combines with the body it acts on.
+/// How a new solid combines with the bodies a feature acts on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Add,
     Remove,
     Intersect,
-    /// Combines with nothing, and becomes a body of its own, so that parts stay parts, and can touch or overlap. Joining
-    /// them would lose that, and can fail where they meet. An imported file's solids each become one.
+    /// Combines with nothing, and each connected solid becomes a body of its own, so that parts stay parts, and can touch
+    /// or overlap. Joining them would lose that, and can fail where they meet.
     NewBody,
 }
 
 /// Which body of a document: the feature that made it, and which of that feature's bodies it is. Written `f3` for the
-/// first or only one and `f3.2` for the others. For an imported file, the number is the same as the one in the face keys
-/// of that solid's copies: `f3:side.0@f3.2` is on `f3.2`.
+/// first or only one and `f3.2` for the others. A body is one connected solid, with any voids inside it. A cut that splits
+/// one leaves the name on the piece that was there before, and the others are named for the feature that split it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BodyId {
     pub feature: FeatureId,
@@ -592,9 +604,9 @@ pub enum Op {
     ConstrainedSketch { plane: Placement, sketch: coreshape_sketch::Sketch },
     /// Extrudes a sketch along its normal, from `start` for `length`.
     Extrude { sketch: FeatureId, start: Expr, length: Expr, mode: Mode },
-    /// Revolves a sketch about its Z axis. Profile x is the distance from the axis and
-    /// profile y the height along it.
-    Revolve { sketch: FeatureId, degrees: Expr, mode: Mode },
+    /// Revolves a sketch. With an `axis`, about that line in the sketch's plane, as drawn, turning right-handed around its
+    /// direction. Without one, about the sketch's Z axis, with profile x the distance from the axis and y the height along it.
+    Revolve { sketch: FeatureId, degrees: Expr, mode: Mode, axis: Option<RevolveAxis> },
     Solid { primitive: Primitive, at: Placement, mode: Mode },
     /// The solids in a STEP file, kept here in full so that the document stands alone. Their faces are named by their
     /// place in the file: `f3:side.0` is the first. A piece cut from a wide face keeps that face's name.
@@ -630,6 +642,37 @@ pub enum Op {
     /// Tapers named faces along a pull direction, keeping them in place on the neutral plane through
     /// `neutral`. A positive angle narrows the part along the pull, and widens a hole.
     Draft { faces: Vec<FaceRef>, pull: Point3, neutral: Point3, degrees: Expr },
+    /// Moves the bodies it acts on, or with `copy` leaves them and adds moved copies of them, as bodies of their own.
+    Transform { motion: Motion, copy: bool },
+    /// Deletes the bodies it names.
+    DeleteBodies,
+    /// A Boolean between bodies. `Union` and `Intersect` take the bodies the feature names along with the `tools`.
+    /// `Subtract` cuts the `tools` from the bodies the feature names, its targets. Without `keep_tools` the tools go.
+    BooleanBodies { operation: BodyBoolean, tools: Vec<BodyId>, keep_tools: bool },
+}
+
+/// A line in a sketch's plane to revolve around.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevolveAxis {
+    pub point: Point2,
+    pub direction: Point2,
+}
+
+/// How a `Transform` moves things.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Motion {
+    Translate { by: Point3 },
+    Rotate { point: Point3, axis: Point3, degrees: Expr },
+    /// Carries one placement onto another, as Onshape's transform by mate connectors does.
+    Frames { from: Placement, to: Placement },
+}
+
+/// A Boolean between bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyBoolean {
+    Union,
+    Subtract,
+    Intersect,
 }
 
 /// One step along a sweep's path. See `coreshape::PathStep`.
@@ -660,7 +703,7 @@ impl Op {
     }
 
     pub fn revolve(sketch: FeatureId, degrees: impl Into<Expr>, mode: Mode) -> Op {
-        Op::Revolve { sketch, degrees: degrees.into(), mode }
+        Op::Revolve { sketch, degrees: degrees.into(), mode, axis: None }
     }
 
     pub fn solid(primitive: Primitive, at: Placement, mode: Mode) -> Op {
@@ -694,6 +737,9 @@ impl Op {
             Op::Loft { .. } => "loft",
             Op::Pattern { .. } => "pattern",
             Op::Mirror { .. } => "mirror",
+            Op::Transform { .. } => "transform",
+            Op::DeleteBodies => "delete_bodies",
+            Op::BooleanBodies { .. } => "boolean",
             Op::Offset { .. } => "offset",
             Op::Shell { .. } => "shell",
             Op::Draft { .. } => "draft",
@@ -736,6 +782,9 @@ impl Op {
             Op::Loft { .. } => "Loft",
             Op::Pattern { .. } => "Pattern",
             Op::Mirror { .. } => "Mirror",
+            Op::Transform { .. } => "Transform",
+            Op::DeleteBodies => "Delete bodies",
+            Op::BooleanBodies { .. } => "Boolean",
             Op::Offset { .. } => "Offset",
             Op::Shell { .. } => "Shell",
             Op::Draft { .. } => "Draft",
@@ -748,6 +797,7 @@ impl Op {
         match self {
             Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => out.push(*sketch),
             Op::Loft { sections, .. } => out.extend_from_slice(sections),
+            Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
             Op::DeleteFace { faces } | Op::Thicken { faces, .. } => {
                 for key in faces {
                     key.references(&mut out);
@@ -813,7 +863,26 @@ impl Op {
                 out.extend(sketch.constraints.iter().filter_map(|c| c.rule.value()));
             }
             Op::Extrude { start, length, .. } => out.extend([start, length]),
-            Op::Revolve { degrees, .. } => out.push(degrees),
+            Op::Revolve { degrees, axis, .. } => {
+                out.push(degrees);
+                if let Some(axis) = axis {
+                    out.extend(axis.point.iter());
+                    out.extend(axis.direction.iter());
+                }
+            }
+            Op::Transform { motion, .. } => match motion {
+                Motion::Translate { by } => out.extend(by.iter()),
+                Motion::Rotate { point, axis, degrees } => {
+                    out.extend(point.iter());
+                    out.extend(axis.iter());
+                    out.push(degrees);
+                }
+                Motion::Frames { from, to } => {
+                    place(from, &mut out);
+                    place(to, &mut out);
+                }
+            },
+            Op::DeleteBodies | Op::BooleanBodies { .. } => {}
             Op::Solid { primitive, at, .. } => {
                 place(at, &mut out);
                 match primitive {
@@ -879,8 +948,12 @@ pub struct Feature {
     pub id: FeatureId,
     pub name: String,
     pub suppressed: bool,
-    /// The body this acts on. `None` is the last one made, and all there is in a document with one body.
-    pub body: Option<BodyId>,
+    /// The bodies this acts on, which Onshape calls its merge scope. Empty means all of them, and a feature leaves alone
+    /// any it doesn't reach.
+    pub scope: Vec<BodyId>,
+    /// Whatever an app wants kept with this feature, such as where a sketch's dimension labels sit. It's kept as it is and
+    /// changes nothing in the model.
+    pub app: Option<Value>,
     pub op: Op,
 }
 
@@ -888,7 +961,7 @@ impl Feature {
     /// The features this one refers to.
     fn references(&self) -> Vec<FeatureId> {
         let mut out = self.op.references();
-        out.extend(self.body.map(|b| b.feature));
+        out.extend(self.scope.iter().map(|b| b.feature));
         out
     }
 }
@@ -993,8 +1066,8 @@ impl Outcome {
 #[derive(Clone)]
 struct Cached {
     key: u64,
-    /// What the body it acted on became, or the first body if there was none, when it changed one.
-    body: Option<Arc<Body>>,
+    /// What became of the bodies it acted on: what each is now, or nothing if it's gone.
+    changed: Vec<(BodyId, Option<Arc<Body>>)>,
     /// The bodies it made of their own.
     added: Vec<Arc<Body>>,
     /// A sketch's output, kept separately because a sketch doesn't touch the body.
@@ -1005,7 +1078,7 @@ struct Cached {
 
 /// What running one feature produced.
 struct RunResult {
-    body: Option<Arc<Body>>,
+    changed: Vec<(BodyId, Option<Arc<Body>>)>,
     added: Vec<Arc<Body>>,
     sketch: Option<SketchOutput>,
     tools: Option<(Arc<Vec<Body>>, Mode)>,
@@ -1018,20 +1091,244 @@ struct Held {
     key: u64,
 }
 
-/// A feature's results, applied to the bodies so far.
-fn take_result(held: &mut Vec<Held>, target: Option<usize>, feature: FeatureId, key: u64, body: Option<&Arc<Body>>, added: &[Arc<Body>]) {
-    if let Some(body) = body {
-        match target {
-            Some(t) => {
-                held[t].body = body.clone();
-                held[t].key = key;
+/// A feature's results, applied to the bodies so far. A body keeps its place in the list however it changes.
+fn take_result(held: &mut Vec<Held>, feature: FeatureId, key: u64, changed: &[(BodyId, Option<Arc<Body>>)], added: &[Arc<Body>]) {
+    for (id, now) in changed {
+        let Some(at) = held.iter().position(|h| h.id == *id) else { continue };
+        match now {
+            Some(body) => {
+                held[at].body = body.clone();
+                held[at].key = hash_text(key, &id.text());
             }
-            None => held.push(Held { id: BodyId { feature, index: 0 }, body: body.clone(), key }),
+            None => {
+                held.remove(at);
+            }
         }
     }
     for (k, body) in added.iter().enumerate() {
-        held.push(Held { id: BodyId { feature, index: k as u32 }, body: body.clone(), key: hash_text(key, &k.to_string()) });
+        held.push(Held { id: BodyId { feature, index: k as u32 }, body: body.clone(), key: hash_text(key, &format!("+{k}")) });
     }
+}
+
+/// Everything there is as one body, for finding faces and edges by name, whose counting takes in all of them.
+fn whole_of(all: &[Held]) -> Option<Arc<Body>> {
+    match all {
+        [] => None,
+        [only] => Some(only.body.clone()),
+        many => {
+            let list: Vec<&Body> = many.iter().map(|h| h.body.as_ref()).collect();
+            Some(Arc::new(Body::side_by_side(&list)))
+        }
+    }
+}
+
+/// A sketch's frame. Following a face, that's the face's plane as it now is.
+fn plane_frame(plane: &Placement, env: &Env, all: &[Held]) -> Result<Frame> {
+    let frame = plane.resolve(env)?;
+    let Some(key) = &plane.on_face else { return Ok(frame) };
+    let gone = || Error::InvalidInput(format!("the face {} no longer exists in the model", key.text()));
+    let whole = whole_of(all).ok_or_else(gone)?;
+    let found = find_faces(&whole, key);
+    let face = found.first().ok_or_else(gone)?;
+    let Surface::Plane(on) = &whole.faces[*face].surface else {
+        return Err(Error::InvalidInput(format!("a sketch can only follow a flat face, and {} isn't flat", key.text())));
+    };
+    let normal = if on.z.dot(frame.z) >= 0.0 { on.z } else { -on.z };
+    let origin = frame.origin - on.z * (frame.origin - on.origin).dot(on.z);
+    // Tipped so far that its x axis now runs along the normal, any direction in the plane will do.
+    let x = if normal.cross(frame.x).norm() > 1e-9 { frame.x } else { normal.any_perpendicular() };
+    Ok(Frame::new(origin, normal, x))
+}
+
+/// Indices into everything side by side, as a list for each body in scope that has any. Those outside it are dropped.
+fn by_body(all: &[Held], scope: &[(BodyId, Arc<Body>)], picks: &[usize], size: impl Fn(&Body) -> usize) -> Vec<(usize, Vec<usize>)> {
+    let mut out = Vec::new();
+    let mut first = 0;
+    for h in all {
+        let n = size(&h.body);
+        let mine: Vec<usize> = picks.iter().filter(|&&p| p >= first && p < first + n).map(|p| p - first).collect();
+        if !mine.is_empty() {
+            if let Some(at) = scope.iter().position(|(id, _)| *id == h.id) {
+                out.push((at, mine));
+            }
+        }
+        first += n;
+    }
+    out
+}
+
+/// A result as what stays under a body's name and any further pieces of it. The piece that keeps the name is the one with
+/// the most faces from before this feature, and the larger of those if it comes to that.
+fn pieces_of(made: Body, feature: u32) -> (Arc<Body>, Vec<Arc<Body>>) {
+    if made.shells.len() < 2 {
+        return (Arc::new(made), Vec::new());
+    }
+    let mut solids = made.solids();
+    if solids.len() < 2 {
+        return (Arc::new(solids.remove(0)), Vec::new());
+    }
+    let older = |b: &Body| b.faces.iter().filter(|f| f.tag.feature != feature && !f.origin.copies.iter().any(|c| c.feature == feature)).count();
+    let volumes: Vec<f64> = solids.iter().map(|b| coreshape::mass_properties(b).volume).collect();
+    let keep = (0..solids.len()).max_by(|&a, &b| older(&solids[a]).cmp(&older(&solids[b])).then(volumes[a].total_cmp(&volumes[b]))).unwrap_or(0);
+    let first = solids.remove(keep);
+    (Arc::new(first), solids.into_iter().map(Arc::new).collect())
+}
+
+/// Says which body a failure was on, when there are several it could have been.
+fn on_body(e: Error, id: BodyId, several: bool) -> Error {
+    if several {
+        Error::InvalidInput(format!("on body {}: {e}", id.text()))
+    } else {
+        e
+    }
+}
+
+/// What a feature did to bodies.
+#[derive(Default)]
+struct Changes {
+    changed: Vec<(BodyId, Option<Arc<Body>>)>,
+    added: Vec<Arc<Body>>,
+}
+
+impl Changes {
+    /// A body is now this. It may have gone altogether, or come apart.
+    fn settle(&mut self, id: BodyId, made: Body, feature: u32) {
+        if made.faces.is_empty() {
+            self.changed.push((id, None));
+        } else {
+            let (first, rest) = pieces_of(made, feature);
+            self.changed.push((id, Some(first)));
+            self.added.extend(rest);
+        }
+    }
+
+    fn done(self, tools: Option<(Arc<Vec<Body>>, Mode)>) -> RunResult {
+        RunResult { changed: self.changed, added: self.added, sketch: None, tools }
+    }
+}
+
+fn boxes_meet(a: &Body, b: &Body) -> bool {
+    let (a, b) = (a.aabb().inflated(4.0 * TOL), b.aabb());
+    a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y && a.min.z <= b.max.z && b.min.z <= a.max.z
+}
+
+/// New solids combined with the bodies in scope, as a mode says. A body the solids don't reach is left alone. With no
+/// bodies yet, adding is all that makes sense, and what it makes are the first bodies.
+fn combined(scope: &[(BodyId, Arc<Body>)], tools: Vec<Body>, mode: Mode, feature: u32) -> Result<Changes> {
+    if tools.is_empty() {
+        return Err(Error::InvalidInput("the sketch has no closed regions".into()));
+    }
+    let mut out = Changes::default();
+    if mode == Mode::NewBody || (mode == Mode::Add && scope.is_empty()) {
+        out.added = merged_tools(&tools)?.solids().into_iter().map(Arc::new).collect();
+        return Ok(out);
+    }
+    if scope.is_empty() {
+        return Err(Error::InvalidInput("there is no body yet to work on".into()));
+    }
+    match mode {
+        Mode::Add if scope.len() == 1 => {
+            let (id, current) = &scope[0];
+            out.settle(*id, boolean_many(current, &tools, BoolOp::Union)?, feature);
+        }
+        Mode::Add => {
+            // Each new solid joins whatever it touches, and those all become one, under the first one's name.
+            let mut current: Vec<Option<Arc<Body>>> = scope.iter().map(|(_, b)| Some(b.clone())).collect();
+            let mut touched = vec![false; scope.len()];
+            for solid in merged_tools(&tools)?.solids() {
+                let mut piece = solid;
+                let mut home = None;
+                for i in 0..current.len() {
+                    let Some(body) = current[i].clone() else { continue };
+                    if !boxes_meet(&body, &piece) {
+                        continue;
+                    }
+                    let made = union(&body, &piece)?;
+                    if made.solid_count() > 1 {
+                        continue;
+                    }
+                    piece = made;
+                    touched[i] = true;
+                    if home.is_none() {
+                        home = Some(i);
+                    } else {
+                        current[i] = None;
+                    }
+                }
+                match home {
+                    Some(i) => current[i] = Some(Arc::new(piece)),
+                    None => out.added.push(Arc::new(piece)),
+                }
+            }
+            for (i, (id, _)) in scope.iter().enumerate() {
+                if touched[i] {
+                    out.changed.push((*id, current[i].clone()));
+                }
+            }
+        }
+        Mode::Remove | Mode::Intersect => {
+            let op = if mode == Mode::Remove { BoolOp::Subtract } else { BoolOp::Intersect };
+            for (id, body) in scope {
+                let near: Vec<Body> = tools.iter().filter(|t| boxes_meet(body, t)).cloned().collect();
+                if near.is_empty() {
+                    continue;
+                }
+                let made = boolean_many(body, &near, op)?;
+                // A body that's outside what it's intersected with is one this didn't reach.
+                if mode == Mode::Intersect && made.faces.is_empty() {
+                    continue;
+                }
+                out.settle(*id, made, feature);
+            }
+        }
+        Mode::NewBody => unreachable!("handled above"),
+    }
+    Ok(out)
+}
+
+/// Profiles and a frame for revolving about a line in a sketch's plane, in the terms the kernel's revolve takes: distance
+/// from its frame's Z axis, and height along it. That's the same plane turned, with the profile on the +x side, so the
+/// axis has to point whichever way leaves it there. Going the other way round needs starting from the far end.
+fn revolve_frame(axis: &RevolveAxis, frame: &Frame, list: &[Profile], angle: f64, env: &Env) -> Result<(Frame, Vec<Profile>)> {
+    let (point, along) = (v2(num(&axis.point[0], env)?, num(&axis.point[1], env)?), v2(num(&axis.direction[0], env)?, num(&axis.direction[1], env)?));
+    let length = along.x.hypot(along.y);
+    if !(length >= 1e-12 && length <= 1e150) {
+        return Err(Error::InvalidInput("a revolve's axis must have a sensible, non-zero direction".into()));
+    }
+    let d = v2(along.x / length, along.y / length);
+    // Each side of it, by distance along its left.
+    let (mut lowest, mut highest) = (f64::INFINITY, f64::NEG_INFINITY);
+    for profile in list {
+        for wire in std::iter::once(&profile.outer).chain(&profile.holes) {
+            for seg in &wire.segs {
+                for i in 0..=32 {
+                    let q = seg.at(i as f64 / 32.0);
+                    let side = -(q.x - point.x) * d.y + (q.y - point.y) * d.x;
+                    lowest = lowest.min(side);
+                    highest = highest.max(side);
+                }
+            }
+        }
+    }
+    if lowest < -TOL && highest > TOL {
+        return Err(Error::InvalidProfile("profile crosses the revolve axis".into()));
+    }
+    let on_left = highest > TOL;
+    let up = if on_left { v2(-d.x, -d.y) } else { d };
+    let turn = up.x.atan2(up.y);
+    let (s, c) = turn.sin_cos();
+    let by = v2(-(c * point.x - s * point.y), -(s * point.x + c * point.y));
+    let moved: Vec<Profile> = list
+        .iter()
+        .map(|p| Profile { outer: p.outer.turned_and_moved(turn, by), holes: p.holes.iter().map(|h| h.turned_and_moved(turn, by)).collect() })
+        .collect();
+    let z = frame.x * up.x + frame.y * up.y;
+    let x = frame.x * up.y - frame.y * up.x;
+    let origin = frame.origin + frame.x * point.x + frame.y * point.y;
+    let full = (angle - TAU).abs() < 1e-9;
+    let start = if on_left && !full { -angle } else { 0.0 };
+    let (ss, cs) = start.sin_cos();
+    Ok((Frame::new(origin, z, x * cs + z.cross(x) * ss), moved))
 }
 
 /// What a rebuild hands back.
@@ -1074,6 +1371,8 @@ pub struct Document {
     params: Vec<Parameter>,
     features: Vec<Feature>,
     next_id: u32,
+    /// Whatever an app wants kept with the document. It changes nothing in the model.
+    app: Option<Value>,
     cache: HashMap<FeatureId, Cached>,
 }
 
@@ -1225,23 +1524,40 @@ impl Document {
             let n = self.features.iter().filter(|f| f.op.label() == label).count();
             format!("{label} {}", n + 1)
         });
-        self.features.insert(at, Feature { id, name, suppressed: false, body: None, op });
+        self.features.insert(at, Feature { id, name, suppressed: false, scope: Vec::new(), app: None, op });
         Ok(id)
     }
 
-    /// Chooses the body a feature acts on, or `None` for the last one made.
-    pub fn set_body(&mut self, id: FeatureId, body: Option<BodyId>) -> Result<()> {
+    /// Chooses the bodies a feature acts on. Empty means all of them.
+    pub fn set_scope(&mut self, id: FeatureId, scope: Vec<BodyId>) -> Result<()> {
         let at = self.position(id)?;
-        if let Some(b) = body {
-            if self.features[at].op.is_sketch() {
-                return Err(Error::InvalidInput("a sketch doesn't act on a body".into()));
-            }
+        if !scope.is_empty() && self.features[at].op.is_sketch() {
+            return Err(Error::InvalidInput("a sketch doesn't act on a body".into()));
+        }
+        for b in &scope {
             if !self.features[..at].iter().any(|f| f.id == b.feature) {
                 return Err(Error::InvalidInput(format!("this feature acts on body {}, whose feature doesn't come before it", b.text())));
             }
         }
-        self.features[at].body = body;
+        self.features[at].scope = scope;
         Ok(())
+    }
+
+    /// Keeps something for an app with a feature, or with the document if no feature is given. It changes nothing in the model.
+    pub fn set_app(&mut self, id: Option<FeatureId>, app: Option<Value>) -> Result<()> {
+        match id {
+            Some(id) => {
+                let at = self.position(id)?;
+                self.features[at].app = app;
+            }
+            None => self.app = app,
+        }
+        Ok(())
+    }
+
+    /// What an app has kept with the document.
+    pub fn app(&self) -> Option<&Value> {
+        self.app.as_ref()
     }
 
     /// Adds a feature, panicking on a bad reference. For models written in code, where a
@@ -1364,9 +1680,8 @@ impl Document {
             }
         };
 
-        // Each feature's key, for what depends on it, and the body each acted on, for a copy of it to go to.
+        // Each feature's key, for what depends on it.
         let mut keys: HashMap<FeatureId, u64> = HashMap::new();
-        let mut acted: HashMap<FeatureId, BodyId> = HashMap::new();
         for i in 0..n {
             let feature = self.features[i].clone();
             let kind = feature.op.kind();
@@ -1383,39 +1698,62 @@ impl Document {
                 steps.push(step(StepState::Blocked));
                 continue;
             }
-            let own = match Self::signature(&feature.op, &env) {
-                Ok(s) => format!("{s} on {:?}", feature.body),
+            let mut own = match Self::signature(&feature.op, &env) {
+                Ok(s) => format!("{s} on {:?}", feature.scope),
                 Err(e) => {
                     failed = Some(i);
                     steps.push(step(StepState::Failed(e.to_string())));
                     continue;
                 }
             };
-            // Which body it acts on: the one it says, or where what it copies went, or the last one made.
-            let target = if feature.op.is_sketch() {
-                None
-            } else if let Some(id) = feature.body {
-                match held.iter().position(|h| h.id == id) {
-                    Some(t) => Some(t),
-                    None => {
-                        failed = Some(i);
-                        steps.push(step(StepState::Failed(format!("it acts on body {}, which isn't there at this point", id.text()))));
-                        continue;
+            // A sketch following a face depends on where that face has got to, and nothing else about the bodies.
+            if let Op::Sketch { plane, .. } | Op::ConstrainedSketch { plane, .. } = &feature.op {
+                if plane.on_face.is_some() {
+                    match plane_frame(plane, &env, &held) {
+                        Ok(frame) => own.push_str(&format!(" {frame:?}")),
+                        Err(e) => {
+                            failed = Some(i);
+                            steps.push(step(StepState::Failed(e.to_string())));
+                            continue;
+                        }
                     }
                 }
+            }
+            // The bodies it acts on: those it names, or all of them. One that isn't there is for it to say so.
+            let missing = feature.scope.iter().find(|id| !held.iter().any(|h| h.id == **id));
+            if let (Some(id), false) = (missing, feature.op.is_sketch()) {
+                failed = Some(i);
+                steps.push(step(StepState::Failed(format!("it acts on body {}, which isn't there at this point", id.text()))));
+                continue;
+            }
+            let scope: Vec<(BodyId, Arc<Body>)> = if feature.op.is_sketch() {
+                Vec::new()
+            } else if feature.scope.is_empty() {
+                held.iter().map(|h| (h.id, h.body.clone())).collect()
             } else {
-                let of: &[FeatureId] = match &feature.op {
-                    Op::Pattern { of, .. } | Op::Mirror { of, .. } => of,
-                    _ => &[],
-                };
-                let copied_from = of.iter().find_map(|f| acted.get(f)).and_then(|id| held.iter().position(|h| h.id == *id));
-                copied_from.or(held.len().checked_sub(1))
+                feature.scope.iter().filter_map(|id| held.iter().find(|h| h.id == *id).map(|h| (h.id, h.body.clone()))).collect()
             };
-            // A sketch depends only on its own inputs. Everything else also depends on the body it acts on, and on its
+            // A sketch depends only on its own inputs. Everything else also depends on the bodies it acts on, and on its
             // sketch or what it copies when it has them. A new body needs nothing from the others, unless it's made
             // from their faces.
-            let independent = feature.op.mode() == Some(Mode::NewBody) && !matches!(feature.op, Op::Thicken { .. });
-            let body_key = if independent { 0 } else { target.map_or(0, |t| held[t].key) };
+            let makes_its_own = |f: &FeatureId| self.feature(*f).is_some_and(|g| g.op.mode() == Some(Mode::NewBody));
+            let independent = match &feature.op {
+                Op::Thicken { .. } => false,
+                Op::Pattern { of, .. } | Op::Mirror { of, .. } => !of.is_empty() && of.iter().all(makes_its_own),
+                op => op.mode() == Some(Mode::NewBody),
+            };
+            let key_of = |id: &BodyId| held.iter().find(|h| h.id == *id).map_or(0, |h| h.key);
+            let mut body_key = 0u64;
+            if !independent {
+                for (id, _) in &scope {
+                    body_key ^= key_of(id);
+                }
+                if let Op::BooleanBodies { tools, .. } = &feature.op {
+                    for id in tools {
+                        body_key ^= key_of(id).rotate_left(29);
+                    }
+                }
+            }
             let mixed = |list: &[FeatureId]| list.iter().enumerate().fold(0u64, |sum, (k, id)| sum ^ keys.get(id).copied().unwrap_or(0).rotate_left(17 + k as u32));
             let key = match &feature.op {
                 Op::Sketch { .. } | Op::ConstrainedSketch { .. } => hash_text(1, &own),
@@ -1424,41 +1762,29 @@ impl Document {
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
                 _ => hash_text(body_key, &own),
             };
-            let acted_on = target.map(|t| held[t].id).unwrap_or(BodyId { feature: feature.id, index: 0 });
             let cached = self.cache.get(&feature.id).filter(|c| c.key == key).cloned();
             if let Some(c) = cached {
                 keys.insert(feature.id, key);
                 if !feature.op.is_sketch() {
-                    take_result(&mut held, target, feature.id, key, c.body.as_ref(), &c.added);
-                    if feature.op.mode() != Some(Mode::NewBody) {
-                        acted.insert(feature.id, acted_on);
-                    }
+                    take_result(&mut held, feature.id, key, &c.changed, &c.added);
                 }
                 steps.push(step(StepState::Reused));
                 continue;
             }
-            match self.run(&feature, &env, target.map(|t| held[t].body.clone())) {
+            match self.run(&feature, &env, &scope, &held) {
                 Ok(result) => {
                     keys.insert(feature.id, key);
                     if result.sketch.is_none() {
-                        take_result(&mut held, target, feature.id, key, result.body.as_ref(), &result.added);
-                        if feature.op.mode() != Some(Mode::NewBody) {
-                            acted.insert(feature.id, acted_on);
-                        }
+                        take_result(&mut held, feature.id, key, &result.changed, &result.added);
                     }
-                    self.cache.insert(feature.id, Cached { key, body: result.body, added: result.added, sketch: result.sketch, tools: result.tools });
+                    self.cache.insert(feature.id, Cached { key, changed: result.changed, added: result.added, sketch: result.sketch, tools: result.tools });
                     steps.push(step(StepState::Rebuilt));
                 }
                 // The previous result stays cached under its own key, so going back to the
                 // earlier inputs reuses it.
                 Err(e) => {
                     failed = Some(i);
-                    // With several bodies, it matters which one this was.
-                    let why = match target {
-                        Some(t) if held.len() > 1 => format!("{e} (on body {}, one of {} here)", held[t].id.text(), held.len()),
-                        _ => e.to_string(),
-                    };
-                    steps.push(step(StepState::Failed(why)));
+                    steps.push(step(StepState::Failed(e.to_string())));
                 }
             }
         }
@@ -1476,22 +1802,26 @@ impl Document {
         Ok(text)
     }
 
-    fn run(&self, feature: &Feature, env: &Env, body: Option<Arc<Body>>) -> Result<RunResult> {
+    fn run(&self, feature: &Feature, env: &Env, scope: &[(BodyId, Arc<Body>)], all: &[Held]) -> Result<RunResult> {
         let tag = feature.id.0;
-        let solid = |body: Body| RunResult { body: Some(Arc::new(body)), added: Vec::new(), sketch: None, tools: None };
-        let sketched = |output: SketchOutput| RunResult { body: None, added: Vec::new(), sketch: Some(output), tools: None };
-        let applied = |current: Option<&Body>, tools: Vec<Body>, mode: Mode| -> Result<RunResult> {
-            if mode == Mode::NewBody {
-                // One feature's solids are one body, joined as they would be anywhere else.
-                if tools.is_empty() {
-                    return Err(Error::InvalidInput("the sketch has no closed regions".into()));
-                }
-                let made = Arc::new(merged_tools(&tools)?);
-                return Ok(RunResult { body: None, added: vec![made], sketch: None, tools: Some((Arc::new(tools), mode)) });
-            }
-            let result = combine(current, &tools, mode)?;
-            Ok(RunResult { body: Some(Arc::new(result)), added: Vec::new(), sketch: None, tools: Some((Arc::new(tools), mode)) })
+        let sketched = |output: SketchOutput| RunResult { changed: Vec::new(), added: Vec::new(), sketch: Some(output), tools: None };
+        let applied = |tools: Vec<Body>, mode: Mode| -> Result<RunResult> {
+            let done = combined(scope, tools.clone(), mode, tag)?;
+            Ok(done.done(Some((Arc::new(tools), mode))))
         };
+        // A feature that works on what's there, one body at a time.
+        let each = |what: &str, work: &dyn Fn(&Body) -> Result<Body>| -> Result<RunResult> {
+            if scope.is_empty() {
+                return Err(Error::InvalidInput(format!("{what} needs a body to work on")));
+            }
+            let mut out = Changes::default();
+            for (id, body) in scope {
+                out.settle(*id, work(body).map_err(|e| on_body(e, *id, scope.len() > 1))?, tag);
+            }
+            Ok(out.done(None))
+        };
+        let whole = || -> Option<Arc<Body>> { whole_of(all) };
+        let at_point = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
         let sketch_output = |id: &FeatureId| -> Result<SketchOutput> {
             if self.feature(*id).is_some_and(|f| f.suppressed) {
                 return Err(Error::InvalidInput(format!("its sketch f{} is suppressed", id.0)));
@@ -1510,7 +1840,7 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: plane.resolve(env)?, profiles: Arc::new(list), by_entity: false }))
+                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: false }))
             }
             Op::ConstrainedSketch { plane, sketch } => {
                 let solved = sketch.solve_with(env).map_err(|e| Error::InvalidProfile(e.message))?;
@@ -1519,7 +1849,7 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: plane.resolve(env)?, profiles: Arc::new(list), by_entity: true }))
+                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: true }))
             }
             Op::Extrude { sketch, start, length, mode } => {
                 let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
@@ -1530,17 +1860,21 @@ impl Document {
                     .enumerate()
                     .map(|(k, p)| Ok(with_region(extrude(p, &shifted, h, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
-                applied(body.as_deref(), tools, *mode)
+                applied(tools, *mode)
             }
-            Op::Revolve { sketch, degrees, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
+            Op::Revolve { sketch, degrees, mode, axis } => {
+                let SketchOutput { frame, profiles, by_entity } = sketch_output(sketch)?;
                 let a = num(degrees, env)?.to_radians();
+                let (frame, list): (Frame, Vec<Profile>) = match axis {
+                    Some(axis) => revolve_frame(axis, &frame, &profiles, a, env)?,
+                    None => (frame, profiles.to_vec()),
+                };
                 let tools = list
                     .iter()
                     .enumerate()
                     .map(|(k, p)| Ok(with_region(revolve(p, &frame, a, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
-                applied(body.as_deref(), tools, *mode)
+                applied(tools, *mode)
             }
             Op::Loft { sections, mode } => {
                 let outputs = sections.iter().map(&sketch_output).collect::<Result<Vec<_>>>()?;
@@ -1551,7 +1885,7 @@ impl Document {
                         many => return Err(Error::InvalidInput(format!("a loft's section f{} must hold one outline, not {}", id.0, many.len()))),
                     }
                 }
-                applied(body.as_deref(), vec![coreshape::loft::loft(&list, tag)?], *mode)
+                applied(vec![coreshape::loft::loft(&list, tag)?], *mode)
             }
             Op::Sweep { sketch, path, mode } => {
                 let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
@@ -1573,52 +1907,61 @@ impl Document {
                     .enumerate()
                     .map(|(k, p)| Ok(with_region(sweep(p, &frame, &steps, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
-                applied(body.as_deref(), tools, *mode)
+                applied(tools, *mode)
             }
             Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => {
                 let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
-                let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
-                let motion = Helix { origin: at(point)?, axis: at(axis)?, pitch: num(pitch, env)?, turns: num(turns, env)?, left_handed: *left_handed };
+                let motion = Helix { origin: at_point(point)?, axis: at_point(axis)?, pitch: num(pitch, env)?, turns: num(turns, env)?, left_handed: *left_handed };
                 let tools = list
                     .iter()
                     .enumerate()
                     .map(|(k, p)| Ok(with_region(helix(p, &frame, &motion, tag)?, if by_entity { 0 } else { k as u32 })))
                     .collect::<Result<Vec<Body>>>()?;
-                applied(body.as_deref(), tools, *mode)
+                applied(tools, *mode)
             }
             Op::DeleteFace { faces } => {
-                let current = body.ok_or_else(|| Error::InvalidInput("deleting faces needs a body to work on".into()))?;
-                let list = keyed_faces(&current, faces)?;
-                Ok(solid(delete_faces(&current, &list)?))
+                let everything = whole().ok_or_else(|| Error::InvalidInput("deleting faces needs a body to work on".into()))?;
+                let picked = keyed_faces(&everything, faces)?;
+                let mut out = Changes::default();
+                for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
+                    out.settle(scope[at].0, delete_faces(&scope[at].1, &list).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
+                }
+                Ok(out.done(None))
             }
             Op::Thicken { faces, thickness, mode } => {
-                let current = body.ok_or_else(|| Error::InvalidInput("thickening needs a body to take faces from".into()))?;
-                let list = keyed_faces(&current, faces)?;
-                let made = thicken(&current, &list, num(thickness, env)?, tag)?;
-                applied(Some(&*current), vec![made], *mode)
+                let everything = whole().ok_or_else(|| Error::InvalidInput("thickening needs a body to take faces from".into()))?;
+                let picked = keyed_faces(&everything, faces)?;
+                let t = num(thickness, env)?;
+                let mut tools = Vec::new();
+                for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
+                    tools.push(thicken(&scope[at].1, &list, t, tag)?);
+                }
+                if tools.is_empty() {
+                    return Err(Error::InvalidInput("the faces to thicken aren't on the bodies this acts on".into()));
+                }
+                applied(tools, *mode)
             }
             Op::Pattern { of, along } => {
                 let moves = pattern_moves(along, env)?;
-                self.copied(body.as_deref(), of, tag, |b| moves.iter().map(|m| b.transformed(m)).collect())
+                self.copied(scope, of, tag, |b| moves.iter().map(|m| b.transformed(m)).collect())
             }
             Op::Mirror { of, point, normal } => {
-                let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
-                let n = at(normal)?;
+                let n = at_point(normal)?;
                 if !(n.norm() >= 1e-12 && n.norm() <= 1e150) {
                     return Err(Error::InvalidInput("a mirror's normal must have a sensible, non-zero length".into()));
                 }
-                let m = Mirror::new(at(point)?, n);
-                self.copied(body.as_deref(), of, tag, |b| vec![b.mirrored(&m)])
+                let m = Mirror::new(at_point(point)?, n);
+                self.copied(scope, of, tag, |b| vec![b.mirrored(&m)])
             }
             Op::ImportStep { text, mode } => {
                 let solids = coreshape::import::step::read_step(text, tag)?;
                 // A file's solids are parts, and each of them can be a body. Merging is only for when that's asked for.
                 if *mode == Mode::NewBody {
                     let added = solids.iter().map(|b| Arc::new(b.clone())).collect();
-                    return Ok(RunResult { body: None, added, sketch: None, tools: Some((Arc::new(solids), *mode)) });
+                    return Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), *mode)) });
                 }
                 let count = solids.len();
-                applied(body.as_deref(), solids, *mode).map_err(|e| {
+                applied(solids, *mode).map_err(|e| {
                     if count > 1 {
                         Error::InvalidInput(format!("this file has {count} solids, and merging them into one body failed: {e}. With the mode new_body each stays a body of its own"))
                     } else {
@@ -1635,46 +1978,192 @@ impl Document {
                     Primitive::Sphere { radius } => sphere(&frame, num(radius, env)?, tag)?,
                     Primitive::Torus { major, minor } => torus(&frame, num(major, env)?, num(minor, env)?, tag)?,
                 };
-                applied(body.as_deref(), vec![made], *mode)
+                applied(vec![made], *mode)
             }
             Op::Offset { distance } => {
-                let current = body.ok_or_else(|| Error::InvalidInput("an offset needs a body to work on".into()))?;
-                Ok(solid(offset(&current, num(distance, env)?)?))
+                let d = num(distance, env)?;
+                each("an offset", &|b| offset(b, d))
             }
             Op::Shell { open, thickness } => {
-                let current = body.ok_or_else(|| Error::InvalidInput("a shell needs a body to work on".into()))?;
-                let faces = named_faces(&current, open)?;
-                Ok(solid(shell(&current, &faces, num(thickness, env)?, tag)?))
+                let t = num(thickness, env)?;
+                let everything = whole().ok_or_else(|| Error::InvalidInput("a shell needs a body to work on".into()))?;
+                if open.is_empty() {
+                    return each("a shell", &|b| shell(b, &[], t, tag));
+                }
+                let picked = named_faces(&everything, open)?;
+                let mut out = Changes::default();
+                for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
+                    out.settle(scope[at].0, shell(&scope[at].1, &list, t, tag).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
+                }
+                Ok(out.done(None))
             }
             Op::Draft { faces, pull, neutral, degrees } => {
-                let current = body.ok_or_else(|| Error::InvalidInput("a draft needs a body to work on".into()))?;
-                let list = named_faces(&current, faces)?;
-                if list.is_empty() {
+                let everything = whole().ok_or_else(|| Error::InvalidInput("a draft needs a body to work on".into()))?;
+                let picked = named_faces(&everything, faces)?;
+                if picked.is_empty() {
                     return Err(Error::InvalidInput("a draft needs at least one face".into()));
                 }
-                let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
-                Ok(solid(draft(&current, &list, at(pull)?, at(neutral)?, num(degrees, env)?.to_radians())?))
+                let (p, n, a) = (at_point(pull)?, at_point(neutral)?, num(degrees, env)?.to_radians());
+                let mut out = Changes::default();
+                for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
+                    out.settle(scope[at].0, draft(&scope[at].1, &list, p, n, a).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
+                }
+                Ok(out.done(None))
             }
             Op::Fillet { edges, radius, propagate } => {
-                let current = body.ok_or_else(|| Error::InvalidInput("a fillet needs a body to work on".into()))?;
-                let list = select_edges(edges, &current, env)?;
+                let everything = whole().ok_or_else(|| Error::InvalidInput("a fillet needs a body to work on".into()))?;
+                let picked = select_edges(edges, &everything, env)?;
                 let options = BlendOptions { propagate: *propagate };
-                Ok(solid(fillet_with(&current, &list, num(radius, env)?, options, tag)?))
+                let r = num(radius, env)?;
+                let mut out = Changes::default();
+                let lists = by_body(all, scope, &picked, |b| b.edges.len());
+                // Nothing picked is for the blend to say what it says about that.
+                if lists.is_empty() {
+                    let first = scope.first().ok_or_else(|| Error::InvalidInput("a fillet needs a body to work on".into()))?;
+                    out.settle(first.0, fillet_with(&first.1, &[], r, options, tag)?, tag);
+                }
+                for (at, list) in lists {
+                    out.settle(scope[at].0, fillet_with(&scope[at].1, &list, r, options, tag).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
+                }
+                Ok(out.done(None))
             }
             Op::Chamfer { edges, distance, propagate } => {
-                let current = body.ok_or_else(|| Error::InvalidInput("a chamfer needs a body to work on".into()))?;
-                let list = select_edges(edges, &current, env)?;
+                let everything = whole().ok_or_else(|| Error::InvalidInput("a chamfer needs a body to work on".into()))?;
+                let picked = select_edges(edges, &everything, env)?;
                 let options = BlendOptions { propagate: *propagate };
-                Ok(solid(chamfer_with(&current, &list, num(distance, env)?, options, tag)?))
+                let d = num(distance, env)?;
+                let mut out = Changes::default();
+                let lists = by_body(all, scope, &picked, |b| b.edges.len());
+                if lists.is_empty() {
+                    let first = scope.first().ok_or_else(|| Error::InvalidInput("a chamfer needs a body to work on".into()))?;
+                    out.settle(first.0, chamfer_with(&first.1, &[], d, options, tag)?, tag);
+                }
+                for (at, list) in lists {
+                    out.settle(scope[at].0, chamfer_with(&scope[at].1, &list, d, options, tag).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
+                }
+                Ok(out.done(None))
             }
+            Op::Transform { motion, copy } => {
+                if scope.is_empty() {
+                    return Err(Error::InvalidInput("there is no body to move".into()));
+                }
+                let m = match motion {
+                    Motion::Translate { by } => Frame::translation(at_point(by)?),
+                    Motion::Rotate { point, axis, degrees } => {
+                        let a = at_point(axis)?;
+                        if !(a.norm() >= 1e-12 && a.norm() <= 1e150) {
+                            return Err(Error::InvalidInput("a rotation's axis must have a sensible, non-zero length".into()));
+                        }
+                        Frame::rotation(at_point(point)?, a.normalized(), num(degrees, env)?.to_radians())
+                    }
+                    Motion::Frames { from, to } => to.resolve(env)?.compose(&from.resolve(env)?.inverse()),
+                };
+                let mut out = Changes::default();
+                for (k, (id, body)) in scope.iter().enumerate() {
+                    let mut moved = body.transformed(&m);
+                    if *copy {
+                        moved.mark_copy(tag, k as u32 + 1);
+                        out.added.push(Arc::new(moved));
+                    } else {
+                        out.changed.push((*id, Some(Arc::new(moved))));
+                    }
+                }
+                Ok(out.done(None))
+            }
+            Op::DeleteBodies => {
+                if feature.scope.is_empty() {
+                    return Err(Error::InvalidInput("deleting bodies has to name them".into()));
+                }
+                let mut out = Changes::default();
+                out.changed = scope.iter().map(|(id, _)| (*id, None)).collect();
+                Ok(out.done(None))
+            }
+            Op::BooleanBodies { operation, tools, keep_tools } => self.boolean_of_bodies(feature, scope, all, *operation, tools, *keep_tools),
         }
     }
 
-    /// The body with copies added: of listed features' solids, applied as they were, or of the
-    /// whole body if none are listed. `copies` makes the images of one solid. Copies of a solid that was a body of its own
-    /// are bodies of their own.
-    fn copied(&self, body: Option<&Body>, of: &[FeatureId], feature: u32, copies: impl Fn(&Body) -> Vec<Body>) -> Result<RunResult> {
-        let mut current = body.ok_or_else(|| Error::InvalidInput("there is no body yet to copy".into()))?.clone();
+    /// A Boolean between bodies. As in Onshape, bodies that don't meet are refused, and without `keep_tools` the tools go.
+    fn boolean_of_bodies(&self, feature: &Feature, scope: &[(BodyId, Arc<Body>)], all: &[Held], operation: BodyBoolean, tools: &[BodyId], keep_tools: bool) -> Result<RunResult> {
+        let tag = feature.id.0;
+        let mut tool_bodies: Vec<(BodyId, Arc<Body>)> = Vec::with_capacity(tools.len());
+        for id in tools {
+            let h = all.iter().find(|h| h.id == *id).ok_or_else(|| Error::InvalidInput(format!("it uses body {}, which isn't there at this point", id.text())))?;
+            tool_bodies.push((h.id, h.body.clone()));
+        }
+        let mut out = Changes::default();
+        match operation {
+            BodyBoolean::Subtract => {
+                if feature.scope.is_empty() {
+                    return Err(Error::InvalidInput("subtracting has to name its targets".into()));
+                }
+                if tool_bodies.is_empty() {
+                    return Err(Error::InvalidInput("subtracting needs at least one tool".into()));
+                }
+                let mut reached = false;
+                for (id, target) in scope {
+                    let near: Vec<Body> = tool_bodies.iter().filter(|(t, b)| t != id && boxes_meet(target, b)).map(|(_, b)| (**b).clone()).collect();
+                    if near.is_empty() {
+                        continue;
+                    }
+                    let made = boolean_many(target, &near, BoolOp::Subtract)?;
+                    let before = coreshape::mass_properties(target).volume;
+                    if made.faces.is_empty() || (coreshape::mass_properties(&made).volume - before).abs() > 1e-9 * before.abs().max(1.0) {
+                        reached = true;
+                        out.settle(*id, made, tag);
+                    }
+                }
+                if !reached {
+                    return Err(Error::InvalidInput("the tools don't reach the targets, so there's nothing to subtract".into()));
+                }
+                if !keep_tools {
+                    for (id, _) in &tool_bodies {
+                        if !out.changed.iter().any(|(c, _)| c == id) {
+                            out.changed.push((*id, None));
+                        }
+                    }
+                }
+            }
+            BodyBoolean::Union | BodyBoolean::Intersect => {
+                let mut list: Vec<(BodyId, Arc<Body>)> = scope.to_vec();
+                for t in &tool_bodies {
+                    if !list.iter().any(|(id, _)| *id == t.0) {
+                        list.push(t.clone());
+                    }
+                }
+                if list.len() < 2 {
+                    return Err(Error::InvalidInput("a Boolean needs at least two bodies".into()));
+                }
+                let mut made = (*list[0].1).clone();
+                for (_, next) in &list[1..] {
+                    made = match operation {
+                        BodyBoolean::Union => union(&made, next)?,
+                        _ => intersect(&made, next)?,
+                    };
+                }
+                match operation {
+                    BodyBoolean::Union if made.solid_count() >= list.len() => return Err(Error::InvalidInput("these bodies don't touch, so there's nothing to join".into())),
+                    BodyBoolean::Intersect if made.faces.is_empty() => return Err(Error::InvalidInput("these bodies don't overlap, so nothing is left of them".into())),
+                    _ => {}
+                }
+                if keep_tools {
+                    out.added = made.solids().into_iter().map(Arc::new).collect();
+                } else {
+                    out.settle(list[0].0, made, tag);
+                    for (id, _) in &list[1..] {
+                        out.changed.push((*id, None));
+                    }
+                }
+            }
+        }
+        Ok(out.done(None))
+    }
+
+    /// Copies added: of listed features' solids, applied as they were, or of each body acted on if none are listed.
+    /// `copies` makes the images of one solid. A copy that doesn't touch what it was copied from is a body of its own.
+    fn copied(&self, scope: &[(BodyId, Arc<Body>)], of: &[FeatureId], feature: u32, copies: impl Fn(&Body) -> Vec<Body>) -> Result<RunResult> {
+        if scope.is_empty() {
+            return Err(Error::InvalidInput("there is no body yet to copy".into()));
+        }
         // Numbered from 1, since the original is copy 0 and has no mark.
         let copies = |b: &Body| -> Vec<Body> {
             let mut made = copies(b);
@@ -1683,12 +2172,17 @@ impl Document {
             }
             made
         };
-        let result = |body: Option<Body>, added: Vec<Arc<Body>>| RunResult { body: body.map(Arc::new), added, sketch: None, tools: None };
+        let mut out = Changes::default();
         if of.is_empty() {
-            return Ok(result(Some(boolean_many(&current, &copies(&current), BoolOp::Union)?), Vec::new()));
+            for (id, body) in scope {
+                out.settle(*id, boolean_many(body, &copies(body), BoolOp::Union)?, feature);
+            }
+            return Ok(out.done(None));
         }
-        let mut changed = false;
-        let mut added = Vec::new();
+        // What each body is by now, as one listed feature's copies can land on what another's did.
+        let mut current: Vec<(BodyId, Arc<Body>)> = scope.to_vec();
+        let mut gone: Vec<BodyId> = Vec::new();
+        let mut touched: Vec<BodyId> = Vec::new();
         for id in of {
             if self.feature(*id).is_some_and(|f| f.suppressed) {
                 return Err(Error::InvalidInput(format!("f{} is suppressed, so it can't be copied", id.0)));
@@ -1700,20 +2194,42 @@ impl Document {
                 .ok_or_else(|| Error::InvalidInput(format!("f{} makes no solid to copy: it must be an extrude, revolve, sweep or solid", id.0)))?;
             let made: Vec<Body> = tools.iter().flat_map(&copies).collect();
             if mode == Mode::NewBody {
-                added.extend(made.into_iter().map(Arc::new));
-            } else {
-                current = combine(Some(&current), &made, mode)?;
-                changed = true;
+                out.added.extend(made.into_iter().map(Arc::new));
+                continue;
+            }
+            let step = combined(&current, made, mode, feature)?;
+            for (changed, now) in step.changed {
+                match now {
+                    Some(body) => {
+                        if let Some(entry) = current.iter_mut().find(|(c, _)| *c == changed) {
+                            entry.1 = body;
+                        }
+                        if !touched.contains(&changed) {
+                            touched.push(changed);
+                        }
+                    }
+                    None => {
+                        current.retain(|(c, _)| *c != changed);
+                        gone.push(changed);
+                    }
+                }
+            }
+            out.added.extend(step.added);
+        }
+        for id in touched {
+            if let Some((_, body)) = current.iter().find(|(c, _)| *c == id) {
+                out.changed.push((id, Some(body.clone())));
             }
         }
-        Ok(result(changed.then_some(current), added))
+        out.changed.extend(gone.into_iter().map(|id| (id, None)));
+        Ok(out.done(None))
     }
 
     // ----- Saving and loading -----
 
     /// The document as a JSON value.
     pub fn to_json(&self) -> Value {
-        Value::obj(vec![
+        let doc = Value::obj(vec![
             ("format", Value::str(FORMAT)),
             ("version", Value::Num(FORMAT_VERSION)),
             ("units", Value::str("mm")),
@@ -1728,7 +2244,8 @@ impl Document {
                 ),
             ),
             ("features", Value::Arr(self.features.iter().map(feature_value).collect())),
-        ])
+        ]);
+        with_app(doc, self.app.as_ref())
     }
 
     /// The document as the text of a file.
@@ -1754,13 +2271,14 @@ impl Document {
                 "this document is format version {version}, and this kernel reads version {FORMAT_VERSION}"
             )));
         }
-        known_keys(v, &["format", "version", "units", "next_id", "parameters", "features"])?;
+        known_keys(v, &["format", "version", "units", "next_id", "parameters", "features", "app"])?;
         if let Some(units) = v.get("units").and_then(Value::as_str) {
             if units != "mm" {
                 return Err(Error::InvalidInput(format!("units \"{units}\" are not supported")));
             }
         }
         let mut doc = Document::new();
+        doc.app = v.get("app").cloned();
         for p in v.get("parameters").and_then(Value::as_array).unwrap_or(&[]) {
             known_keys(p, &["name", "value"])?;
             let name = p.get("name").and_then(Value::as_str).ok_or_else(|| bad("a parameter has no name"))?;
@@ -1783,7 +2301,7 @@ impl Document {
             if doc.features.iter().any(|g| g.id == feature.id) {
                 return Err(Error::InvalidInput(format!("feature id {} appears twice", feature.id.0)));
             }
-            if feature.body.is_some() && feature.op.is_sketch() {
+            if !feature.scope.is_empty() && feature.op.is_sketch() {
                 return Err(Error::InvalidInput(format!("feature f{} is a sketch, which doesn't act on a body", feature.id.0)));
             }
             for r in feature.references() {
@@ -1883,26 +2401,6 @@ fn with_region(mut body: Body, region: u32) -> Body {
         }
     }
     body
-}
-
-fn combine(body: Option<&Body>, tools: &[Body], mode: Mode) -> Result<Body> {
-    if tools.is_empty() {
-        return Err(Error::InvalidInput("the sketch has no closed regions".into()));
-    }
-    let Some(current) = body else {
-        if mode != Mode::Add {
-            return Err(Error::InvalidInput("there is no body yet to work on".into()));
-        }
-        return merged_tools(tools);
-    };
-    let op = match mode {
-        Mode::Add => BoolOp::Union,
-        Mode::Remove => BoolOp::Subtract,
-        // A sketch with several regions means what lies inside any of them.
-        Mode::Intersect => BoolOp::Intersect,
-        Mode::NewBody => return Err(Error::Internal("a new body doesn't combine with another".into())),
-    };
-    boolean_many(current, tools, op)
 }
 
 /// The rigid moves that take the original to each of a pattern's copies.
@@ -2053,11 +2551,38 @@ fn read_point3(v: &Value) -> Result<Point3> {
 }
 
 fn placement_value(p: &Placement) -> Value {
-    Value::obj(vec![("origin", point3_value(&p.origin)), ("z", point3_value(&p.z)), ("x", point3_value(&p.x))])
+    let mut items = vec![("origin", point3_value(&p.origin)), ("z", point3_value(&p.z)), ("x", point3_value(&p.x))];
+    if let Some(key) = &p.on_face {
+        items.push(("on_face", Value::str(key.text())));
+    }
+    Value::obj(items)
+}
+
+fn with_app(v: Value, app: Option<&Value>) -> Value {
+    match (v, app) {
+        (Value::Obj(mut items), Some(a)) => {
+            items.push(("app".to_string(), a.clone()));
+            Value::Obj(items)
+        }
+        (v, _) => v,
+    }
+}
+
+fn body_list_value(list: &[BodyId]) -> Value {
+    Value::Arr(list.iter().map(|b| Value::str(b.text())).collect())
+}
+
+/// A list of bodies by name, from a field that may be missing.
+pub fn read_body_list(v: &Value, key: &str) -> Result<Vec<BodyId>> {
+    let bad = || Error::InvalidInput(format!("\"{key}\" must be a list of bodies, like [\"f3\", \"f3.2\"]"));
+    match v.get(key) {
+        None => Ok(Vec::new()),
+        Some(list) => list.as_array().ok_or_else(bad)?.iter().map(|b| BodyId::parse(b.as_str().ok_or_else(bad)?)).collect(),
+    }
 }
 
 fn read_placement(v: &Value) -> Result<Placement> {
-    known_keys(v, &["origin", "z", "x"])?;
+    known_keys(v, &["origin", "z", "x", "on_face"])?;
     let dir = |key: &str, fallback: [f64; 3]| -> Result<Point3> {
         match v.get(key) {
             Some(p) => read_point3(p),
@@ -2070,7 +2595,11 @@ fn read_placement(v: &Value) -> Result<Placement> {
         [Some(_), Some(b), Some(c)] if b.abs() < 1e-9 && c.abs() < 1e-9 => [0.0, 1.0, 0.0],
         _ => [1.0, 0.0, 0.0],
     };
-    Ok(Placement { origin: dir("origin", [0.0, 0.0, 0.0])?, z, x: dir("x", x_default)? })
+    let on_face = match v.get("on_face") {
+        None => None,
+        Some(k) => Some(FaceKey::parse(k.as_str().ok_or_else(|| Error::InvalidInput("\"on_face\" must be the name of a face".into()))?)?),
+    };
+    Ok(Placement { origin: dir("origin", [0.0, 0.0, 0.0])?, z, x: dir("x", x_default)?, on_face })
 }
 
 fn shape_value(s: &Shape) -> Value {
@@ -2399,11 +2928,34 @@ pub fn op_value(op: &Op) -> Value {
             ("length", expr_value(length)),
             ("mode", mode_value(*mode)),
         ]),
-        Op::Revolve { sketch, degrees, mode } => Value::obj(vec![
-            ("type", Value::str("revolve")),
-            ("sketch", Value::Num(sketch.0 as f64)),
-            ("degrees", expr_value(degrees)),
-            ("mode", mode_value(*mode)),
+        Op::Revolve { sketch, degrees, mode, axis } => {
+            let mut items = vec![("type", Value::str("revolve")), ("sketch", Value::Num(sketch.0 as f64)), ("degrees", expr_value(degrees)), ("mode", mode_value(*mode))];
+            if let Some(axis) = axis {
+                items.push(("axis", Value::obj(vec![("point", point2_value(&axis.point)), ("direction", point2_value(&axis.direction))])));
+            }
+            Value::obj(items)
+        }
+        Op::Transform { motion, copy } => {
+            let how = match motion {
+                Motion::Translate { by } => Value::obj(vec![("type", Value::str("translate")), ("by", point3_value(by))]),
+                Motion::Rotate { point, axis, degrees } => Value::obj(vec![("type", Value::str("rotate")), ("point", point3_value(point)), ("axis", point3_value(axis)), ("degrees", expr_value(degrees))]),
+                Motion::Frames { from, to } => Value::obj(vec![("type", Value::str("frames")), ("from", placement_value(from)), ("to", placement_value(to))]),
+            };
+            Value::obj(vec![("type", Value::str("transform")), ("motion", how), ("copy", Value::Bool(*copy))])
+        }
+        Op::DeleteBodies => Value::obj(vec![("type", Value::str("delete_bodies"))]),
+        Op::BooleanBodies { operation, tools, keep_tools } => Value::obj(vec![
+            ("type", Value::str("boolean")),
+            (
+                "operation",
+                Value::str(match operation {
+                    BodyBoolean::Union => "union",
+                    BodyBoolean::Subtract => "subtract",
+                    BodyBoolean::Intersect => "intersect",
+                }),
+            ),
+            ("tools", body_list_value(tools)),
+            ("keep_tools", Value::Bool(*keep_tools)),
         ]),
         Op::ImportStep { text, mode } => Value::obj(vec![("type", Value::str("import_step")), ("text", Value::str(text)), ("mode", mode_value(*mode))]),
         Op::Solid { primitive, at, mode } => {
@@ -2636,12 +3188,64 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             })
         }
         "revolve" => {
-            with(&["type", "sketch", "degrees", "mode"])?;
+            with(&["type", "sketch", "degrees", "mode", "axis"])?;
+            let axis = match v.get("axis") {
+                None => None,
+                Some(a) => {
+                    known_keys(a, &["point", "direction"])?;
+                    let need = |key: &str| a.get(key).ok_or_else(|| Error::InvalidInput(format!("a revolve's axis needs a \"{key}\"")));
+                    Some(RevolveAxis { point: read_point2(need("point")?)?, direction: read_point2(need("direction")?)? })
+                }
+            };
             Ok(Op::Revolve {
                 sketch: read_sketch_id(v)?,
                 degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)),
                 mode: read_mode(v)?,
+                axis,
             })
+        }
+        "transform" => {
+            with(&["type", "motion", "copy"])?;
+            let m = field(v, "motion", "a transform")?;
+            let at = |key: &str, what: &str| -> Result<Point3> { read_point3(field(m, key, what)?) };
+            let motion = match field(m, "type", "a transform's motion")?.as_str().unwrap_or("") {
+                "translate" => {
+                    known_keys(m, &["type", "by"])?;
+                    Motion::Translate { by: at("by", "a translation")? }
+                }
+                "rotate" => {
+                    known_keys(m, &["type", "point", "axis", "degrees"])?;
+                    Motion::Rotate { point: at("point", "a rotation")?, axis: at("axis", "a rotation")?, degrees: expr_field(m, "degrees", "a rotation")? }
+                }
+                "frames" => {
+                    known_keys(m, &["type", "from", "to"])?;
+                    Motion::Frames { from: read_placement(field(m, "from", "a transform by frames")?)?, to: read_placement(field(m, "to", "a transform by frames")?)? }
+                }
+                other => return Err(Error::InvalidInput(format!("unknown motion \"{other}\"; expected translate, rotate or frames"))),
+            };
+            let copy = match v.get("copy") {
+                None => false,
+                Some(c) => c.as_bool().ok_or_else(|| Error::InvalidInput("\"copy\" must be true or false".into()))?,
+            };
+            Ok(Op::Transform { motion, copy })
+        }
+        "delete_bodies" => {
+            with(&["type"])?;
+            Ok(Op::DeleteBodies)
+        }
+        "boolean" => {
+            with(&["type", "operation", "tools", "keep_tools"])?;
+            let operation = match field(v, "operation", "a boolean")?.as_str().unwrap_or("") {
+                "union" => BodyBoolean::Union,
+                "subtract" => BodyBoolean::Subtract,
+                "intersect" => BodyBoolean::Intersect,
+                other => return Err(Error::InvalidInput(format!("unknown Boolean \"{other}\"; expected union, subtract or intersect"))),
+            };
+            let keep_tools = match v.get("keep_tools") {
+                None => false,
+                Some(c) => c.as_bool().ok_or_else(|| Error::InvalidInput("\"keep_tools\" must be true or false".into()))?,
+            };
+            Ok(Op::BooleanBodies { operation, tools: read_body_list(v, "tools")?, keep_tools })
         }
         "import_step" => {
             with(&["type", "text", "mode"])?;
@@ -2809,7 +3413,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             })
         }
         other => Err(Error::InvalidInput(format!(
-            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, sweep, solid, pattern, mirror, fillet, chamfer, offset, shell or draft"
+            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, sweep, solid, pattern, mirror, transform, delete_bodies, boolean, fillet, chamfer, offset, shell or draft"
         ))),
     }
 }
@@ -2819,13 +3423,13 @@ fn feature_value(f: &Feature) -> Value {
     if f.suppressed {
         items.push(("suppressed".to_string(), Value::Bool(true)));
     }
-    if let Some(b) = f.body {
-        items.push(("body".to_string(), Value::str(b.text())));
+    if !f.scope.is_empty() {
+        items.push(("bodies".to_string(), body_list_value(&f.scope)));
     }
     if let Value::Obj(op) = op_value(&f.op) {
         items.extend(op);
     }
-    Value::Obj(items)
+    with_app(Value::Obj(items), f.app.as_ref())
 }
 
 fn read_feature(v: &Value) -> Result<Feature> {
@@ -2838,12 +3442,7 @@ fn read_feature(v: &Value) -> Result<Feature> {
         None => false,
         Some(s) => s.as_bool().ok_or_else(|| Error::InvalidInput("\"suppressed\" must be true or false".into()))?,
     };
-    let body = match v.get("body") {
-        None => None,
-        Some(b) => Some(BodyId::parse(b.as_str().ok_or_else(|| Error::InvalidInput("\"body\" must be the name of a body, like f3 or f3.2".into()))?)?),
-    };
-    Ok(Feature { id: FeatureId(id as u32), name: name.to_string(), suppressed, body, op: read_op(v, &["id", "name", "suppressed", "body"])? })
-
+    Ok(Feature { id: FeatureId(id as u32), name: name.to_string(), suppressed, scope: read_body_list(v, "bodies")?, app: v.get("app").cloned(), op: read_op(v, &["id", "name", "suppressed", "bodies", "app"])? })
 }
 
 /// All distinct face names on a body, for listing and checks.

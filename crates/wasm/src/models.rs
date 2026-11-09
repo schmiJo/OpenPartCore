@@ -91,7 +91,7 @@ fn vase(doc: &mut Document, _: usize) {
             ],
         })],
     ));
-    doc.with(Op::Revolve { sketch: outside, degrees: 360.0.into(), mode: Mode::Add });
+    doc.with(Op::revolve(outside, 360.0, Mode::Add));
     let inside = doc.with(Op::sketch(
         xy(),
         vec![Region::new(Shape::Path {
@@ -105,7 +105,7 @@ fn vase(doc: &mut Document, _: usize) {
             ],
         })],
     ));
-    doc.with(Op::Revolve { sketch: inside, degrees: 360.0.into(), mode: Mode::Remove });
+    doc.with(Op::revolve(inside, 360.0, Mode::Remove));
 }
 
 /// A cam from one spline around, with a bore and an elliptical window. A hole drilled across it has to
@@ -362,7 +362,7 @@ fn joint(doc: &mut Document, _: usize) {
     for (name, value) in [("nut_h", "0.8 * bolt"), ("nut_r", "0.95 * bolt"), ("head_h", "0.6 * bolt"), ("head_r", "0.85 * bolt"), ("tail", "3")] {
         doc.set_parameter(name, value).expect("valid derived parameters");
     }
-    let of = |feature: FeatureId| Some(BodyId { feature, index: 0 });
+    let of = |feature: FeatureId| vec![BodyId { feature, index: 0 }];
     // One outline for both flanges, and one ring of holes through each.
     let disc = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle(0.0, 0.0, "outer / 2"))]));
     let lower = doc.with(Op::extrude(disc, 0.0, "thick", Mode::NewBody));
@@ -372,12 +372,12 @@ fn joint(doc: &mut Document, _: usize) {
         vec![Region::new(Shape::circle(0.0, 0.0, "bolt / 2")).repeated(Repeat::Circular { count: "bolts".into(), radius: "circle / 2".into(), start_degrees: 0.0.into() })],
     ));
     let lower_holes = doc.with(Op::extrude(ring, -1.0, "2 * thick + 2", Mode::Remove));
-    doc.set_body(lower_holes, of(lower)).expect("the flange comes before it");
+    doc.set_scope(lower_holes, of(lower)).expect("the flange comes before it");
     let upper_holes = doc.with(Op::extrude(ring, -1.0, "2 * thick + 2", Mode::Remove));
-    doc.set_body(upper_holes, of(upper)).expect("the flange comes before it");
+    doc.set_scope(upper_holes, of(upper)).expect("the flange comes before it");
     // The upper one's outer rim, and not the holes.
     let rim = doc.with(Op::fillet(EdgeSelect::Both(vec![EdgeSelect::OnFace(upper.end_cap()), EdgeSelect::Radius("outer / 2".into())]), 3.0));
-    doc.set_body(rim, of(upper)).expect("the flange comes before it");
+    doc.set_scope(rim, of(upper)).expect("the flange comes before it");
     // A bolt through the first hole.
     let screw = doc.with(Op::sketch(
         Placement::at(point3("circle / 2", 0.0, "-(nut_h + tail)")),

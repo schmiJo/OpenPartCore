@@ -376,10 +376,10 @@ fn several_bodies_can_be_made_chosen_listed_and_exported() {
     assert_eq!(list[1].get("body").unwrap().as_str(), Some("f2"));
     assert_eq!(list[1].get("volume").unwrap().as_f64(), Some(1000.0));
 
-    // By default a feature acts on the last one made, and it can say otherwise.
+    // A feature acts on all it reaches, and it can list them.
     let cut = |x: f64, extra: &str| format!(r#"{{"feature":{{"type":"solid","shape":"cylinder","radius":1,"height":20,"at":{{"origin":[{x},5,-5]}},"mode":"remove"{extra}}}}}"#);
     c.ok("feature_add", &cut(55.0, ""));
-    c.ok("feature_add", &cut(5.0, r#","body":"f1""#));
+    c.ok("feature_add", &cut(5.0, r#","bodies":["f1"]"#));
     let bodies = json::parse(&c.ok("bodies_list", "{}")).unwrap();
     let hole = 10.0 * std::f64::consts::PI;
     for b in bodies.as_array().unwrap() {
@@ -387,16 +387,25 @@ fn several_bodies_can_be_made_chosen_listed_and_exported() {
     }
     // A body it can't have leaves nothing behind.
     let before = c.ok("features_list", "{}");
-    assert!(c.refused("feature_add", &cut(5.0, r#","body":"f9""#)).contains("f9"));
-    assert!(c.refused("feature_add", &cut(5.0, r#","body":"nine""#)).contains("nine"));
+    assert!(c.refused("feature_add", &cut(5.0, r#","bodies":["f9"]"#)).contains("f9"));
+    assert!(c.refused("feature_add", &cut(5.0, r#","bodies":["nine"]"#)).contains("nine"));
     assert_eq!(c.ok("features_list", "{}"), before);
     // Editing keeps the choice unless it says otherwise.
     c.ok("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.5, "")[1..]));
-    assert!(c.ok("document_show", "{}").contains(r#""body": "f1""#));
-    c.ok("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","body":null"#)[1..]));
-    assert!(!c.ok("document_show", "{}").contains(r#""body": "f1""#));
-    assert!(c.refused("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","body":"f9""#)[1..])).contains("f9"));
-    c.ok("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","body":"f1""#)[1..]));
+    assert!(c.ok("document_show", "{}").contains(r#""bodies""#));
+    c.ok("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","bodies":[]"#)[1..]));
+    assert!(!c.ok("document_show", "{}").contains(r#""bodies""#));
+    assert!(c.refused("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","bodies":["f9"]"#)[1..])).contains("f9"));
+    c.ok("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","bodies":["f1"]"#)[1..]));
+
+    // Moving, joining and deleting parts, through the same tools.
+    c.ok("feature_add", r#"{"feature":{"type":"transform","bodies":["f2"],"motion":{"type":"translate","by":[1,0,0]}}}"#);
+    let moved = json::parse(&c.ok("bodies_list", "{}")).unwrap();
+    assert!((moved.as_array().unwrap()[1].get("box_min").unwrap().as_array().unwrap()[0].as_f64().unwrap() - 51.0).abs() < 1e-3);
+    c.ok("feature_add", r#"{"feature":{"type":"transform","bodies":["f2"],"motion":{"type":"translate","by":[-1,0,0]},"copy":false}}"#);
+    // An app's own data, kept as it is.
+    c.ok("app_set", r#"{"id":1,"app":{"color":"amber"}}"#);
+    assert!(c.ok("document_show", "{}").contains("amber"));
 
     // The lists say whose each thing is, and can stick to one.
     let faces = json::parse(&c.ok("faces_list", "{}")).unwrap();

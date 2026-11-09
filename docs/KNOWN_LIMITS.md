@@ -19,7 +19,7 @@ These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 - **Sheet bodies.** Everything here is a closed solid, so thicken takes faces of a solid, and a surface can't exist alone.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
 - **Assemblies as assemblies, and drawings.** A document holds an assembly's parts as separate bodies, but there's no tree of them: see [below](#several-bodies).
-- **Work between bodies.** Nothing moves a body, deletes one, or does a Boolean of one body with another. Features only act on one at a time, or make a new one.
+- **Scaling a part.** Onshape's Transform can scale, and this can't, as nothing in the kernel scales a body. Nor does a Boolean offset, or does a split feature exist.
 
 ## Fuzz results
 
@@ -119,18 +119,18 @@ Checked further by `scripts/check_step_import.sh`, which has OpenCASCADE write 3
 
 ## Several bodies
 
-A document can hold parts that stay separate, so an imported assembly's parts stay parts, and they can touch or overlap. [FILE_FORMAT.md](FILE_FORMAT.md#bodies) has the fields, and `Outcome::bodies` has each one in code.
+A Part Studio with several parts, as in Onshape: a body is one connected solid, and a feature acts on all of them unless it lists some, its merge scope. [FILE_FORMAT.md](FILE_FORMAT.md#bodies) has the rules, and `Outcome::bodies` has each one in code.
 
 **Checked** by putting every readable file from the [two sets above](#step-import) through a document with `new_body`, then checking every part of the result. All 100 came through: each with the same parts as `read_step`, all valid and watertight together, and each with its STEP export reading back with the same solids and volume. A second rebuild reused all of it. The slowest is `moon_buggy`, 77 faces, which takes about 35 s to read and 30 s to export. That's its free-form faces, and not its being in a document. With 2,604 faces and 40 solids, `rear` reads in 10 s and takes 12 s to validate, measure and mesh.
 
 - **What `Outcome::body` is, with several.** All of them side by side in one `Body`, each keeping its own shells, so anything that shows, measures or exports the outcome sees everything. It validates and meshes like any other body. It's not for further Booleans, as parts can touch. `body_of_face` and `body_of_edge` say whose each one is.
 - **A volume counts twice wherever parts overlap,** as each part is whole. MCP's summary says so whenever there's more than one body.
-- **Which body a feature acts on is the last one made, unless it says.** That's simple, and it can surprise: suppress the feature that made the last body, and what acted on it by default moves to the one before. It may then do something else, or fail. Naming the body with `body` avoids that, and fails with a message instead.
-- **Selections look only in the body acted on.** A face key on another body comes back as a face that isn't there, and the message says which body it looked on.
+- **Merging is one Boolean at a time.** With several parts in scope, `add` tries each that its box reaches. So many overlapping boxes make it slower, and any refusal among them fails the feature, even for a part it would turn out not to touch.
+- **A body's name can move between pieces,** if a change makes a different piece of a split the larger one. Anything naming it then acts on the other piece. Onshape has this problem too, in its way.
+- **A sketch on a face follows its plane only.** Onshape's does too, as a sketch plane is just a plane. Its position within the plane stays as it was, so a face moved sideways leaves the sketch behind.
+- **A reversed revolve axis with part of a turn** swaps which end is called the start cap, as it's built from the far end. The shape is right.
 - **A STEP export is one product with many solids.** Every body comes back as its own solid in the same place, in this kernel and in OpenCASCADE, but an assembly's tree and part names aren't kept, nor is it known that two bolts are the same bolt. OpenCASCADE reads all 100 exports with the same solids and the same volume. It calls one of them invalid, `daratech`, for wires it finds crossing themselves, and it says the same about that file's original.
-- **Nothing moves a body, deletes one, or joins two.** An unwanted part of an imported assembly stays. Its features can act on it, and nothing more.
 - **The page tints bodies by turns from 6 colours,** so an assembly of many has repeats, and it doesn't yet pick one out, list them, or say which one was tapped.
-- **A failed bug on the way:** the check that reads a straight line extruded as a plane looked at a curve's direction in x and y alone, so a curve in an upright plane could be read as flat, by about 1 mm on one surface, with no error. It only showed up on reading this kernel's own export back, as all 75 files' first read happened to miss it. It came in and went out on the same day, with a test.
 
 ## Swept spline surfaces
 

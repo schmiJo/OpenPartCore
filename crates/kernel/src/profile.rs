@@ -215,6 +215,29 @@ impl Wire {
     }
 
     /// The same wire moved by an offset.
+    /// Turned by an angle around the origin, then moved. Directions and winding don't change.
+    pub fn turned_and_moved(&self, angle: f64, by: Vec2) -> Wire {
+        let (s, c) = angle.sin_cos();
+        let at = |p: Vec2| v2(c * p.x - s * p.y + by.x, s * p.x + c * p.y + by.y);
+        Wire {
+            segs: self
+                .segs
+                .iter()
+                .map(|seg| Seg {
+                    geom: match seg.geom {
+                        SegGeom::Line { a, b } => SegGeom::Line { a: at(a), b: at(b) },
+                        SegGeom::Arc { center, radius, a0, a1 } => SegGeom::Arc { center: at(center), radius, a0: a0 + angle, a1: a1 + angle },
+                        SegGeom::Spline(ref curve) => SegGeom::Spline(Arc::new(curve.mapped(|p| {
+                            let q = at(v2(p.x, p.y));
+                            v3(q.x, q.y, p.z)
+                        }))),
+                    },
+                    id: seg.id,
+                })
+                .collect(),
+        }
+    }
+
     pub fn translated(&self, by: Vec2) -> Wire {
         Wire {
             segs: self

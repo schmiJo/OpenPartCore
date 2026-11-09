@@ -243,6 +243,83 @@ impl Body {
         out
     }
 
+    /// How many connected solids this is. A void isn't one.
+    pub fn solid_count(&self) -> usize {
+        let mut with_shells;
+        let body = if self.shells.is_empty() {
+            with_shells = self.clone();
+            with_shells.compute_shells();
+            &with_shells
+        } else {
+            self
+        };
+        (0..body.shells.len()).filter(|&s| crate::mass::shell_volume(body, s) >= 0.0).count()
+    }
+
+    /// This body as connected solids, each with the voids inside it, in the order of their first faces. A body of one
+    /// solid comes back as a plain copy, with its faces in the same order.
+    pub fn solids(&self) -> Vec<Body> {
+        let mut with_shells;
+        let body = if self.shells.is_empty() {
+            with_shells = self.clone();
+            with_shells.compute_shells();
+            &with_shells
+        } else {
+            self
+        };
+        let volumes: Vec<f64> = (0..body.shells.len()).map(|s| crate::mass::shell_volume(body, s)).collect();
+        let outers: Vec<usize> = (0..body.shells.len()).filter(|&s| volumes[s] >= 0.0).collect();
+        if outers.len() < 2 {
+            return vec![body.clone()];
+        }
+        let extract = |shells: &[usize]| -> Body {
+            let mut faces: Vec<usize> = shells.iter().flat_map(|&s| body.shells[s].iter().copied()).collect();
+            faces.sort_unstable();
+            let mut out = Body { tolerance: body.tolerance, ..Body::default() };
+            let (mut vertices, mut edges) = (std::collections::HashMap::new(), std::collections::HashMap::new());
+            for &f in &faces {
+                let mut face = body.faces[f].clone();
+                for c in face.loops.iter_mut().flatten() {
+                    let id = *edges.entry(c.edge).or_insert_with(|| {
+                        let e = &body.edges[c.edge];
+                        let mut place = |v: usize, out: &mut Body| {
+                            *vertices.entry(v).or_insert_with(|| {
+                                out.vertices.push(body.vertices[v]);
+                                out.vertices.len() - 1
+                            })
+                        };
+                        let (v0, v1) = (place(e.v0, &mut out), place(e.v1, &mut out));
+                        out.edges.push(Edge { curve: e.curve.clone(), t0: e.t0, t1: e.t1, v0, v1 });
+                        out.edges.len() - 1
+                    });
+                    c.edge = id;
+                }
+                out.faces.push(face);
+            }
+            out.compute_shells();
+            out
+        };
+        // A void belongs to the smallest solid around it, which is what's inside a hollow's hollow.
+        let plain: Vec<Body> = outers.iter().map(|&s| extract(&[s])).collect();
+        let mut belonging: Vec<Vec<usize>> = outers.iter().map(|&s| vec![s]).collect();
+        let by_size = {
+            let mut order: Vec<usize> = (0..outers.len()).collect();
+            order.sort_by(|&a, &b| volumes[outers[a]].total_cmp(&volumes[outers[b]]));
+            order
+        };
+        for v in (0..body.shells.len()).filter(|s| !outers.contains(s)) {
+            let Some(&face) = body.shells[v].first() else { continue };
+            let point = body.face_aabb(face).center();
+            let on = body.faces[face].surface.project(point);
+            let holder = by_size.iter().find(|&&k| {
+                plain[k].aabb().contains(on) && matches!(crate::boolean::classify::Index::new(&plain[k]).locate_in_body(on), crate::boolean::classify::BodyLoc::Inside)
+            });
+            // Nothing around it can only be a body that was wrong to begin with. It stays with the first, as it was.
+            belonging[holder.copied().unwrap_or(0)].push(v);
+        }
+        belonging.iter().map(|shells| extract(shells)).collect()
+    }
+
     pub fn compute_shells(&mut self) {
         let uses = self.edge_uses();
         let mut seen = vec![false; self.faces.len()];
