@@ -65,7 +65,7 @@ So **`union`, `subtract` and `intersect` refuse a sheet,** with a message saying
 
 A cut gets its own checks in place of membership: every piece kept is on the right side of the solid, every sampled point of the original on that side is on the result, and the mesh is torn nowhere but its boundary. Tests hold area to its formula, and `area(outside) + area(inside) = area(sheet)` is an identity that doesn't depend on anything computed.
 
-A sheet lying exactly on a solid's face isn't inside or outside. It's kept by either side.
+A sheet lying exactly on a solid's face isn't inside the solid, so it goes with what's outside. That way the two parts always make up the sheet, and nothing is counted twice. An early version kept it on both sides, and the identity above is what showed that up.
 
 ### Cleanup
 
@@ -106,4 +106,5 @@ A sheet goes out as `SHELL_BASED_SURFACE_MODEL` holding an `OPEN_SHELL`, in a `M
 
 - **Cutting a sheet with another sheet,** and Booleans between sheets. A sheet has no inside to classify against, so this takes a different classifier and has to deal with curves that stop in the middle of a face. It's refused, naming what it found.
 - **Offsetting a sheet, and filleting between sheets.** Each needs its own care with the boundary.
+- **A loft between open curves.** Its code matches closed loops around, so it isn't the same code with a piece thrown away, as an extrude and a revolve are.
 - **Non-manifold sheets,** where three faces meet along an edge. A body's edges have at most two faces, and a sew that would make three is refused.

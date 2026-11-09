@@ -733,3 +733,97 @@ fn a_sub_assembly_can_be_added_locked_and_reached_into_through_the_tools() {
     assert!(c.refused("connector_add", &format!(r#"{{"instance":{sub},"on":{{"face":"f1:end"}}}}"#)).contains("go all the way down"));
     c.ok("connector_add", &format!(r#"{{"instance":[{sub},{pin}],"on":{{"face":"f2:end"}}}}"#));
 }
+
+// ----- Sheets -----
+
+/// What `bodies_list` says, as a list.
+fn bodies(c: &mut Client) -> Vec<Value> {
+    parsed(&c.ok("bodies_list", "{}")).as_array().unwrap().to_vec()
+}
+
+#[test]
+fn sheets_can_be_made_cut_thickened_and_sewn_through_the_tools() {
+    let dir = folder("sheets");
+    let mut c = Client::start(&dir);
+    // A flat panel, from a region.
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","regions":[{"outer":{"type":"rect","x":0,"y":0,"w":40,"h":40}}]}}"#);
+    let answer = c.ok("feature_add", r#"{"feature":{"type":"fill","sketch":1}}"#);
+    assert!(answer.contains("sheet_note"), "{answer}");
+    let list = bodies(&mut c);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].get("sheet").and_then(Value::as_bool), Some(true));
+    assert_eq!(list[0].get("area").and_then(Value::as_f64), Some(1600.0));
+    assert_eq!(list[0].get("volume").and_then(Value::as_f64), Some(0.0));
+    assert_eq!(list[0].get("boundary_edges").and_then(Value::as_f64), Some(4.0));
+
+    // Its faces and edges are listed like any others, and its boundary says it's one.
+    let faces = parsed(&c.ok("faces_list", "{}"));
+    assert_eq!(faces.as_array().unwrap().len(), 1);
+    assert_eq!(faces.as_array().unwrap()[0].get("name").and_then(Value::as_str), Some("f2:end"));
+    let edges = parsed(&c.ok("edges_list", "{}"));
+    let edges = edges.as_array().unwrap();
+    assert_eq!(edges.len(), 4);
+    assert!(edges.iter().all(|e| e.get("boundary").and_then(Value::as_bool) == Some(true)));
+    assert!(edges[0].get("select").unwrap().get("near").is_some());
+
+    // Drawn and exported.
+    let (content, failed) = c.call("render", r#"{"width":200,"height":150}"#);
+    assert!(!failed);
+    assert!(content.iter().any(|x| x.get("type").and_then(Value::as_str) == Some("image")));
+    let step = c.ok("export", r#"{"format":"step"}"#);
+    assert!(step.contains("SHELL_BASED_SURFACE_MODEL") && step.contains("OPEN_SHELL") && !step.contains("MANIFOLD_SOLID_BREP"));
+    c.ok("export", r#"{"format":"stl","path":"panel.stl"}"#);
+
+    // Cut with a plane, keeping what's on the side the normal points to.
+    let answer = c.ok("feature_add", r#"{"feature":{"type":"trim","point":[10,0,0],"normal":[1,0,0]}}"#);
+    assert!(answer.contains("\"id\": 3"), "{answer}");
+    assert_eq!(bodies(&mut c)[0].get("area").and_then(Value::as_f64), Some(1200.0));
+
+    // What needs a solid says so.
+    let (content, _) = c.call("feature_add", r#"{"feature":{"type":"fillet","edges":"all","radius":1}}"#);
+    let said = content.iter().filter_map(|x| x.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join(" ");
+    assert!(said.contains("needs a solid"), "{said}");
+    c.ok("feature_delete", r#"{"id":4}"#);
+
+    // Into a solid, by name, with no faces picked.
+    c.ok("feature_add", r#"{"feature":{"type":"thicken","bodies":["f2"],"faces":[],"thickness":2,"mode":"new_body"}}"#);
+    let list = bodies(&mut c);
+    assert_eq!(list.len(), 2);
+    let solid = list.iter().find(|b| b.get("sheet").is_none()).unwrap();
+    assert_eq!(solid.get("volume").and_then(Value::as_f64), Some(2400.0));
+
+    // It all comes back from a file.
+    c.ok("document_save", r#"{"path":"sheets.coreshape"}"#);
+    c.ok("document_new", "{}");
+    c.ok("document_open", r#"{"path":"sheets.coreshape"}"#);
+    assert_eq!(bodies(&mut c).len(), 2);
+}
+
+#[test]
+fn an_open_curve_and_a_sew_through_the_tools() {
+    let dir = folder("sheets_open");
+    let mut c = Client::start(&dir);
+    // Four walls of a box from one open path, with a floor and a lid sewn on.
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","regions":[{"outer":{"type":"open_path","start":[0,0],"moves":[{"line_to":[10,0]},{"line_to":[10,10]},{"line_to":[0,10]},{"line_to":[0,0]}]}}]}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"extrude","sketch":1,"start":0,"length":5,"mode":"surface"}}"#);
+    let list = bodies(&mut c);
+    assert_eq!(list[0].get("sheet").and_then(Value::as_bool), Some(true));
+    assert_eq!(list[0].get("area").and_then(Value::as_f64), Some(200.0));
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","regions":[{"outer":{"type":"rect","x":0,"y":0,"w":10,"h":10}}]}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"fill","sketch":3}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","plane":{"origin":[0,0,5]},"regions":[{"outer":{"type":"rect","x":0,"y":0,"w":10,"h":10}}]}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"fill","sketch":5}}"#);
+    assert_eq!(bodies(&mut c).len(), 3);
+    c.ok("feature_add", r#"{"feature":{"type":"sew"}}"#);
+    let list = bodies(&mut c);
+    assert_eq!(list.len(), 1);
+    assert!(list[0].get("sheet").is_none(), "it closes, so it's a solid: {}", list[0].to_text());
+    assert_eq!(list[0].get("volume").and_then(Value::as_f64), Some(500.0));
+    // A solid does what a solid does.
+    c.ok("feature_add", r#"{"feature":{"type":"fillet","edges":"all","radius":0.5}}"#);
+
+    // Bad requests are refused, saying what's wrong.
+    let (content, failed) = c.call("feature_add", r#"{"feature":{"type":"trim","tool":"f2","keep":"middle"}}"#);
+    assert!(failed);
+    assert!(content[0].get("text").and_then(Value::as_str).unwrap().contains("middle"));
+}

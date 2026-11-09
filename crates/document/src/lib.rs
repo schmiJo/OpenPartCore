@@ -14,7 +14,7 @@
 //! changes, edits, suppression and reordering alike.
 
 use coreshape::blend::{chamfer_with, fillet_with, BlendOptions};
-use coreshape::boolean::{intersect, union, BoolOp};
+use coreshape::boolean::{intersect, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
 use coreshape::multi::{boolean_many, merged_tools, sweep, PathStep};
 use coreshape::build::{
     box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus, SLOT_END_CAP, SLOT_SEG_BASE, SLOT_START_CAP,
@@ -27,6 +27,7 @@ use coreshape::surface::Surface;
 use coreshape::topo::{Body, FaceTag};
 use coreshape::delete::delete_faces;
 use coreshape::helix::{helix, Helix};
+use coreshape::sheet::{extrude_open, fill, revolve_open, sew, sheet_from_faces, sides_of};
 use coreshape::thicken::thicken;
 use coreshape::tweak::{draft, offset, shell};
 pub use coreshape_sketch::expr::{self, Env, Expr};
@@ -257,6 +258,8 @@ pub enum Shape {
     Circle { cx: Expr, cy: Expr, r: Expr },
     Polygon { points: Vec<Point2> },
     Path { start: Point2, moves: Vec<Move> },
+    /// A chain of moves that isn't closed, for a surface to sweep. It's in a region's `outer` with nothing else in the region.
+    OpenPath { start: Point2, moves: Vec<Move> },
     /// An ellipse with radii along the sketch's axes, turned counter-clockwise by `degrees`.
     Ellipse { cx: Expr, cy: Expr, rx: Expr, ry: Expr, degrees: Expr },
 }
@@ -303,7 +306,7 @@ impl Shape {
                 let pts = points.iter().map(at).collect::<Result<Vec<Vec2>>>()?;
                 Wire::polygon(&pts)
             }
-            Shape::Path { start, moves } => {
+            Shape::Path { start, moves } | Shape::OpenPath { start, moves } => {
                 let mut path = PathBuilder::new(at(start)?);
                 for m in moves {
                     path = match m {
@@ -320,7 +323,11 @@ impl Shape {
                         }
                     };
                 }
-                path.close()
+                if matches!(self, Shape::OpenPath { .. }) {
+                    path.open()
+                } else {
+                    path.close()
+                }
             }
             Shape::Ellipse { cx, cy, rx, ry, degrees } => {
                 let turn = num(degrees, env)?.to_radians();
@@ -375,9 +382,29 @@ fn count_of(e: &Expr, env: &Env, what: &str) -> Result<usize> {
     Ok(n as usize)
 }
 
+/// The open paths among a sketch's regions, which no region is made from.
+fn resolve_open(regions: &[Region], env: &Env) -> Result<Vec<Wire>> {
+    let mut out = Vec::new();
+    for region in regions {
+        if !matches!(region.outer, Shape::OpenPath { .. }) {
+            continue;
+        }
+        if !region.holes.is_empty() || region.repeat.is_some() {
+            return Err(Error::InvalidProfile("an open path can't have holes or be repeated".into()));
+        }
+        let wire = region.outer.resolve(env)?;
+        wire.check_open()?;
+        out.push(wire);
+    }
+    Ok(out)
+}
+
 fn resolve_regions(regions: &[Region], env: &Env) -> Result<Vec<Profile>> {
     let mut out = Vec::new();
     for region in regions {
+        if matches!(region.outer, Shape::OpenPath { .. }) {
+            continue;
+        }
         let mut base = Profile::new(region.outer.resolve(env)?);
         for h in &region.holes {
             base = base.with_hole(h.resolve(env)?);
@@ -553,6 +580,30 @@ pub enum Mode {
     /// Combines with nothing, and each connected solid becomes a body of its own, so that parts stay parts, and can touch
     /// or overlap. Joining them would lose that, and can fail where they meet.
     NewBody,
+    /// Makes a sheet and not a solid: what an extrude, revolve, sweep, loft or helix would have made, without its caps, and
+    /// an extrude or revolve can sweep a sketch's open curves as well. It combines with nothing, and each connected piece is a
+    /// body of its own.
+    Surface,
+}
+
+/// What cuts a sheet.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TrimTool {
+    /// A solid body.
+    Body(BodyId),
+    /// A plane through a point. `Outside` is the side its normal points to.
+    Plane { point: Point3, normal: Point3 },
+    /// A sketch's regions, swept through the sheet along the sketch's normal, as a cookie cutter is.
+    Sketch(FeatureId),
+}
+
+/// Which part of a cut sheet stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimKeep {
+    Outside,
+    Inside,
+    /// Both, as bodies of their own.
+    Both,
 }
 
 /// Which body of a document: the feature that made it, and which of that feature's bodies it is. Written `f3` for the
@@ -651,6 +702,15 @@ pub enum Op {
     /// A Boolean between bodies. `Union` and `Intersect` take the bodies the feature names along with the `tools`.
     /// `Subtract` cuts the `tools` from the bodies the feature names, its targets. Without `keep_tools` the tools go.
     BooleanBodies { operation: BodyBoolean, tools: Vec<BodyId>, keep_tools: bool },
+    /// Flat sheets filling a sketch's regions, facing along its normal, and named as this feature's end cap.
+    Fill { sketch: FeatureId },
+    /// Copies of faces, as a sheet. The bodies they're on stay as they are, and a copy keeps its face's name.
+    CopyFaces { faces: Vec<FaceKey> },
+    /// Joins sheets along the boundaries they have in common, those it names or all of them. If that closes them, it's a solid.
+    /// `tolerance` is how far apart two boundaries can be and still be one.
+    Sew { tolerance: Option<Expr> },
+    /// Cuts sheets, those it names or all of them, and keeps a part of each.
+    Trim { tool: TrimTool, keep: TrimKeep },
 }
 
 /// A line in a sketch's plane to revolve around.
@@ -731,6 +791,10 @@ impl Op {
             Op::Solid { .. } => "solid",
             Op::ImportStep { .. } => "import_step",
             Op::ImportStepParts { .. } => "import_step_parts",
+            Op::Fill { .. } => "fill",
+            Op::CopyFaces { .. } => "copy_faces",
+            Op::Sew { .. } => "sew",
+            Op::Trim { .. } => "trim",
             Op::Fillet { .. } => "fillet",
             Op::Chamfer { .. } => "chamfer",
             Op::Sweep { .. } => "sweep",
@@ -766,6 +830,20 @@ impl Op {
             | Op::Helix { mode, .. }
             | Op::Thicken { mode, .. } => Some(*mode),
             Op::ImportStepParts { .. } => Some(Mode::NewBody),
+            Op::Fill { .. } => Some(Mode::Surface),
+            _ => None,
+        }
+    }
+
+    /// Whether a feature with no list of bodies acts on sheets as well as solids. The rest only ever reach solids unless told.
+    fn takes_sheets(&self) -> bool {
+        matches!(self, Op::Transform { .. } | Op::Thicken { .. } | Op::CopyFaces { .. } | Op::Sew { .. } | Op::Trim { .. })
+    }
+
+    /// The sketch this makes a surface from, whose open curves it can use.
+    fn surface_from(&self) -> Option<FeatureId> {
+        match self {
+            Op::Extrude { sketch, mode: Mode::Surface, .. } | Op::Revolve { sketch, mode: Mode::Surface, .. } => Some(*sketch),
             _ => None,
         }
     }
@@ -778,6 +856,10 @@ impl Op {
             Op::Solid { .. } => "Solid",
             Op::ImportStep { .. } => "Imported STEP",
             Op::ImportStepParts { .. } => "Imported STEP parts",
+            Op::Fill { .. } => "Fill",
+            Op::CopyFaces { .. } => "Copied faces",
+            Op::Sew { .. } => "Sew",
+            Op::Trim { .. } => "Trim",
             Op::Fillet { .. } => "Fillet",
             Op::Chamfer { .. } => "Chamfer",
             Op::Sweep { .. } => "Sweep",
@@ -800,10 +882,12 @@ impl Op {
     pub fn references(&self) -> Vec<FeatureId> {
         let mut out = Vec::new();
         match self {
-            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => out.push(*sketch),
+            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } => out.push(*sketch),
             Op::Loft { sections, .. } => out.extend_from_slice(sections),
             Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
-            Op::DeleteFace { faces } | Op::Thicken { faces, .. } => {
+            Op::Trim { tool: TrimTool::Body(body), .. } => out.push(body.feature),
+            Op::Trim { tool: TrimTool::Sketch(sketch), .. } => out.push(*sketch),
+            Op::DeleteFace { faces } | Op::Thicken { faces, .. } | Op::CopyFaces { faces } => {
                 for key in faces {
                     key.references(&mut out);
                 }
@@ -831,7 +915,7 @@ impl Op {
                 Shape::RoundedRect { cx, cy, w, h, r } => out.extend([cx, cy, w, h, r]),
                 Shape::Circle { cx, cy, r } => out.extend([cx, cy, r]),
                 Shape::Polygon { points } => out.extend(points.iter().flatten()),
-                Shape::Path { start, moves } => {
+                Shape::Path { start, moves } | Shape::OpenPath { start, moves } => {
                     out.extend(start.iter());
                     for m in moves {
                         match m {
@@ -848,7 +932,14 @@ impl Op {
             }
         }
         match self {
-            Op::ImportStep { .. } | Op::ImportStepParts { .. } => {}
+            Op::ImportStep { .. } | Op::ImportStepParts { .. } | Op::Fill { .. } | Op::CopyFaces { .. } => {}
+            Op::Sew { tolerance } => out.extend(tolerance.iter()),
+            Op::Trim { tool, .. } => {
+                if let TrimTool::Plane { point, normal } = tool {
+                    out.extend(point.iter());
+                    out.extend(normal.iter());
+                }
+            }
             Op::Sketch { plane, regions } => {
                 place(plane, &mut out);
                 for r in regions {
@@ -1287,8 +1378,70 @@ fn combined(scope: &[(BodyId, Arc<Body>)], tools: Vec<Body>, mode: Mode, feature
             }
         }
         Mode::NewBody => unreachable!("handled above"),
+        Mode::Surface => unreachable!("a surface doesn't combine with anything"),
     }
     Ok(out)
+}
+
+/// What's left of a sheet after a cut: the part outside, and the part inside, as asked.
+fn trim_parts(
+    sheet: &Body,
+    tool: &TrimTool,
+    keep: TrimKeep,
+    all: &[Held],
+    at_point: &dyn Fn(&Point3) -> Result<Vec3>,
+    sketch_output: &dyn Fn(&FeatureId) -> Result<SketchOutput>,
+) -> Result<(Option<Body>, Option<Body>)> {
+    let (want_out, want_in) = (keep != TrimKeep::Inside, keep != TrimKeep::Outside);
+    if !sheet.sheet {
+        return Err(Error::InvalidInput("a trim cuts a sheet, and this is a solid. A Boolean cuts a solid".into()));
+    }
+    match tool {
+        TrimTool::Body(id) => {
+            let solid = all.iter().find(|h| h.id == *id).ok_or_else(|| Error::InvalidInput(format!("it cuts with body {}, which isn't there at this point", id.text())))?;
+            let outside = want_out.then(|| trim_sheet(sheet, &solid.body, Keep::Outside)).transpose()?;
+            let inside = want_in.then(|| trim_sheet(sheet, &solid.body, Keep::Inside)).transpose()?;
+            Ok((outside, inside))
+        }
+        TrimTool::Plane { point, normal } => {
+            let (p, n) = (at_point(point)?, at_point(normal)?);
+            let outside = want_out.then(|| trim_sheet_by_plane(sheet, p, n, Keep::Outside)).transpose()?;
+            let inside = want_in.then(|| trim_sheet_by_plane(sheet, p, n, Keep::Inside)).transpose()?;
+            Ok((outside, inside))
+        }
+        TrimTool::Sketch(id) => {
+            let SketchOutput { frame, profiles, .. } = sketch_output(id)?;
+            if profiles.is_empty() {
+                return Err(Error::InvalidInput("cutting with a sketch takes its closed regions, and it has none".into()));
+            }
+            // Each region swept far enough to go right through the sheet both ways.
+            let bounds = sheet.aabb();
+            let reach = bounds.diagonal() + (bounds.center() - frame.origin).norm() + 10.0;
+            let below = Frame { origin: frame.origin - frame.z * reach, ..frame };
+            let cutters = profiles.iter().map(|p| extrude(p, &below, 2.0 * reach, 0)).collect::<Result<Vec<Body>>>()?;
+            let outside = if want_out {
+                let mut left = sheet.clone();
+                for c in &cutters {
+                    if !left.faces.is_empty() {
+                        left = trim_sheet(&left, c, Keep::Outside)?;
+                    }
+                }
+                Some(left)
+            } else {
+                None
+            };
+            let inside = if want_in {
+                let parts = cutters.iter().map(|c| trim_sheet(sheet, c, Keep::Inside)).collect::<Result<Vec<Body>>>()?;
+                let list: Vec<&Body> = parts.iter().collect();
+                let mut joined = Body::side_by_side(&list);
+                joined.sheet = true;
+                Some(joined)
+            } else {
+                None
+            };
+            Ok((outside, inside))
+        }
+    }
 }
 
 /// Profiles and a frame for revolving about a line in a sketch's plane, in the terms the kernel's revolve takes: distance
@@ -1366,6 +1519,83 @@ struct SketchOutput {
     profiles: Arc<Vec<Profile>>,
     /// Faces are named by entity, which is unique across the sketch, so regions need no offset.
     by_entity: bool,
+    /// Chains of curves that close nothing, for a surface to sweep.
+    open: Arc<Vec<Wire>>,
+}
+
+/// New sheets as what a feature made: a body for each connected piece of each, which a pattern can copy.
+fn sheets(made: Vec<Body>) -> Result<RunResult> {
+    if made.is_empty() {
+        return Err(Error::InvalidInput("the sketch has no closed regions, and no open curves".into()));
+    }
+    let pieces: Vec<Body> = made.iter().flat_map(Body::solids).collect();
+    let added = pieces.iter().map(|b| Arc::new(b.clone())).collect();
+    Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(pieces), Mode::NewBody)) })
+}
+
+/// What regions and open curves made, each kept apart by its place in the sketch, as regions' faces are when they're not named
+/// by entity. An open curve comes after every region.
+fn named_by_region(closed: Vec<Body>, curves: Vec<Body>, by_entity: bool) -> Vec<Body> {
+    let first_curve = closed.len() as u32;
+    let closed = closed.into_iter().enumerate().map(|(k, b)| with_region(b, if by_entity { 0 } else { k as u32 }));
+    let curves = curves.into_iter().enumerate().map(|(k, b)| with_region(b, if by_entity { 0 } else { first_curve + k as u32 }));
+    closed.chain(curves).collect()
+}
+
+/// Refuses what was picked if it's all on sheets, which a feature needing a solid has nothing to do with. Picking everything
+/// takes in sheets too, and simply leaves them out, as long as there's a solid among it.
+fn only_on_sheets(all: &[Held], picks: &[usize], size: impl Fn(&Body) -> usize, what: &str) -> Result<()> {
+    let mut first = 0;
+    let mut on_sheet = None;
+    for h in all {
+        let n = size(&h.body);
+        if picks.iter().any(|&p| p >= first && p < first + n) {
+            if !h.body.sheet {
+                return Ok(());
+            }
+            on_sheet = on_sheet.or(Some(h.id));
+        }
+        first += n;
+    }
+    match on_sheet {
+        Some(id) => Err(Error::InvalidInput(format!("{what} needs a solid, and what it picks is on {}, which is a sheet", id.text()))),
+        None => Ok(()),
+    }
+}
+
+/// Chains of a sketch's curves that close nothing, each running the way its first curve does. A chain stops where curves
+/// branch, so that each of its joins has just two faces.
+fn open_chains(found: &coreshape_sketch::Arrangement) -> Vec<Wire> {
+    use coreshape_sketch::{Seg as Piece, WhyIgnored};
+    const JOIN: f64 = 1e-6;
+    let close = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) <= JOIN;
+    let mut left: Vec<Piece> = found.ignored.iter().filter(|i| matches!(i.why, WhyIgnored::FreeEnd { .. })).flat_map(|i| i.pieces.iter().cloned()).collect();
+    let everything = left.clone();
+    let meeting = |p: [f64; 2]| everything.iter().filter(|s| close(s.start(), p) || close(s.end(), p)).count();
+    let mut out = Vec::new();
+    while !left.is_empty() {
+        let mut chain = vec![left.remove(0)];
+        loop {
+            let end = chain[chain.len() - 1].end();
+            if meeting(end) != 2 {
+                break;
+            }
+            let Some(k) = left.iter().position(|s| close(s.start(), end) || close(s.end(), end)) else { break };
+            let next = left.remove(k);
+            chain.push(if close(next.start(), end) { next } else { next.reversed() });
+        }
+        loop {
+            let start = chain[0].start();
+            if meeting(start) != 2 {
+                break;
+            }
+            let Some(k) = left.iter().position(|s| close(s.start(), start) || close(s.end(), start)) else { break };
+            let next = left.remove(k);
+            chain.insert(0, if close(next.end(), start) { next } else { next.reversed() });
+        }
+        out.push(wire_from_segs(&chain, false));
+    }
+    out
 }
 
 // ----- The document -----
@@ -1573,7 +1803,7 @@ impl Document {
 
     fn check_sketch_refs(op: &Op, before: &[Feature]) -> Result<()> {
         let list: &[FeatureId] = match op {
-            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => std::slice::from_ref(sketch),
+            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } => std::slice::from_ref(sketch),
             Op::Loft { sections, .. } => sections,
             _ => &[],
         };
@@ -1724,6 +1954,10 @@ impl Document {
                     }
                 }
             }
+            // A constrained sketch's open curves are refused unless a surface is what they're for.
+            if matches!(feature.op, Op::ConstrainedSketch { .. }) && self.features.iter().any(|f| f.op.surface_from() == Some(feature.id)) {
+                own.push_str(" for a surface");
+            }
             // The bodies it acts on: those it names, or all of them. One that isn't there is for it to say so.
             let missing = feature.scope.iter().find(|id| !held.iter().any(|h| h.id == **id));
             if let (Some(id), false) = (missing, feature.op.is_sketch()) {
@@ -1734,18 +1968,19 @@ impl Document {
             let scope: Vec<(BodyId, Arc<Body>)> = if feature.op.is_sketch() {
                 Vec::new()
             } else if feature.scope.is_empty() {
-                held.iter().map(|h| (h.id, h.body.clone())).collect()
+                // A sheet has no inside to cut or add to, and one lying around mustn't get in the way of what does.
+                held.iter().filter(|h| feature.op.takes_sheets() || !h.body.sheet).map(|h| (h.id, h.body.clone())).collect()
             } else {
                 feature.scope.iter().filter_map(|id| held.iter().find(|h| h.id == *id).map(|h| (h.id, h.body.clone()))).collect()
             };
             // A sketch depends only on its own inputs. Everything else also depends on the bodies it acts on, and on its
             // sketch or what it copies when it has them. A new body needs nothing from the others, unless it's made
             // from their faces.
-            let makes_its_own = |f: &FeatureId| self.feature(*f).is_some_and(|g| g.op.mode() == Some(Mode::NewBody));
+            let makes_its_own = |f: &FeatureId| self.feature(*f).is_some_and(|g| matches!(g.op.mode(), Some(Mode::NewBody | Mode::Surface)));
             let independent = match &feature.op {
                 Op::Thicken { .. } => false,
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => !of.is_empty() && of.iter().all(makes_its_own),
-                op => op.mode() == Some(Mode::NewBody),
+                op => matches!(op.mode(), Some(Mode::NewBody | Mode::Surface)),
             };
             let key_of = |id: &BodyId| held.iter().find(|h| h.id == *id).map_or(0, |h| h.key);
             let mut body_key = 0u64;
@@ -1758,11 +1993,14 @@ impl Document {
                         body_key ^= key_of(id).rotate_left(29);
                     }
                 }
+                if let Op::Trim { tool: TrimTool::Body(id), .. } = &feature.op {
+                    body_key ^= key_of(id).rotate_left(29);
+                }
             }
             let mixed = |list: &[FeatureId]| list.iter().enumerate().fold(0u64, |sum, (k, id)| sum ^ keys.get(id).copied().unwrap_or(0).rotate_left(17 + k as u32));
             let key = match &feature.op {
                 Op::Sketch { .. } | Op::ConstrainedSketch { .. } => hash_text(1, &own),
-                Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
+                Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
                 Op::Loft { sections, .. } => hash_text(body_key ^ mixed(sections), &own),
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
                 _ => hash_text(body_key, &own),
@@ -1811,6 +2049,12 @@ impl Document {
         let tag = feature.id.0;
         let sketched = |output: SketchOutput| RunResult { changed: Vec::new(), added: Vec::new(), sketch: Some(output), tools: None };
         let applied = |tools: Vec<Body>, mode: Mode| -> Result<RunResult> {
+            if mode == Mode::Surface {
+                if matches!(feature.op, Op::Solid { .. } | Op::Thicken { .. }) {
+                    return Err(Error::InvalidInput(format!("the mode surface is for what sweeps a sketch, and a {} doesn't", feature.op.kind())));
+                }
+                return sheets(tools.iter().map(sides_of).collect::<Result<Vec<Body>>>()?);
+            }
             let done = combined(scope, tools.clone(), mode, tag)?;
             Ok(done.done(Some((Arc::new(tools), mode))))
         };
@@ -1839,27 +2083,42 @@ impl Document {
         match &feature.op {
             Op::Sketch { plane, regions } => {
                 let list = resolve_regions(regions, env)?;
-                if list.is_empty() {
+                let open = resolve_open(regions, env)?;
+                if list.is_empty() && open.is_empty() {
                     return Err(Error::InvalidProfile("the sketch has no closed regions".into()));
                 }
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: false }))
+                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: false, open: Arc::new(open) }))
             }
             Op::ConstrainedSketch { plane, sketch } => {
                 let solved = sketch.solve_with(env).map_err(|e| Error::InvalidProfile(e.message))?;
-                let regions = solved.sketch.regions().map_err(|e| Error::InvalidProfile(e.message))?;
+                // Curves that close nothing are refused, unless a surface is going to sweep them.
+                let open = if self.features.iter().any(|f| f.op.surface_from() == Some(feature.id)) { open_chains(&solved.sketch.arrangement()) } else { Vec::new() };
+                for wire in &open {
+                    wire.check_open()?;
+                }
+                let regions = match solved.sketch.regions() {
+                    Ok(regions) => regions,
+                    Err(_) if !open.is_empty() && solved.sketch.picked_regions().is_empty() => Vec::new(),
+                    Err(e) => return Err(Error::InvalidProfile(e.message)),
+                };
                 let list = profiles_from_regions(&regions);
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: true }))
+                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: true, open: Arc::new(open) }))
             }
             Op::Extrude { sketch, start, length, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles: list, by_entity, open } = sketch_output(sketch)?;
                 let shifted = Frame { origin: frame.origin + frame.z * num(start, env)?, ..frame };
                 let h = num(length, env)?;
+                if *mode == Mode::Surface {
+                    let closed = list.iter().map(|p| extrude(p, &shifted, h, tag).and_then(|b| sides_of(&b))).collect::<Result<Vec<Body>>>()?;
+                    let curves = open.iter().map(|w| extrude_open(w, &shifted, h, tag)).collect::<Result<Vec<Body>>>()?;
+                    return sheets(named_by_region(closed, curves, by_entity));
+                }
                 let tools = list
                     .iter()
                     .enumerate()
@@ -1868,8 +2127,21 @@ impl Document {
                 applied(tools, *mode)
             }
             Op::Revolve { sketch, degrees, mode, axis } => {
-                let SketchOutput { frame, profiles, by_entity } = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles, by_entity, open } = sketch_output(sketch)?;
                 let a = num(degrees, env)?.to_radians();
+                if *mode == Mode::Surface {
+                    // An open curve goes around the axis as a region's outline would, and comes off the end of the list after.
+                    let mut all_curves: Vec<Profile> = profiles.to_vec();
+                    all_curves.extend(open.iter().map(|w| Profile { outer: w.clone(), holes: Vec::new() }));
+                    let (frame, moved): (Frame, Vec<Profile>) = match axis {
+                        Some(axis) => revolve_frame(axis, &frame, &all_curves, a, env)?,
+                        None => (frame, all_curves),
+                    };
+                    let (regions, curves) = moved.split_at(profiles.len());
+                    let closed = regions.iter().map(|p| revolve(p, &frame, a, tag).and_then(|b| sides_of(&b))).collect::<Result<Vec<Body>>>()?;
+                    let curves = curves.iter().map(|p| revolve_open(&p.outer, &frame, a, tag)).collect::<Result<Vec<Body>>>()?;
+                    return sheets(named_by_region(closed, curves, by_entity));
+                }
                 let (frame, list): (Frame, Vec<Profile>) = match axis {
                     Some(axis) => revolve_frame(axis, &frame, &profiles, a, env)?,
                     None => (frame, profiles.to_vec()),
@@ -1893,7 +2165,7 @@ impl Document {
                 applied(vec![coreshape::loft::loft(&list, tag)?], *mode)
             }
             Op::Sweep { sketch, path, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles: list, by_entity, .. } = sketch_output(sketch)?;
                 let steps = path
                     .iter()
                     .map(|step| {
@@ -1915,7 +2187,7 @@ impl Document {
                 applied(tools, *mode)
             }
             Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles: list, by_entity, .. } = sketch_output(sketch)?;
                 let motion = Helix { origin: at_point(point)?, axis: at_point(axis)?, pitch: num(pitch, env)?, turns: num(turns, env)?, left_handed: *left_handed };
                 let tools = list
                     .iter()
@@ -1927,6 +2199,7 @@ impl Document {
             Op::DeleteFace { faces } => {
                 let everything = whole().ok_or_else(|| Error::InvalidInput("deleting faces needs a body to work on".into()))?;
                 let picked = keyed_faces(&everything, faces)?;
+                only_on_sheets(all, &picked, |b| b.faces.len(), "deleting a face")?;
                 let mut out = Changes::default();
                 for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
                     out.settle(scope[at].0, delete_faces(&scope[at].1, &list).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
@@ -1935,9 +2208,20 @@ impl Document {
             }
             Op::Thicken { faces, thickness, mode } => {
                 let everything = whole().ok_or_else(|| Error::InvalidInput("thickening needs a body to take faces from".into()))?;
-                let picked = keyed_faces(&everything, faces)?;
                 let t = num(thickness, env)?;
                 let mut tools = Vec::new();
+                if faces.is_empty() && !feature.scope.is_empty() {
+                    // The whole of each sheet it names.
+                    for (_, body) in scope {
+                        if !body.sheet {
+                            return Err(Error::InvalidInput("thickening has to name the faces of a solid. It can only take all the faces of a sheet".into()));
+                        }
+                        let list: Vec<usize> = (0..body.faces.len()).collect();
+                        tools.push(thicken(body, &list, t, tag)?);
+                    }
+                    return applied(tools, *mode);
+                }
+                let picked = keyed_faces(&everything, faces)?;
                 for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
                     tools.push(thicken(&scope[at].1, &list, t, tag)?);
                 }
@@ -1958,8 +2242,13 @@ impl Document {
                 let m = Mirror::new(at_point(point)?, n);
                 self.copied(scope, of, tag, |b| vec![b.mirrored(&m)])
             }
+            Op::ImportStep { text, mode: Mode::Surface } => sheets(coreshape::import::step::read_step_sheets(text, tag)?),
             Op::ImportStep { text, mode } => {
                 let solids = coreshape::import::step::read_step(text, tag)?;
+                // A file holding nothing but surfaces brings them in as they are, as there's nothing to merge them into.
+                if solids.iter().all(|b| b.sheet) {
+                    return sheets(solids);
+                }
                 // A file's solids are parts, and each of them can be a body. Merging is only for when that's asked for.
                 if *mode == Mode::NewBody {
                     let added = solids.iter().map(|b| Arc::new(b.clone())).collect();
@@ -1976,6 +2265,7 @@ impl Document {
             }
             Op::ImportStepParts { text } => {
                 let solids = coreshape::import::step::read_step_parts(text, tag)?;
+                // Each is one part, whether it's a solid or a sheet.
                 let added = solids.iter().map(|b| Arc::new(b.clone())).collect();
                 Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), Mode::NewBody)) })
             }
@@ -2001,6 +2291,7 @@ impl Document {
                     return each("a shell", &|b| shell(b, &[], t, tag));
                 }
                 let picked = named_faces(&everything, open)?;
+                only_on_sheets(all, &picked, |b| b.faces.len(), "a shell")?;
                 let mut out = Changes::default();
                 for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
                     out.settle(scope[at].0, shell(&scope[at].1, &list, t, tag).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
@@ -2013,6 +2304,7 @@ impl Document {
                 if picked.is_empty() {
                     return Err(Error::InvalidInput("a draft needs at least one face".into()));
                 }
+                only_on_sheets(all, &picked, |b| b.faces.len(), "a draft")?;
                 let (p, n, a) = (at_point(pull)?, at_point(neutral)?, num(degrees, env)?.to_radians());
                 let mut out = Changes::default();
                 for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
@@ -2023,6 +2315,7 @@ impl Document {
             Op::Fillet { edges, radius, propagate } => {
                 let everything = whole().ok_or_else(|| Error::InvalidInput("a fillet needs a body to work on".into()))?;
                 let picked = select_edges(edges, &everything, env)?;
+                only_on_sheets(all, &picked, |b| b.edges.len(), "a fillet")?;
                 let options = BlendOptions { propagate: *propagate };
                 let r = num(radius, env)?;
                 let mut out = Changes::default();
@@ -2040,6 +2333,7 @@ impl Document {
             Op::Chamfer { edges, distance, propagate } => {
                 let everything = whole().ok_or_else(|| Error::InvalidInput("a chamfer needs a body to work on".into()))?;
                 let picked = select_edges(edges, &everything, env)?;
+                only_on_sheets(all, &picked, |b| b.edges.len(), "a chamfer")?;
                 let options = BlendOptions { propagate: *propagate };
                 let d = num(distance, env)?;
                 let mut out = Changes::default();
@@ -2089,6 +2383,57 @@ impl Document {
                 Ok(out.done(None))
             }
             Op::BooleanBodies { operation, tools, keep_tools } => self.boolean_of_bodies(feature, scope, all, *operation, tools, *keep_tools),
+            Op::Fill { sketch } => {
+                let SketchOutput { frame, profiles, by_entity, .. } = sketch_output(sketch)?;
+                let made = profiles.iter().map(|p| fill(p, &frame, tag)).collect::<Result<Vec<Body>>>()?;
+                sheets(named_by_region(made, Vec::new(), by_entity))
+            }
+            Op::CopyFaces { faces } => {
+                let everything = whole().ok_or_else(|| Error::InvalidInput("copying faces needs a body to take them from".into()))?;
+                let picked = keyed_faces(&everything, faces)?;
+                let mut made = Vec::new();
+                for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
+                    let mut copy = sheet_from_faces(&scope[at].1, &list)?;
+                    // A face's name covers its copies, and its key tells them apart.
+                    copy.mark_copy(tag, 1);
+                    made.push(copy);
+                }
+                sheets(made)
+            }
+            Op::Sew { tolerance } => {
+                let tolerance = tolerance.as_ref().map_or(Ok(1e-6), |t| num(t, env))?;
+                let list: Vec<&(BodyId, Arc<Body>)> = scope.iter().filter(|(_, b)| !feature.scope.is_empty() || b.sheet).collect();
+                if list.is_empty() {
+                    return Err(Error::InvalidInput("there's no sheet here to sew".into()));
+                }
+                let bodies: Vec<&Body> = list.iter().map(|(_, b)| b.as_ref()).collect();
+                let made = sew(&bodies, tolerance)?;
+                let mut out = Changes::default();
+                out.settle(list[0].0, made, tag);
+                for (id, _) in &list[1..] {
+                    out.changed.push((*id, None));
+                }
+                Ok(out.done(None))
+            }
+            Op::Trim { tool, keep } => {
+                let list: Vec<&(BodyId, Arc<Body>)> = scope.iter().filter(|(_, b)| !feature.scope.is_empty() || b.sheet).collect();
+                if list.is_empty() {
+                    return Err(Error::InvalidInput("there's no sheet here to trim".into()));
+                }
+                let mut out = Changes::default();
+                for (id, sheet) in list {
+                    let (outside, inside) = trim_parts(sheet, tool, *keep, all, &at_point, &sketch_output).map_err(|e| on_body(e, *id, scope.len() > 1))?;
+                    match (outside, inside) {
+                        (Some(a), Some(b)) => {
+                            out.settle(*id, a, tag);
+                            out.added.extend(b.solids().into_iter().filter(|p| !p.faces.is_empty()).map(Arc::new));
+                        }
+                        (Some(a), None) | (None, Some(a)) => out.settle(*id, a, tag),
+                        (None, None) => {}
+                    }
+                }
+                Ok(out.done(None))
+            }
         }
     }
 
@@ -2171,7 +2516,9 @@ impl Document {
     /// Copies added: of listed features' solids, applied as they were, or of each body acted on if none are listed.
     /// `copies` makes the images of one solid. A copy that doesn't touch what it was copied from is a body of its own.
     fn copied(&self, scope: &[(BodyId, Arc<Body>)], of: &[FeatureId], feature: u32, copies: impl Fn(&Body) -> Vec<Body>) -> Result<RunResult> {
-        if scope.is_empty() {
+        // Copies of sheets come out as sheets, whatever else is there or isn't.
+        let only_sheets = !of.is_empty() && of.iter().all(|id| self.cache.get(id).and_then(|c| c.tools.as_ref()).is_some_and(|(tools, _)| tools.iter().all(|b| b.sheet)));
+        if scope.is_empty() && !only_sheets {
             return Err(Error::InvalidInput("there is no body yet to copy".into()));
         }
         // Numbered from 1, since the original is copy 0 and has no mark.
@@ -2345,10 +2692,15 @@ pub fn profiles_from_regions(regions: &[coreshape_sketch::Region]) -> Vec<Profil
 /// each joint gets one position, taken from an arc where there is one, since an arc's ends follow
 /// from its angles and can't be moved.
 fn wire_from_loop(l: &coreshape_sketch::Loop) -> Wire {
+    wire_from_segs(&l.segs, true)
+}
+
+/// A chain of a sketch's pieces as a kernel wire. Open, its two ends are where its pieces say.
+fn wire_from_segs(pieces: &[coreshape_sketch::Seg], closed: bool) -> Wire {
     use coreshape_sketch::SegKind;
-    let n = l.segs.len();
+    let n = pieces.len();
     let joint = |i: usize| -> Vec2 {
-        let (s, next) = (&l.segs[i], &l.segs[(i + 1) % n]);
+        let (s, next) = (&pieces[i], &pieces[(i + 1) % n]);
         let p = match (&s.kind, &next.kind) {
             (SegKind::Arc { .. } | SegKind::Ellipse { .. } | SegKind::Spline { .. }, _) => s.end(),
             (_, SegKind::Arc { .. } | SegKind::Ellipse { .. } | SegKind::Spline { .. }) => next.start(),
@@ -2357,11 +2709,13 @@ fn wire_from_loop(l: &coreshape_sketch::Loop) -> Wire {
         v2(p[0], p[1])
     };
     let mut segs = Vec::with_capacity(n);
-    for (i, s) in l.segs.iter().enumerate() {
+    for (i, s) in pieces.iter().enumerate() {
         let id = s.entity.0;
         match s.kind {
             SegKind::Line { .. } => {
-                segs.push(Seg { geom: SegGeom::Line { a: joint((i + n - 1) % n), b: joint(i) }, id });
+                let a = if !closed && i == 0 { v2(s.start()[0], s.start()[1]) } else { joint((i + n - 1) % n) };
+                let b = if !closed && i + 1 == n { v2(s.end()[0], s.end()[1]) } else { joint(i) };
+                segs.push(Seg { geom: SegGeom::Line { a, b }, id });
             }
             SegKind::Arc { center, radius, a0, a1 } => {
                 let center = v2(center[0], center[1]);
@@ -2635,8 +2989,8 @@ fn shape_value(s: &Shape) -> Value {
         Shape::Polygon { points } => {
             Value::obj(vec![("type", Value::str("polygon")), ("points", Value::Arr(points.iter().map(point2_value).collect()))])
         }
-        Shape::Path { start, moves } => Value::obj(vec![
-            ("type", Value::str("path")),
+        Shape::Path { start, moves } | Shape::OpenPath { start, moves } => Value::obj(vec![
+            ("type", Value::str(if matches!(s, Shape::OpenPath { .. }) { "open_path" } else { "path" })),
             ("start", point2_value(start)),
             (
                 "moves",
@@ -2715,7 +3069,8 @@ fn read_shape(v: &Value) -> Result<Shape> {
                 .collect::<Result<Vec<Point2>>>()?;
             Ok(Shape::Polygon { points })
         }
-        "path" => {
+        "path" | "open_path" => {
+            let open = kind == "open_path";
             known_keys(v, &["type", "start", "moves"])?;
             let mut moves = Vec::new();
             for m in field(v, "moves", &what)?.as_array().ok_or_else(|| Error::InvalidInput("a path's moves must be a list".into()))? {
@@ -2742,10 +3097,13 @@ fn read_shape(v: &Value) -> Result<Shape> {
                     return Err(Error::InvalidInput("a path move is {\"line_to\": ...}, {\"spline_through\": ...} or {\"arc_to\": ..., \"center\": ..., \"ccw\": ...}".into()));
                 }
             }
+            if open {
+                return Ok(Shape::OpenPath { start: read_point2(field(v, "start", &what)?)?, moves });
+            }
             Ok(Shape::Path { start: read_point2(field(v, "start", &what)?)?, moves })
         }
         other => Err(Error::InvalidInput(format!(
-            "unknown shape \"{other}\"; expected rect, rounded_rect, circle, polygon or path"
+            "unknown shape \"{other}\"; expected rect, rounded_rect, circle, polygon, path or open_path"
         ))),
     }
 }
@@ -2904,6 +3262,7 @@ fn mode_value(m: Mode) -> Value {
         Mode::Remove => "remove",
         Mode::Intersect => "intersect",
         Mode::NewBody => "new_body",
+        Mode::Surface => "surface",
     })
 }
 
@@ -2913,7 +3272,8 @@ fn read_mode(v: &Value) -> Result<Mode> {
         Some("remove") => Ok(Mode::Remove),
         Some("intersect") => Ok(Mode::Intersect),
         Some("new_body") => Ok(Mode::NewBody),
-        Some(other) => Err(Error::InvalidInput(format!("unknown mode \"{other}\"; expected add, remove, intersect or new_body"))),
+        Some("surface") => Ok(Mode::Surface),
+        Some(other) => Err(Error::InvalidInput(format!("unknown mode \"{other}\"; expected add, remove, intersect, new_body or surface"))),
 
     }
 }
@@ -2969,6 +3329,35 @@ pub fn op_value(op: &Op) -> Value {
         ]),
         Op::ImportStep { text, mode } => Value::obj(vec![("type", Value::str("import_step")), ("text", Value::str(text)), ("mode", mode_value(*mode))]),
         Op::ImportStepParts { text } => Value::obj(vec![("type", Value::str("import_step_parts")), ("text", Value::str(text))]),
+        Op::Fill { sketch } => Value::obj(vec![("type", Value::str("fill")), ("sketch", Value::Num(sketch.0 as f64))]),
+        Op::CopyFaces { faces } => Value::obj(vec![("type", Value::str("copy_faces")), ("faces", key_list_value(faces))]),
+        Op::Sew { tolerance } => {
+            let mut items = vec![("type", Value::str("sew"))];
+            if let Some(t) = tolerance {
+                items.push(("tolerance", expr_value(t)));
+            }
+            Value::obj(items)
+        }
+        Op::Trim { tool, keep } => {
+            let mut items = vec![("type", Value::str("trim"))];
+            match tool {
+                TrimTool::Body(id) => items.push(("tool", Value::str(id.text()))),
+                TrimTool::Plane { point, normal } => {
+                    items.push(("point", point3_value(point)));
+                    items.push(("normal", point3_value(normal)));
+                }
+                TrimTool::Sketch(id) => items.push(("sketch", Value::Num(id.0 as f64))),
+            }
+            items.push((
+                "keep",
+                Value::str(match keep {
+                    TrimKeep::Outside => "outside",
+                    TrimKeep::Inside => "inside",
+                    TrimKeep::Both => "both",
+                }),
+            ));
+            Value::obj(items)
+        }
         Op::Solid { primitive, at, mode } => {
             let mut items = vec![("type", Value::str("solid"))];
             match primitive {
@@ -3271,6 +3660,37 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 .as_str()
                 .ok_or_else(|| Error::InvalidInput("imported parts' \"text\" must be the STEP file as text".into()))?;
             Ok(Op::ImportStepParts { text: text.to_string() })
+        }
+        "fill" => {
+            with(&["type", "sketch"])?;
+            Ok(Op::Fill { sketch: read_sketch_id(v)? })
+        }
+        "copy_faces" => {
+            with(&["type", "faces"])?;
+            Ok(Op::CopyFaces { faces: read_key_list(v, "faces")? })
+        }
+        "sew" => {
+            with(&["type", "tolerance"])?;
+            Ok(Op::Sew { tolerance: v.get("tolerance").map(read_expr).transpose()? })
+        }
+        "trim" => {
+            with(&["type", "tool", "point", "normal", "sketch", "keep"])?;
+            let tool = match (v.get("tool"), v.get("point"), v.get("sketch")) {
+                (Some(t), None, None) => {
+                    let name = t.as_str().ok_or_else(|| Error::InvalidInput("a trim's \"tool\" must be the name of a body, like f3 or f3.2".into()))?;
+                    TrimTool::Body(BodyId::parse(name)?)
+                }
+                (None, Some(p), None) => TrimTool::Plane { point: read_point3(p)?, normal: read_point3(field(v, "normal", "a trim by a plane")?)? },
+                (None, None, Some(_)) => TrimTool::Sketch(read_sketch_id(v)?),
+                _ => return Err(Error::InvalidInput("a trim takes one of \"tool\", a body, \"point\" and \"normal\", a plane, or \"sketch\"".into())),
+            };
+            let keep = match v.get("keep").and_then(Value::as_str) {
+                None | Some("outside") => TrimKeep::Outside,
+                Some("inside") => TrimKeep::Inside,
+                Some("both") => TrimKeep::Both,
+                Some(other) => return Err(Error::InvalidInput(format!("unknown \"keep\" of \"{other}\"; expected outside, inside or both"))),
+            };
+            Ok(Op::Trim { tool, keep })
         }
         "solid" => {
             let shape = field(v, "shape", "a solid")?.as_str().unwrap_or("");

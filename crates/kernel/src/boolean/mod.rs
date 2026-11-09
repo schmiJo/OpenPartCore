@@ -160,7 +160,8 @@ pub enum Keep {
 }
 
 /// Cuts a sheet where a solid's surface crosses it, and keeps the part outside the solid or the part inside. Whatever lies
-/// exactly on the solid's surface is kept either way. The result can be several pieces, as shells of one body.
+/// exactly on the solid's surface isn't inside it, so the two parts always make up the sheet, with nothing counted twice. The
+/// result can be several pieces, as shells of one body.
 pub fn trim_sheet(sheet: &Body, solid: &Body, keep: Keep) -> Result<Body> {
     if !sheet.sheet {
         return Err(Error::InvalidInput("a trim cuts a sheet, and this is a solid. A Boolean cuts a solid".into()));
@@ -173,8 +174,8 @@ pub fn trim_sheet(sheet: &Body, solid: &Body, keep: Keep) -> Result<Body> {
     run(sheet, solid, Plan::Trim(keep))
 }
 
-/// Cuts a sheet along a plane, and keeps the side the normal points to.
-pub fn trim_sheet_by_plane(sheet: &Body, point: Vec3, normal: Vec3) -> Result<Body> {
+/// Cuts a sheet along a plane. `Outside` keeps the side the normal points to, with anything on the plane, and `Inside` the other.
+pub fn trim_sheet_by_plane(sheet: &Body, point: Vec3, normal: Vec3, keep: Keep) -> Result<Body> {
     if !(normal.norm() >= 1e-12 && normal.norm() <= 1e150) {
         return Err(Error::InvalidInput("a plane's normal must have a sensible, non-zero length".into()));
     }
@@ -190,7 +191,7 @@ pub fn trim_sheet_by_plane(sheet: &Body, point: Vec3, normal: Vec3) -> Result<Bo
     };
     let frame = Frame { origin: on_plane - x * reach - y * reach, x: y, y: x, z: -up };
     let behind = crate::build::box_solid(&frame, 2.0 * reach, 2.0 * reach, reach + (centre - point).dot(up).abs(), 0)?;
-    trim_sheet(sheet, &behind, Keep::Outside)
+    trim_sheet(sheet, &behind, keep)
 }
 
 /// What a run through the arrangement is for.
@@ -382,7 +383,7 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
             },
             Plan::Trim(side) => match (side, class) {
                 (Keep::Outside, Class::Out | Class::OnSame | Class::OnOpposite) => Some(false),
-                (Keep::Inside, Class::In | Class::OnSame | Class::OnOpposite) => Some(false),
+                (Keep::Inside, Class::In) => Some(false),
                 _ => None,
             },
         };

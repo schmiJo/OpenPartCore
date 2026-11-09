@@ -261,7 +261,8 @@ fn fill(out: &mut Output, outcome: &Outcome, draft: bool) {
         kinds[3],
         kinds[4],
         mesh.triangles.len(),
-        mesh.open_edge_count(),
+        // A sheet's boundary is meant to be open, and a tear anywhere else is what counts.
+        if body.sheet && coreshape::tess::open_only_at_boundary(&body, &mesh) { 0 } else { mesh.open_edge_count() },
         body.contact_vertices(),
         bounds.min.x,
         bounds.min.y,
@@ -468,6 +469,35 @@ mod tests {
         let rebuilt: Vec<&str> = o.steps.iter().filter(|s| s.state == StepState::Rebuilt).map(|s| s.kind).collect();
         assert!(!rebuilt.contains(&"pattern") && !rebuilt.contains(&"revolve"), "{rebuilt:?}");
         assert!(rebuilt.contains(&"extrude"));
+    }
+
+    #[test]
+    fn surface_panel_demo() {
+        let m = models::catalog().iter().find(|m| m.id == "panel").unwrap();
+        let mut doc = m.document(0);
+        let area = |doc: &mut coreshape_document::Document| {
+            let o = doc.rebuild(None);
+            assert_eq!(o.failed, None, "{:?}", o.steps);
+            assert_eq!(o.bodies.len(), 1);
+            let body = o.body.unwrap();
+            assert!(body.sheet);
+            validate(&body).unwrap();
+            let mesh = tessellate(&body, &TessParams::for_size(body.aabb().diagonal())).unwrap();
+            assert!(coreshape::tess::open_only_at_boundary(&body, &mesh));
+            assert_eq!(mass_properties(&body).volume, 0.0);
+            mass_properties(&body).area
+        };
+        let first = area(&mut doc);
+        // A bigger window leaves less, by at least the area of the difference in the circles it's seen through.
+        doc.set_parameter("hole", 16.0).unwrap();
+        let second = area(&mut doc);
+        let least = std::f64::consts::PI * (16.0 * 16.0 - 12.0 * 12.0);
+        assert!(first - second >= least - 1e-9, "{first} to {second}");
+        // Taller adds the curve's length, which is the same at any height.
+        doc.set_parameter("hole", 12.0).unwrap();
+        doc.set_parameter("height", 80.0).unwrap();
+        let third = area(&mut doc);
+        assert!(third > first);
     }
 
     #[test]

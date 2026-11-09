@@ -348,7 +348,7 @@ impl Wire {
     }
 
     /// Checks a chain that needn't close: connected, not too short, in the plane and crossing nowhere.
-    pub(crate) fn check_open(&self) -> Result<()> {
+    pub fn check_open(&self) -> Result<()> {
         if self.segs.is_empty() {
             return Err(Error::InvalidProfile("an open curve has to have something in it".to_string()));
         }

@@ -36,7 +36,7 @@ pub mod tweak;
 pub mod validate;
 
 pub use blend::{chamfer, chamfer_with, fillet, fillet_with, BlendOptions};
-pub use boolean::{intersect, subtract, union, BoolOp};
+pub use boolean::{intersect, subtract, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
 pub use build::{box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus};
 pub use curve::Curve;
 pub use delete::delete_faces;

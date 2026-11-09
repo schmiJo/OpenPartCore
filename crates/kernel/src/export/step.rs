@@ -562,13 +562,31 @@ pub fn write_step_bodies(bodies: &[&Body], name: &str) -> String {
 
     // Geometry and topology.
     let mut solids = Vec::new();
+    let mut sheets = Vec::new();
     for body in bodies {
-        solids.extend(write_solids(&mut w, body));
+        let written = write_solids(&mut w, body);
+        if body.sheet {
+            sheets.extend(written);
+        } else {
+            solids.extend(written);
+        }
     }
 
     let origin = w.axis(&Frame::WORLD);
-    let rep = w.entity(&format!("ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{origin},{}),#{ctx})", solids.join(",")));
-    w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{def_shape},#{rep})"));
+    // Each kind of representation holds its own kind of thing, and sheets go beside solids by saying they're in the same place.
+    if sheets.is_empty() {
+        let rep = w.entity(&format!("ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{origin},{}),#{ctx})", solids.join(",")));
+        w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{def_shape},#{rep})"));
+    } else {
+        let surfaces = w.entity(&format!("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('',(#{origin},{}),#{ctx})", sheets.join(",")));
+        if solids.is_empty() {
+            w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{def_shape},#{surfaces})"));
+        } else {
+            let rep = w.entity(&format!("ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{origin},{}),#{ctx})", solids.join(",")));
+            w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{def_shape},#{rep})"));
+            w.entity(&format!("SHAPE_REPRESENTATION_RELATIONSHIP('','',#{rep},#{surfaces})"));
+        }
+    }
 
     format!(
         "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('CoreShape model'),'2;1');\nFILE_NAME({product},'2026-01-01T00:00:00',(''),(''),'CoreShape','CoreShape','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN {{ 1 0 10303 214 1 1 1 1 }}'));\nENDSEC;\nDATA;\n{}ENDSEC;\nEND-ISO-10303-21;\n",
@@ -609,7 +627,8 @@ pub fn write_step_assembly(parts: &[(&str, &Body)], uses: &[(usize, &str, Frame)
         let (def, shape) = definition(&mut w, label);
         let solids = write_solids(&mut w, body);
         let origin = w.axis(&Frame::WORLD);
-        let rep = w.entity(&format!("ADVANCED_BREP_SHAPE_REPRESENTATION({},(#{origin},{}),#{ctx})", quote(label), solids.join(",")));
+        let kind = if body.sheet { "MANIFOLD_SURFACE_SHAPE_REPRESENTATION" } else { "ADVANCED_BREP_SHAPE_REPRESENTATION" };
+        let rep = w.entity(&format!("{kind}({},(#{origin},{}),#{ctx})", quote(label), solids.join(",")));
         w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{shape},#{rep})"));
         written.push((def, origin, rep));
     }
@@ -638,7 +657,8 @@ pub fn write_step_assembly(parts: &[(&str, &Body)], uses: &[(usize, &str, Frame)
     )
 }
 
-/// A body's solids: each of its outer shells, with the voids inside it. Returns their references.
+/// A body's solids: each of its outer shells, with the voids inside it. Or a sheet's surface model, holding its shells, which
+/// are open unless they happen to close. Returns their references.
 fn write_solids(w: &mut Writer, body: &Body) -> Vec<String> {
     let vertex_ids: Vec<usize> = body
         .vertices
@@ -699,8 +719,14 @@ fn write_solids(w: &mut Writer, body: &Body) -> Vec<String> {
             faces
                 .push(format!("#{}", w.entity(&format!("ADVANCED_FACE('',({}),#{surface},{same})", bounds.join(",")))));
         }
-        w.entity(&format!("CLOSED_SHELL('',({}))", faces.join(",")))
+        let closed = body.shells[shell].iter().all(|&f| body.faces[f].loops.iter().flatten().all(|c| uses[c.edge].len() == 2));
+        w.entity(&format!("{}('',({}))", if closed { "CLOSED_SHELL" } else { "OPEN_SHELL" }, faces.join(",")))
     };
+
+    if body.sheet {
+        let shells: Vec<String> = (0..body.shells.len()).map(|s| format!("#{}", write_shell(w, s, false))).collect();
+        return vec![format!("#{}", w.entity(&format!("SHELL_BASED_SURFACE_MODEL('',({}))", shells.join(","))))];
+    }
 
     // Attach each void to the outer shell containing it. With one outer shell, which
     // is by far the common case, that is trivial; otherwise test by bounding box.

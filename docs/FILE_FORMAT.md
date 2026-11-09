@@ -87,11 +87,15 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `boolean` | `operation`: `union`, `subtract` or `intersect`, `tools`: a list of bodies, and `keep_tools` (default false). `subtract` cuts the tools from the `bodies`, its targets, which it has to name. The others take the `bodies` and `tools` together, and what's left has the first one's name. Bodies that don't meet are refused |
 | `delete_face` | `faces` (names or keys): those faces go, and their neighbours grow to close the gap. It takes holes, pockets, bosses, fillets, chamfers, rabbets, slots and corner notches, and refuses by name what it can't close |
 | `thicken` | `faces` (names or keys), `thickness` (outward, or inward if negative), `mode` (default `add`). A solid between the faces and a copy moved along their normals. Near faces are this feature's `start`, far ones its `end`, and walls its `side.N`. Each keeps the face it came from in its key |
+| `fill` | `sketch`: a flat [sheet](#sheets) filling each of its regions, facing along the sketch's normal, named as this feature's end cap: `f3:end` |
+| `copy_faces` | `faces` (names or keys): a copy of them as a sheet. What they're on stays as it is |
+| `sew` | `tolerance` (default 1e-6), and the `bodies` to join, by default every sheet. See [Sheets](#sheets) |
+| `trim` | What cuts: `tool`, a solid's name like `"f3"`, or `point` and `normal`, a plane, or `sketch`, whose regions cut straight through along its normal. And `keep`: `outside` (the default), `inside` or `both`. Acts on the `bodies` it names, by default every sheet. See [Sheets](#sheets) |
 | `offset` | `distance`: every face moves out, or in if negative. Sharp edges stay sharp. |
 | `shell` | `thickness`, `open` (face names, default none). An inner wall is named for this feature, with the slot of the face it follows: `f9:side.3` lies behind `f2:side.3`. |
 | `draft` | `faces` (names), `degrees`, `pull` (default +z), `neutral` (a point on the plane where faces stay put; default the origin). A positive angle narrows the part along the pull, and widens a hole. |
 
-`mode` is `add`, `remove` or `intersect`. A placement is `{"origin": [x, y, z], "z": [x, y, z], "x": [x, y, z]}`,
+`mode` is `add`, `remove`, `intersect`, `new_body` or `surface`. A placement is `{"origin": [x, y, z], "z": [x, y, z], "x": [x, y, z]}`,
 where each part has a default: the origin, world Z, and world X (world Y if z runs along X).
 
 Solids: `box` (`dx dy dz`), `cylinder` (`radius height`), `cone` (`r0 r1 height`), `sphere` (`radius`),
@@ -163,7 +167,7 @@ Repeats make copies, each of which counts as its own region:
 
 ## Bodies
 
-A body is a part: one connected solid, with any voids inside it. This works as Onshape's parts and merge scope do.
+A body is a part: one connected solid, with any voids inside it, or a connected [sheet](#sheets). This works as Onshape's parts and merge scope do.
 
 - **A feature acts on all the bodies unless it lists them,** in `bodies`, which is Onshape's merge scope: `{"id": 8, "type": "extrude", "mode": "remove", "bodies": ["f3.2"], ...}`. It leaves alone any it doesn't reach.
 - **`mode`** says what a new solid does to them. `add` joins whatever it touches, into one under the first one's name, and if it touches nothing it's a new part. `remove` and `intersect` cut what they reach, and a part with nothing left is gone. `new_body` joins nothing, so that parts can touch or overlap. Regions of one sketch join if they touch, and are separate parts if they don't. Each solid of a STEP file is a part.
@@ -171,6 +175,30 @@ A body is a part: one connected solid, with any voids inside it. This works as O
 - **A part's name** is the feature that made it, and which of that feature's parts it is, counting from 0: `f3` for the first or only one, and `f3.2` for the third. Whatever is done to it later, it keeps that name.
 - **A cut that splits a part** leaves the name on the piece with the most faces from before, or the larger of those, and the others are named for the feature that split it. So after a change that swaps which piece that is, the names swap too.
 - **A change to one part leaves the others alone,** when what comes after names which parts it acts on. A feature with no list depends on all of them.
+
+## Sheets
+
+A sheet is an open surface that's a body of its own. It has faces and edges like any body, and no inside: its volume is zero unless it closes. An edge with a face on only one side is its boundary. See [SHEET_BODIES_DESIGN.md](SHEET_BODIES_DESIGN.md).
+
+**Making one:**
+
+| Feature | What it makes |
+|---|---|
+| `fill` | A flat sheet for each of a sketch's regions |
+| `extrude`, `revolve` with `"mode": "surface"` | The sides of what a region's outline sweeps, with no ends, and a sheet from each open curve in the sketch |
+| `sweep`, `loft`, `helix` with `"mode": "surface"` | The sides of what they'd have made, with no ends |
+| `copy_faces` | A copy of faces from a solid or another sheet |
+| `import_step` | A file holding only surfaces comes in as sheets, in any mode. With `"mode": "surface"` it takes the surfaces from beside a file's solids, and leaves the solids |
+
+Each connected piece is a body of its own, and each depends on nothing else in the document. A sheet from an open curve faces to the right of the way the curve runs, seen from along the sketch's normal, and its faces are named for their segments, as on a solid: `f3:side.0`.
+
+**An open curve** in a plain sketch is a region whose `outer` is an `open_path`, with `start` and `moves` as a `path` has them, and nothing else in the region. In a constrained sketch it's any curves that close nothing, joined end to end into chains. A chain stops where three curves meet, so that no edge has three faces. A constrained sketch's open curves are refused, as they always were, unless a `surface` feature uses that sketch.
+
+**Keeping out of the way.** A feature with no `bodies` acts only on solids, as Onshape's merge scope does, so a sheet lying around doesn't get in the way of a cut or a fillet. `transform`, `thicken`, `copy_faces`, `sew` and `trim` take sheets as well, and a `pattern` or `mirror` of a feature that made one makes more. A sheet can be named in `bodies` by anything, and what needs a solid then refuses it, saying so: `boolean`, `fillet`, `chamfer`, `offset`, `shell`, `draft`, `delete_face`, and `remove`, `intersect` or `add` when they reach it.
+
+**From a sheet to a solid.** `thicken` takes a sheet's faces by name, or with `"faces": []` and `bodies`, all the faces of the sheets it names. `sew` joins sheets along boundaries that run together, cutting an edge to fit where one runs along part of another, and turning over whatever faces the wrong way. If nothing is left open, what comes out is a solid. Otherwise it's still a sheet. It keeps the first one's name.
+
+**Cutting.** `trim` cuts a sheet where a solid's surface, a plane or a sketch's outline crosses it. A piece keeps its face's name, and a sheet cut in two is two bodies. `outside` is what's outside a solid or a sketch's regions, or on the side a plane's normal points to, and `inside` is the rest. A sheet lying exactly on a solid's face or a plane isn't inside, so it's with `outside`, and the two parts always make up the sheet. With `both`, the part outside keeps the sheet's name.
 
 ## Projects and assemblies
 

@@ -16,7 +16,7 @@ These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 - **More kinds of loft.** No loft to a point, closed loop, guide curve or tangency at the ends: see [below](#free-form-surfaces-and-lofts).
 - **Offset and shell where walls cross and nothing can be taken apart,** such as the neck of a dumbbell in outline. Crossing around pockets, bosses, holes and slots works: see [below](#offset-shell-and-draft).
 - **Draft on spline and free-form faces,** and any draft that changes the topology, other than taking a fillet off and putting it back.
-- **Sheet bodies.** Everything here is a closed solid, so thicken takes faces of a solid, and a surface can't exist alone.
+- **Most of what could be done between sheets.** Sheets exist and can be made, cut, thickened and sewn: see [below](#sheet-bodies). What's not built is listed there.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
 - **Engineering drawings.** No sheets of projected views, hidden lines, section views, dimensions or title blocks, and no PDF or DXF. Sketching is built, and that's a different thing.
 - **The rest of Onshape's assemblies.** Tangent and Width mates, Replicate, assembly patterns, exploded views and named positions. What is built: see [below](#assemblies).
@@ -82,7 +82,7 @@ has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
 - **Refused, naming the surface and how many faces use it:** any other surface, so that no result has faces missing.
 - **Refused, naming the solid:** a solid that isn't a boundary representation, such as `CSG_SOLID` or `EXTRUDED_AREA_SOLID`. An earlier version quietly dropped any solid it didn't recognise: one file's second solid went missing, 68,722 for 868,722, with no error. Faceted solids are read now.
 - **Refused, saying why:** a B-spline surface with a fold or of degree above 16, a face that runs across its surface's seam, or a closed one with no edges of its own at all, as OpenCASCADE writes a whole sphere or torus converted to B-splines. A closed one whose seam is on the face's own boundary is fine: it's cut into two faces along its parameter. A pole is fine too, where a whole side shrinks to a point.
-- **Refused:** open shells, a shell the file calls closed that has a face on only one side of some edge, and a surface of revolution of a curve other than a line or circle that turns too far for one face, which an extrusion's curve can do because it gets cut up.
+- **Refused:** a solid bounded by an open shell, a shell the file calls closed that has a face on only one side of some edge, and a surface of revolution of a curve other than a line or circle that turns too far for one face, which an extrusion's curve can do because it gets cut up.
 - **Assemblies come in as one body per use of each part,** placed by item-defined transformations and mapped items, nested to any depth, and each copy after the first gets a key of its own (`@f.k`). Writers disagree on which way round a placement's items go, so this looks up which representation really holds each. Going by the order alone put one file's part on the wrong side of the assembly. A shape that only describes a part, such as validation properties or the history of how a feature was made, is no further copy of it.
 - **A placement listed beside a solid, in a part nothing else places, moves that part.** That's how ACIS writes a body's own transform, and OpenCASCADE reads it that way by default, so the two agree on where these parts are: 6 files here. The standard doesn't actually say so. It's a reference for assemblies, and a reader going strictly by it would leave them where their coordinates say.
 - **A document keeps an assembly's parts apart with the mode `new_body`,** as [separate bodies](#several-bodies). With the default `add` it merges them by Boolean, as one body, which can't always work. Of 4 assemblies tried: `cubcylso` (2 solids) merged in no time; `bernetl` (7) merged, and rightly lost volume where its parts overlap; `as1` (18) was refused after 56 s and `rear` (40) after 14 s, with a message saying to use `new_body`.
@@ -132,6 +132,36 @@ A Part Studio with several parts, as in Onshape: a body is one connected solid, 
 - **A reversed revolve axis with part of a turn** swaps which end is called the start cap, as it's built from the far end. The shape is right.
 - **A Part Studio's STEP export is one product with many solids.** Every body comes back as its own solid in the same place, in this kernel and in OpenCASCADE, but nor is it known that two bolts are the same bolt: an [assembly](#assemblies) is what says that, and its export does. OpenCASCADE reads all 100 exports with the same solids and the same volume. It calls one of them invalid, `daratech`, for wires it finds crossing themselves, and it says the same about that file's original.
 - **The page tints bodies by turns from 6 colours,** so an assembly of many has repeats, and it doesn't yet pick one out, list them, or say which one was tapped.
+
+## Sheet bodies
+
+Open surfaces that are bodies of their own: [the design](SHEET_BODIES_DESIGN.md), [what they do](FILE_FORMAT.md#sheets). Solids don't go through any of this: a body has to be declared a sheet, and an edge with one face is still a defect in anything else.
+
+**Checked** by formula, by an identity, and against OpenCASCADE:
+
+- **Formulas:** the area of each kind of sheet, cut or not, a tube, cone, ring, sphere, cap and torus's part among them, and the volume of what they thicken to.
+- **`fuzz_sheets`:** random sheets cut by random solids and planes. The part outside and the part inside have to add up to the whole, each valid and torn nowhere but its boundary, and sewn back they have to come to the whole again. Of 2,000 seeds in general position, all 2,000 were right, 0 wrong, with 653 of them not reached by the cutter, and all 1,347 of the others sewn back right. With `ALIGNED=1`, on a grid and along the axes, where surfaces lie on each other and touch: 1,996 of 2,000 right, 0 wrong, and 4 refused for surfaces tangent at a point, as a Boolean refuses them. Of those sewn back, 1,192 were right, 0 wrong, and 7 refused as an edge came out shorter than the sewing tolerance. The identity found one real mistake: this used to keep what lay on a solid's face on both sides, so it counted twice.
+- **`scripts/check_step_sheets.sh`:** ten kinds of sheet written here, flat, holed, tube, dome, closed ball, panels at a corner, spline, cut by a solid, cut by a plane, and beside a solid, all read back valid in OpenCASCADE with the area a formula says to 1 part in a million, and its count of free edges the same as this kernel's count of boundary edges. Seven written by OpenCASCADE, a plane, a cylinder's side, a whole sphere, five sides of a box, two apart, a spline's extrusion and a free-form patch, all read here with its area to the same.
+- **Real files:** 12 of the sample files have surfaces beside their solids, which `read_step` leaves out as it always did. Asked for with `read_step_sheets`, 11 read, every sheet valid and untorn, and all within 1e-7 of OpenCASCADE's area for those surfaces. **The failing one:** STEP Tools' `st203-bapl`, of 43 open shells and 712 faces, is refused: "a cone couldn't be cut into pieces of half a turn", and its solid was already refused for a folded surface. NIST's `ftc_08` `-tg` file was refused for having no solids, and still is: it's tessellated, with no surfaces in it to read.
+
+**Not built, and refused saying so:**
+
+- **Cutting a sheet with another sheet,** or a Boolean between sheets, as a sheet has no inside to tell the sides apart by. A solid, a plane or a sketch's outline can cut one.
+- **Fillet, chamfer, offset, shell, draft and delete face on a sheet.** A sheet's boundary isn't something any of these know about.
+- **Extending a sheet,** or trimming one up to another that doesn't reach across it.
+- **A loft between open curves.** A loft's sections are closed outlines, which it matches up around their loops. With the mode `surface` it makes the sides of those, and a section of open curves is refused for having no outline.
+- **A sheet sewn at an edge shorter than the sewing tolerance.** It's refused as such. On a grid, 7 of 1,199 cuts sewn back came to this, where a cut ran within a tolerance of a corner.
+- **A non-manifold joint.** A sew that would put three faces on an edge is refused, and a sketch's chain stops where three curves meet. Each stays a body of its own.
+
+**Other limits:**
+
+- **A sheet's tolerance when sewing.** Two boundaries are one within `tolerance`, 1e-6 by default. The first one's curve is kept, and a wider gap is recorded on the body as an imported solid's is. Nothing moves to close it.
+- **A sheet's edge can't be named by a connector's `edge`,** which takes the two faces it's between. A mate connector can go on its faces, or a point on one.
+- **`Outcome::body` holding a sheet and solids together** is validated by the sheet rules, as it can't tell which shell should close. Each solid has passed the strict check on its own by then.
+- **Copied faces keep their names,** and a plain name covers the original and its copies, so a feature picking `f2:end` after a copy picks both unless it says which by `bodies` or a key: `f2:end@f5.1`.
+- **`read_step` reads a file's solids and not the surfaces beside them,** as it always did, so its numbers against OpenCASCADE don't move. `read_step_all` and `read_step_sheets` read those, and construction geometry is left out, as OpenCASCADE leaves it out. An assembly's surfaces are the same: with solids in a file, its parts are its solids.
+- **STL of a sheet** is an open mesh, as it must be.
+- **Thickening panels that meet at a sharp edge** is refused, as it is for a solid's faces: it takes a smooth set.
 
 ## Assemblies
 
@@ -335,7 +365,7 @@ A profile carried by a screw motion: a spring, a thread, or with the section acr
 
 A solid between faces of a body and a copy of them moved along their normals, with walls along those normals.
 
-- **Faces of a solid only,** as there are no sheet bodies. Several faces have to meet smoothly. Faces meeting at a sharp edge are refused, and can be thickened one at a time.
+- **Faces of a solid or a sheet.** Several faces have to meet smoothly. Faces meeting at a sharp edge are refused, and can be thickened one at a time.
 - **Far faces are exact on every surface type,** including free-form ones, as those are a surface moved by a distance.
 - **Walls are exact where they have a form of their own:** a plane from a straight edge whose normal doesn't change, and a plane, cylinder or cone from a round edge whose normal keeps its angle to the axis. Elsewhere they're ruled patches through the true normals, fitted to within 1.5e-7, with up to 1024 stations.
 - **Oracles, all met to 1e-9 or better:** a flat face's area times the thickness, tube walls, spherical and toroidal shells, and a free-form cylinder against a true one. A thin layer on a free-form vase settles to its area. Steiner's formula checks a cone, and a 1D integral gives 623.19315 for the vase at 0.5, which is what comes out.

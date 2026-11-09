@@ -42,6 +42,16 @@ would fit several edges: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
 
 A body is a part, as in Onshape: one connected solid. A feature acts on all of them unless it lists `"bodies": ["f3.2"]`, and leaves alone any it doesn't reach. `"mode": "new_body"` makes parts that stay separate, and `import_step` with that mode makes one for each solid in the file. `transform`, `delete_bodies` and `boolean` are features too. `bodies_list` gives the names, and `render` tints each body differently unless told otherwise with `colors`, and takes `body` to show just one. `app_set` keeps data for an app with a feature or the document, without touching the model. See the format guide for the details.
 
+## Sheets
+
+A sheet is an open surface that's a body of its own: `bodies_list` marks it `"sheet": true`, with how many `boundary_edges` it has, and its volume is 0. It's made by features: `fill`, `copy_faces`, or `extrude`, `revolve`, `sweep`, `loft` and `helix` with `"mode": "surface"`. `thicken`, `sew` and `trim` take it on from there. In `edges_list` an edge with a face on one side only says `"boundary": true`, and its `select` goes by where it is. [FILE_FORMAT.md](FILE_FORMAT.md#sheets) has the fields.
+
+```
+feature_add { "feature": { "type": "sketch", "regions": [{ "outer": { "type": "open_path", "start": [0, 0], "moves": [{ "line_to": [10, 0] }, { "line_to": [10, 7] }] } }] } }
+feature_add { "feature": { "type": "extrude", "sketch": 1, "length": 5, "mode": "surface" } }
+feature_add { "feature": { "type": "trim", "point": [0, 0, 2], "normal": [0, 0, 1] } }
+```
+
 ## Assemblies
 
 The tools for features always work on a Part Studio: the last one selected, even with an assembly selected. `render` and `export` follow the selected tab, so with an assembly they draw it, with each instance its own colour, and write it as a STEP assembly, or an STL of it all. `body` still means a part of the Part Studio. `document_save`, `document_open` and `export` with `coreshape` take the whole project, which is a plain document if it's one Part Studio.

@@ -582,11 +582,12 @@ impl Project {
         let solved = self.solve(id)?;
         let bodies: Vec<Body> = solved.placed.iter().map(|p| p.body.transformed(&p.at)).collect();
         let boxes: Vec<Aabb> = bodies.iter().map(Body::aabb).collect();
+        // A sheet has no inside, so nothing can be in the same place as one. It's not a question for it.
         let meet = |a: &Aabb, b: &Aabb| a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y && a.min.z <= b.max.z && b.min.z <= a.max.z;
         let (mut found, mut unknown) = (Vec::new(), Vec::new());
         for i in 0..bodies.len() {
             for j in i + 1..bodies.len() {
-                if !meet(&boxes[i], &boxes[j]) {
+                if !meet(&boxes[i], &boxes[j]) || bodies[i].sheet || bodies[j].sheet {
                     continue;
                 }
                 match coreshape::boolean::intersect(&bodies[i], &bodies[j]) {

@@ -669,19 +669,19 @@ fn a_solid_across_a_sheet_splits_it_into_pieces() {
 #[test]
 fn a_tube_cut_by_a_plane_is_as_long_as_what_is_left() {
     let tube = extrude_open(&Wire::circle(v2(0.0, 0.0), 5.0), &Frame::WORLD, 10.0, 1).unwrap();
-    let up = trim_sheet_by_plane(&tube, v3(0.0, 0.0, 3.0), Vec3::Z).unwrap();
+    let up = trim_sheet_by_plane(&tube, v3(0.0, 0.0, 3.0), Vec3::Z, Keep::Outside).unwrap();
     check_sheet(&up, TAU * 5.0 * 7.0);
-    let down = trim_sheet_by_plane(&tube, v3(0.0, 0.0, 3.0), -Vec3::Z).unwrap();
+    let down = trim_sheet_by_plane(&tube, v3(0.0, 0.0, 3.0), Vec3::Z, Keep::Inside).unwrap();
     check_sheet(&down, TAU * 5.0 * 3.0);
     // A slanted plane through the middle takes half, whatever the slant, by symmetry.
-    let slant = trim_sheet_by_plane(&tube, v3(0.0, 0.0, 5.0), v3(0.0, 0.5, 1.0)).unwrap();
+    let slant = trim_sheet_by_plane(&tube, v3(0.0, 0.0, 5.0), v3(0.0, 0.5, 1.0), Keep::Outside).unwrap();
     check_sheet(&slant, TAU * 5.0 * 5.0);
     // A plane that misses it leaves it whole on one side and takes it all on the other.
-    let all = trim_sheet_by_plane(&tube, v3(0.0, 0.0, -1.0), Vec3::Z).unwrap();
+    let all = trim_sheet_by_plane(&tube, v3(0.0, 0.0, -1.0), Vec3::Z, Keep::Outside).unwrap();
     check_sheet(&all, TAU * 5.0 * 10.0);
-    let none = trim_sheet_by_plane(&tube, v3(0.0, 0.0, -1.0), -Vec3::Z).unwrap();
+    let none = trim_sheet_by_plane(&tube, v3(0.0, 0.0, -1.0), Vec3::Z, Keep::Inside).unwrap();
     assert!(none.faces.is_empty());
-    assert!(trim_sheet_by_plane(&tube, Vec3::ZERO, Vec3::ZERO).is_err());
+    assert!(trim_sheet_by_plane(&tube, Vec3::ZERO, Vec3::ZERO, Keep::Outside).is_err());
 }
 
 #[test]
@@ -689,20 +689,33 @@ fn a_spheres_cap_comes_from_a_plane() {
     let half = Wire { segs: vec![Seg { geom: SegGeom::Arc { center: v2(0.0, 0.0), radius: 5.0, a0: -PI / 2.0, a1: PI / 2.0 }, id: 0 }] };
     let ball = revolve_open(&half, &Frame::WORLD, TAU, 1).unwrap();
     // 2 pi r h for each side, with h = 2 on top.
-    check_sheet(&trim_sheet_by_plane(&ball, v3(0.0, 0.0, 3.0), Vec3::Z).unwrap(), TAU * 5.0 * 2.0);
-    check_sheet(&trim_sheet_by_plane(&ball, v3(0.0, 0.0, 3.0), -Vec3::Z).unwrap(), TAU * 5.0 * 8.0);
+    check_sheet(&trim_sheet_by_plane(&ball, v3(0.0, 0.0, 3.0), Vec3::Z, Keep::Outside).unwrap(), TAU * 5.0 * 2.0);
+    check_sheet(&trim_sheet_by_plane(&ball, v3(0.0, 0.0, 3.0), Vec3::Z, Keep::Inside).unwrap(), TAU * 5.0 * 8.0);
 }
 
 #[test]
-fn a_sheet_touching_a_solids_face_is_kept_by_either_side() {
+fn a_sheet_lying_on_a_solids_face_isnt_inside_it() {
+    // So the two parts always make up the sheet, and nothing is counted twice.
     let s = fill(&rect(10.0, 10.0), &Frame::translation(v3(0.0, 0.0, 5.0)), 1).unwrap();
     let block = box_solid(&Frame::WORLD, 10.0, 10.0, 5.0, 2).unwrap();
     near(area(&trim_sheet(&s, &block, Keep::Outside).unwrap()), 100.0, "outside");
-    near(area(&trim_sheet(&s, &block, Keep::Inside).unwrap()), 100.0, "inside");
-    // Half on it and half off it.
+    assert!(trim_sheet(&s, &block, Keep::Inside).unwrap().faces.is_empty());
+    // Half on it and half off it, which is all outside.
     let wider = fill(&rect(20.0, 10.0), &Frame::translation(v3(0.0, 0.0, 5.0)), 1).unwrap();
     near(area(&trim_sheet(&wider, &block, Keep::Outside).unwrap()), 200.0, "outside");
-    near(area(&trim_sheet(&wider, &block, Keep::Inside).unwrap()), 100.0, "inside");
+    assert!(trim_sheet(&wider, &block, Keep::Inside).unwrap().faces.is_empty());
+    // Facing the other way makes no difference.
+    let under = wider.mirrored(&Mirror::new(v3(0.0, 0.0, 5.0), Vec3::Z));
+    near(area(&trim_sheet(&under, &block, Keep::Outside).unwrap()), 200.0, "outside, facing in");
+    // On a plane it's on the side of the normal, whichever way the sheet faces.
+    near(area(&trim_sheet_by_plane(&wider, v3(0.0, 0.0, 5.0), Vec3::Z, Keep::Outside).unwrap()), 200.0, "on a plane");
+    assert!(trim_sheet_by_plane(&wider, v3(0.0, 0.0, 5.0), Vec3::Z, Keep::Inside).unwrap().faces.is_empty());
+    // Part of a panel on a plane, and the rest across it.
+    let path = Wire { segs: vec![line(v2(0.0, 0.0), v2(10.0, 0.0), 0), line(v2(10.0, 0.0), v2(10.0, 7.0), 1)] };
+    let panels = extrude_open(&path, &Frame::WORLD, 5.0, 3).unwrap();
+    let (a, b) = (trim_sheet_by_plane(&panels, Vec3::ZERO, -Vec3::Y, Keep::Outside).unwrap(), trim_sheet_by_plane(&panels, Vec3::ZERO, -Vec3::Y, Keep::Inside).unwrap());
+    near(area(&a), 50.0, "the panel on it");
+    near(area(&b), 35.0, "the panel beyond it");
 }
 
 #[test]
