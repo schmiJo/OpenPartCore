@@ -92,4 +92,4 @@ From OpenShape's list, in its order:
 3. Ellipses and elliptical arcs in the solver, regions and kernel profiles: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 4. Splines in sketches, extruded and revolved, then lofts and free-form surfaces from imported files: done, see [NURBS_DESIGN.md](NURBS_DESIGN.md).
 5. STEP import of analytic surfaces and swept curves: done, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). It refuses anything else, naming the surface type. Assemblies come next there.
-6. Modelling: helix, delete face and thicken are done, and offset and shell work on free-form faces: see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). Offset, shell and draft that survive topology changes are next.
+6. Modelling: helix, delete face and thicken are done, and offset and shell work on free-form faces. Offset and shell survive faces vanishing, and draft survives fillets touching what it moves: see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). Walls that cross are refused, saying where, and those are what's left.

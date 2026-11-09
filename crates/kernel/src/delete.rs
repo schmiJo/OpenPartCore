@@ -652,6 +652,14 @@ fn strips_of(body: &Body, uses: &Uses, group: &[usize]) -> Option<Vec<Plan>> {
 /// Deletes faces and closes the gap by letting their neighbours grow, or refuses and says why. Faces that keep their place
 /// keep their names, so nothing new gets named, and a face that had a neighbour deleted is still the same face.
 pub fn delete_faces(body: &Body, faces: &[usize]) -> Result<Body> {
+    let (current, _) = delete_faces_mapped(body, faces)?;
+    let tidy = simplify(current)?;
+    validate(&tidy).map_err(|why| refuse(format!("the result wouldn't be a valid solid: {}", why.join("; "))))?;
+    Ok(tidy)
+}
+
+/// The same, before tidying up, with the face each new face was for those that need to keep track.
+pub(crate) fn delete_faces_mapped(body: &Body, faces: &[usize]) -> Result<(Body, Vec<usize>)> {
     if faces.is_empty() {
         return Err(Error::InvalidInput("deleting faces takes at least one face".into()));
     }
@@ -666,6 +674,7 @@ pub fn delete_faces(body: &Body, faces: &[usize]) -> Result<Body> {
         return Err(Error::InvalidInput("deleting every face would leave nothing".into()));
     }
     let mut current = body.clone();
+    let mut from: Vec<usize> = (0..body.faces.len()).collect();
     loop {
         let uses = current.edge_uses();
         if uses.iter().any(|u| !u.is_empty() && u.len() != 2) {
@@ -709,12 +718,11 @@ pub fn delete_faces(body: &Body, faces: &[usize]) -> Result<Body> {
             return Err(last.unwrap_or_else(|| refuse("nothing worked".into())));
         };
         gone = kept.iter().map(|&f| gone[f]).collect();
+        from = kept.iter().map(|&f| from[f]).collect();
         current = next;
     }
     if current.faces.is_empty() {
         return Err(Error::InvalidInput("deleting every face would leave nothing".into()));
     }
-    let tidy = simplify(current)?;
-    validate(&tidy).map_err(|why| refuse(format!("the result wouldn't be a valid solid: {}", why.join("; "))))?;
-    Ok(tidy)
+    Ok((current, from))
 }

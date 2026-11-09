@@ -14,8 +14,8 @@ cargo run --release -p coreshape --example replay -- <grid|rot|prism|gen|al|ext|
 These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 
 - **More kinds of loft.** No loft to a point, closed loop, guide curve or tangency at the ends: see [below](#free-form-surfaces-and-lofts).
-- **Offset, shell and draft that change a body's topology.** They refuse instead: see [below](#offset-shell-and-draft).
-- **Draft on spline and free-form faces.** Offset and shell work on those now, and draft is still refused.
+- **Offset and shell where walls cross.** A part that would split in two, or two parts of it that would join, is refused, saying where. Faces that vanish are handled: see [below](#offset-shell-and-draft).
+- **Draft on spline and free-form faces,** and any draft that changes the topology, other than taking a fillet off and putting it back.
 - **Sheet bodies.** Everything here is a closed solid, so thicken takes faces of a solid, and a surface can't exist alone.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
 - **Assemblies and drawings.** A STEP assembly is refused.
@@ -206,8 +206,13 @@ hadn't found it because its curves have several spans, while the vase's single s
 
 ## Offset, shell and draft
 
-These keep a body's topology and move its surfaces, so they are exact. OpenShape has asked for versions that survive a change of topology, which aren't started. Today:
+These move a body's surfaces, so they are exact.
 
+- **A face that doesn't survive goes, and the change is tried again.** A fillet smaller than the wall of a shell, a chamfer that gets used up, a hole, pocket or slot that closes moving out, and a boss that goes moving in. By then the face is redundant, as its neighbours have moved past it, so this gives the same shape as a part that never had it. It uses [delete face](#delete-face), so what that refuses is refused here too.
+- **Only if it's really redundant.** A face can give way only in part, such as a tapered chamfer whose narrow end is used up while its wide end isn't, and deleting that would give a plausible, wrong shape. So points across every face that went have to be the full distance from the result, on the right side, or it's refused as "only partly gives way". That's sampled at up to 121 points of each face, so what's left of one smaller than those could get through.
+- **Walls that cross are refused, saying where:** a thin wall moving in, which would split the part, or two bosses growing together. This is what commercial kernels restructure, and it's the largest gap left here. It's found by whether a moved face comes nearer another face than that face has moved, at 4 points along each edge and up to 24 across each face, so a crossing smaller than those could get through.
+- **Fuzz:** 300 random parts with a random feature, moved by up to 35% of their smallest size (`--example fuzz_features -- 300 offset`): 230 right, 62 refused, 0 wrong and 8 skipped. The check holds however many faces went: moving out, every point closer to the part than the distance has to be in the result, and moving in, every point in the result has to be at least that far inside. 43 of the refusals are crossing walls, and the other 19 are cuts that cross each other, such as a slot through a hole, whose gap has more sides than delete face takes, or a floor that meets the bottom and would split the part.
+- **Past the distance of a concave edge moving in, or a convex one moving out, edges stay sharp,** meeting further along. There are no rounded joins, so the result isn't the set of points at that distance, only what's inside the moved faces.
 - **A free-form or swept spline face moves exactly.** Its offset isn't a spline, so it isn't stored as one: the surface is the patch plus a distance, and the distance to it is the distance to the patch less that one. Checked on a vase, by a one-dimensional integral from its own profile, at offsets from 0.25 to 3: 6152.276608 against 6152.276661 at 0.75, and 12447.1833 against 12447.1844 at 3. On a spline sphere, 5575.279763 against 5575.279763.
 - **Past the end of a free-form face, a moved surface carries on along its tangent.** An outward offset of a part with caps needs that, as a side has to reach a cap that has moved away from it, and the true offset of the side isn't defined there. The extended part is a ruled surface and not a continuation of the curvature.
 - **Refused on a free-form surface:** a move past a center of curvature, found by sampling, where it would fold; a surface with a sharp crease at a knot; and a pole with a point to it, like the tip of a cone, as each of those would need a gap filled. A smooth pole is fine.
@@ -215,16 +220,12 @@ These keep a body's topology and move its surfaces, so they are exact. OpenShape
 - **In a STEP file a moved free-form face is a fit, within 1e-5.** STEP has `OFFSET_SURFACE`, which this kernel reads, but OpenCASCADE refuses one on a surface that isn't C1 ("Offset with no C1 Surface"), and a circle's double knots aren't. So it's a B-spline of up to degree 9 on few pieces. A two-face vase goes from 10 KB to 185 KB, and reading that back here takes about 5 s, as closest points on degree 9 are slow to set up. The kernel's own copy stays exact.
 - **OpenCASCADE disagrees about thin moved solids.** On `thick_vase` it gets a volume of 617.12, and on `vase_hollow` 843.71. Both differ by about 1%, and the same one-dimensional integral gives 623.19315 and 836.33638, which is what this kernel gets. The gallery flags these two, with the three lofts it has flagged before, for the same reason.
 
-- **A change big enough to alter the topology is refused,** such as an offset that makes a small face vanish or
-  closes a hole. Commercial kernels restructure the neighbours. This one says the change is too big.
-- **Outward offsets keep sharp edges sharp,** meeting further out. There are no rounded joins.
 - **Faces that meet smoothly must move together.** Shelling with one of a smooth pair open is refused, as is
   drafting half of one.
 - **Draft takes planes along the pull and cylinders on it.** Spheres, cones and tori aren't draftable, and neither is a
-  smooth edge that isn't straight, so a fillet running around the top of a prism blocks drafting its walls.
-- **Offset walls aren't checked against each other beyond the edges.** A wall that would pass through a distant
-  part of the same body isn't caught by the offset itself. In a shell, the cavity's vertices must lie inside the part, and the
-  Boolean's own checks apply. Other cases have little test coverage.
+  smooth edge between drafted faces that isn't straight.
+- **A fillet touching a drafted face comes off and goes back on,** at the same radius between the same two faces, which comes out the same as drafting first and rounding after. Its faces may get different slots, as those go by edge, so name them by the faces they're between: `f3:side.1[f2:end|f2:side.0]`.
+- **A draft that changes the topology otherwise is refused.** Nothing there is redundant the way an offset's is, as the neutral plane leaves some of every face in place.
 
 Checked in OpenCASCADE: `offset_out` and `offset_in` on a fully rounded box match its own `makeOffsetShape` volumes (12497.7143
 and 5404.3606), and all the results read as valid solids.

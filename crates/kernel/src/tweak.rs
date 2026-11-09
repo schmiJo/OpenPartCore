@@ -1,21 +1,27 @@
-//! Offset, shell and draft, which all change a body's surfaces and keep its topology.
+//! Offset, shell and draft, which all change a body's surfaces.
 //!
 //! Each face gets a new surface. Then every vertex is found again where its new surfaces meet, and
 //! every edge is rebuilt between its new vertices. All five surface types offset to their own kind, and
-//! a drafted cylinder is a cone, so the result is as exact as the original. If a change is big enough to
-//! alter the topology, as when an offset makes a face vanish, it is refused: the checks below catch an
-//! edge that has turned round or a face that no longer closes.
+//! a drafted cylinder is a cone, so the result is as exact as the original.
+//!
+//! A change can be too big for a face to survive: a fillet smaller than the distance, a hole that closes, a chamfer that
+//! gets used up. Such a face is redundant by then, as its neighbours have moved past it, so it's deleted, with `delete`,
+//! and the change is tried again without it, which comes to the same result. That finds a chain of them in turn. What this
+//! can't do is walls that cross each other, where the part would split in two or two parts would join. Those are found
+//! and refused, saying where.
 
-use crate::boolean::classify::{BodyLoc, Index};
+use crate::boolean::classify::{BodyLoc, FaceLoc, Index};
+use crate::boolean::simplify::simplify;
 use crate::boolean::ssi::{self, Ssi};
 use crate::boolean::{subtract};
+use crate::delete::delete_faces_mapped;
 use crate::curve::Curve;
 use crate::error::{Error, Result};
 use crate::math::*;
 use crate::patch::Patch;
 use crate::spline::Spline;
 use crate::surface::{refine_on_two, Surface};
-use crate::topo::{Body, Edge};
+use crate::topo::{Body, Edge, FaceTag};
 use crate::validate::validate;
 use std::sync::Arc;
 
@@ -24,6 +30,259 @@ const TANGENT: f64 = 1e-7;
 
 fn refuse(what: String) -> Error {
     Error::InvalidInput(what)
+}
+
+/// What stopped a change, and which faces or edges it came down to, if any.
+struct Stuck {
+    why: Error,
+    faces: Vec<usize>,
+    edges: Vec<usize>,
+}
+
+impl From<Error> for Stuck {
+    fn from(why: Error) -> Stuck {
+        Stuck { why, faces: Vec::new(), edges: Vec::new() }
+    }
+}
+
+/// Whether two faces meet convex, concave or smoothly along an edge, by its middle.
+fn edge_kind(body: &Body, uses: &[Vec<(usize, usize, usize, bool)>], e: usize) -> Option<bool> {
+    let [a, b] = uses[e].as_slice() else { return None };
+    let p = body.edges[e].eval_mid();
+    let (fa, fb) = (&body.faces[a.0], &body.faces[b.0]);
+    let (na, nb) = (fa.outward_normal(p), fb.outward_normal(p));
+    if na.cross(nb).norm() < TANGENT * 10.0 {
+        return None;
+    }
+    let edge = &body.edges[e];
+    let t = edge.curve.derivative((edge.t0 + edge.t1) / 2.0) * if a.3 { -1.0 } else { 1.0 };
+    // Away from the first face, across the edge. A convex edge has the second face's normal leaning that way.
+    Some(t.cross(na).dot(nb) > 0.0)
+}
+
+/// Deletes the faces that something has gone wrong for, from those named, or those with the most of their edges turned
+/// round. If they can't go alone, it takes those joined to them by the kind of edge that closes up under this change.
+fn heal(body: &Body, stuck: &Stuck, closes: &dyn Fn(usize, bool) -> bool) -> Option<(Body, Vec<usize>)> {
+    let uses = body.edge_uses();
+    let mut group: Vec<usize> = stuck.faces.clone();
+    let mut alone: Option<usize> = None;
+    if group.is_empty() {
+        if stuck.edges.is_empty() {
+            return None;
+        }
+        let mut count = vec![0usize; body.faces.len()];
+        for &e in &stuck.edges {
+            for u in &uses[e] {
+                count[u.0] += 1;
+            }
+        }
+        let score = |f: usize| count[f] as f64 / body.faces[f].loops.iter().map(Vec::len).sum::<usize>().max(1) as f64;
+        let best = (0..body.faces.len()).map(score).fold(0.0f64, f64::max);
+        group = (0..body.faces.len()).filter(|&f| score(f) >= best - 1e-9).collect();
+        alone = group.iter().copied().min_by(|&a, &b| body.face_aabb(a).diagonal().total_cmp(&body.face_aabb(b).diagonal()));
+    }
+    // Separate groups go one at a time, as one of them failing says nothing about the others, and the next try finds
+    // what's left.
+    let joined = |a: usize, b: usize| {
+        body.faces[a].loops.iter().flatten().any(|c| uses[c.edge].iter().any(|u| u.0 == b))
+    };
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for &f in &group {
+        let (mut touching, rest): (Vec<Vec<usize>>, Vec<Vec<usize>>) = groups.into_iter().partition(|g| g.iter().any(|&h| joined(f, h)));
+        let mut merged: Vec<usize> = touching.drain(..).flatten().collect();
+        merged.push(f);
+        groups = rest;
+        groups.push(merged);
+    }
+    let size = ssi_size(body);
+    for start in groups {
+        let mut group = start;
+        for _ in 0..8 {
+            if group.len() >= body.faces.len() {
+                break;
+            }
+            if let Ok(done) = delete_faces_mapped(body, &group) {
+                return Some(done);
+            }
+            if let Some(f) = alone.take() {
+                if group.len() > 1 {
+                    if let Ok(done) = delete_faces_mapped(body, &[f]) {
+                        return Some(done);
+                    }
+                }
+            }
+            let before = group.len();
+            for f in group.clone() {
+                for c in body.faces[f].loops.iter().flatten() {
+                    for u in &uses[c.edge] {
+                        if u.0 == f || group.contains(&u.0) {
+                            continue;
+                        }
+                        // Pieces of one surface go together. Otherwise it's the kind of edge that closes up.
+                        let seam = ssi::coincident(&body.faces[f].surface, &body.faces[u.0].surface, size).is_some();
+                        if seam || edge_kind(body, &uses, c.edge).is_some_and(|convex| closes(f, convex)) {
+                            group.push(u.0);
+                        }
+                    }
+                }
+            }
+            if group.len() == before {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn ssi_size(body: &Body) -> f64 {
+    body.aabb().diagonal().max(1.0)
+}
+
+/// Tries a change, deleting what doesn't survive it and trying again. `attempt` gets the body as it now stands, with the
+/// face each of its faces started as. `closes` says which edges close up, and `went` checks the result against points of
+/// the faces that went, by the face each started as, since a face that only partly gave way mustn't go at all.
+fn surviving(
+    body: &Body,
+    attempt: &mut dyn FnMut(&Body, &[usize]) -> std::result::Result<Body, Stuck>,
+    closes: &dyn Fn(usize, bool) -> bool,
+    went: &dyn Fn(&Body, usize, &[Vec3]) -> Result<()>,
+) -> Result<Body> {
+    let mut current = body.clone();
+    let mut from: Vec<usize> = (0..body.faces.len()).collect();
+    let mut healed = false;
+    let mut removed: Vec<(usize, Vec<Vec3>)> = Vec::new();
+    for _ in 0..=body.faces.len() {
+        match attempt(&current, &from) {
+            Ok(done) => {
+                if !healed {
+                    return Ok(done);
+                }
+                for (f, points) in &removed {
+                    went(&done, *f, points)?;
+                }
+                let tidy = simplify(done)?;
+                validate(&tidy).map_err(|defects| refuse(format!("the result isn't a valid solid: {}", defects.join("; "))))?;
+                return Ok(tidy);
+            }
+            Err(stuck) => {
+                let closes_here = |f: usize, convex: bool| closes(from[f], convex);
+                let Some((next, kept)) = heal(&current, &stuck, &closes_here) else {
+                    return Err(stuck.why);
+                };
+                let index = Index::new(&current);
+                for f in 0..current.faces.len() {
+                    if !kept.contains(&f) {
+                        removed.push((from[f], samples_across(&current, &index, f)));
+                    }
+                }
+                from = kept.iter().map(|&k| from[k]).collect();
+                current = next;
+                healed = true;
+            }
+        }
+    }
+    Err(refuse("too many faces gave way one after the other".to_string()))
+}
+
+/// Refuses walls that have crossed: a point of a moved face that has ended up nearer another face of the part than that
+/// face has moved. A real offset can't do that, since the moved copy of the other face would be in its way. It's checked
+/// around each face's edges, which works when crossed walls won't mesh, and at up to 24 points of it when they will. So a
+/// crossing smaller than those could get through.
+fn walls_clear(base: &Body, moved: &Body, distance: &dyn Fn(usize) -> f64) -> Result<()> {
+    let mut points: Vec<Vec<Vec3>> = vec![Vec::new(); moved.faces.len()];
+    for (f, face) in moved.faces.iter().enumerate() {
+        for c in face.loops.iter().flatten() {
+            points[f].extend([0.0, 0.25, 0.5, 0.75].iter().map(|s| moved.coedge_point(*c, *s)));
+        }
+    }
+    if let Ok(mesh) = crate::tess::tessellate(moved, &crate::tess::TessParams::draft_for_size(moved.aabb().diagonal())) {
+        let mut on_face: Vec<Vec<u32>> = vec![Vec::new(); moved.faces.len()];
+        for (t, tri) in mesh.triangles.iter().enumerate() {
+            on_face[mesh.face_of_triangle[t] as usize].extend_from_slice(tri);
+        }
+        for (f, list) in on_face.iter_mut().enumerate() {
+            list.sort_unstable();
+            list.dedup();
+            let stride = (list.len() / 24).max(1);
+            points[f].extend(list.iter().step_by(stride).map(|v| mesh.positions[*v as usize]));
+        }
+    }
+    let index = Index::new(base);
+    let boxes: Vec<Aabb> = (0..base.faces.len()).map(|f| base.face_aabb(f)).collect();
+    for (f, list) in points.iter().enumerate() {
+        for &q in list {
+            for (g, face) in base.faces.iter().enumerate() {
+                // A wall moving in passes a face moving out quite properly, as a shell's do at an open face.
+                let reach = distance(g).abs();
+                if g == f || reach == 0.0 || distance(g) * distance(f) < 0.0 || !boxes[g].inflated(reach).contains(q) {
+                    continue;
+                }
+                if face.surface.sdf(q).abs() >= reach - 1e-6 {
+                    continue;
+                }
+                let foot = face.surface.project(q);
+                if index.locate_on_face(g, foot, 1e-6) == FaceLoc::Inside {
+                    return Err(refuse(format!(
+                        "walls cross near ({:.3}, {:.3}, {:.3}): at this distance the part would split in two or two parts of it would join, which this can't do yet",
+                        q.x, q.y, q.z
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Points across a face, and not just around it: every point of a face's edge is on a neighbour too, which says nothing
+/// about the face itself.
+fn samples_across(body: &Body, index: &Index, f: usize) -> Vec<Vec3> {
+    let face = &body.faces[f];
+    let (lo, hi) = body.face_chart_bounds(f);
+    let mut out = boundary_samples(body, f);
+    const N: usize = 12;
+    for i in 1..N {
+        for j in 1..N {
+            let uv = v2(lo.x + (hi.x - lo.x) * i as f64 / N as f64, lo.y + (hi.y - lo.y) * j as f64 / N as f64);
+            let p = face.surface.from_chart(&face.chart, uv);
+            if index.locate_on_face(f, p, 1e-6) == FaceLoc::Inside {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// The distance from a point to the surface of a body, faces and edges both.
+fn distance_to_surface(body: &Body, index: &Index, p: Vec3) -> f64 {
+    let mut best = f64::INFINITY;
+    for f in 0..body.faces.len() {
+        let s = &body.faces[f].surface;
+        let d = s.sdf(p).abs();
+        if d < best && index.locate_on_face(f, s.project(p), 1e-6) != FaceLoc::Outside {
+            best = d;
+        }
+    }
+    for e in &body.edges {
+        best = best.min(e.curve.closest(p, e.t0, e.t1).1);
+    }
+    best
+}
+
+/// That a face which went was really redundant, as its neighbours had moved past it: every point of it has to be as far
+/// from the result as it moved, on the right side. If some of it should still be there, as when a tapered chamfer has only
+/// used up its narrow end, then this isn't the right shape, and it says so.
+fn redundant(result: &Body, d: f64, points: &[Vec3]) -> Result<()> {
+    let index = Index::new(result);
+    for &p in points {
+        let inside = index.locate_in_body(p) == BodyLoc::Inside;
+        if inside != (d > 0.0) || distance_to_surface(result, &index, p) < d.abs() - 1e-6 {
+            return Err(refuse(format!(
+                "a face only partly gives way near ({:.3}, {:.3}, {:.3}): what's left of it would need the part's faces rearranged, which this can't do yet",
+                p.x, p.y, p.z
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A surface moved `d` along its own normal: the one it defines, not the face's outward one. `reach` is where the
@@ -450,7 +709,7 @@ fn sampled_as_spline(curve: &Curve, t0: f64, t1: f64) -> Option<(Curve, f64, f64
 type TangentMap<'a> = &'a dyn Fn(usize, Vec3) -> Result<Vec3>;
 
 /// The body with each face on a new surface and the same topology.
-fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>) -> Result<Body> {
+fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>) -> std::result::Result<Body, Stuck> {
     let uses = body.edge_uses();
     // What each edge is between.
     let mut tangent = vec![false; body.edges.len()];
@@ -458,7 +717,7 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
     let size = body.aabb().diagonal().max(1.0);
     for (e, edge) in body.edges.iter().enumerate() {
         if uses[e].len() != 2 {
-            return Err(Error::Unsupported("an edge used by other than two faces can't be moved".into()));
+            return Err(Error::Unsupported("an edge used by other than two faces can't be moved".into()).into());
         }
         let (f, g) = (uses[e][0].0, uses[e][1].0);
         same[e] = ssi::coincident(&body.faces[f].surface, &body.faces[g].surface, size).is_some();
@@ -534,20 +793,31 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
                     p
                 }
             }
-            None => point_on_surfaces(&list, start).ok_or_else(|| refuse("the new surfaces no longer meet at a corner".to_string()))?,
+            None => match point_on_surfaces(&list, start) {
+                Some(p) => p,
+                None => return Err(Stuck { why: refuse("the new surfaces no longer meet at a corner".to_string()), faces: Vec::new(), edges: edges.clone() }),
+            },
         };
         if list.iter().any(|s| s.sdf(vertices[v]).abs() > 10.0 * TOL) {
-            return Err(refuse("the new surfaces no longer meet at a corner".to_string()));
+            return Err(Stuck { why: refuse("the new surfaces no longer meet at a corner".to_string()), faces: Vec::new(), edges: edges.clone() });
         }
+    }
+    // An edge that has shrunk away or turned round means a face has gone.
+    let turned: Vec<usize> = (0..body.edges.len())
+        .filter(|&e| {
+            let edge = &body.edges[e];
+            let (old, new) = (body.vertices[edge.v1] - body.vertices[edge.v0], vertices[edge.v1] - vertices[edge.v0]);
+            !uses[e].is_empty() && (new.norm() < MIN_FEATURE || (old.norm() > 1e-9 && old.dot(new) <= 0.0))
+        })
+        .collect();
+    if !turned.is_empty() {
+        return Err(Stuck { why: refuse("an edge shrinks away or turns round: the change is too big for the part's shape".to_string()), faces: Vec::new(), edges: turned });
     }
     // Edges.
     let mut out = Body { vertices, ..Body::default() };
     for (e, edge) in body.edges.iter().enumerate() {
         let (f, g) = (uses[e][0].0, uses[e][1].0);
         let (a, b) = (out.vertices[edge.v0], out.vertices[edge.v1]);
-        if a.dist(b) < MIN_FEATURE {
-            return Err(refuse("an edge shrinks away to nothing: the change is too big for the part's shape".to_string()));
-        }
         let (curve, t0, t1) = match &tangent_curves[e] {
             Some(c) => fitted(c, a, b, tangent_map(e, edge.eval_mid())?).filter(|f| f.0.eval(f.1).dist(a) <= TOL && f.0.eval(f.2).dist(b) <= TOL).or_else(|| spliced(c, a, b)).ok_or_else(|| refuse("a smooth edge didn't fit its new corners".to_string()))?,
             None => {
@@ -557,11 +827,6 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
                 if moved { sampled_as_spline(&c, t0, t1).unwrap_or((c, t0, t1)) } else { (c, t0, t1) }
             }
         };
-        // An edge that has turned round means a face has turned inside out.
-        let (old, new) = (edge.curve.eval(edge.t1) - edge.curve.eval(edge.t0), curve.eval(t1) - curve.eval(t0));
-        if matches!(edge.curve, Curve::Line { .. }) && old.dot(new) <= 0.0 {
-            return Err(refuse("an edge turns round: the change is too big for the part's shape".to_string()));
-        }
         out.edges.push(Edge { curve, t0, t1, v0: edge.v0, v1: edge.v1 });
     }
     for (f, face) in body.faces.iter().enumerate() {
@@ -570,11 +835,16 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
     }
     out.shells = body.shells.clone();
     validate(&out).map_err(|defects| refuse(format!("the result isn't a valid solid: {}", defects.join("; "))))?;
-    let check = crate::tess::tessellate(&out, &crate::tess::TessParams::for_size(out.aabb().diagonal()))?;
+    Ok(out)
+}
+
+/// Whether a result meshes into a closed surface, which a change too big for the part's shape often doesn't.
+fn meshes_closed(body: &Body) -> Result<()> {
+    let check = crate::tess::tessellate(body, &crate::tess::TessParams::for_size(body.aabb().diagonal()))?;
     if check.open_edge_count() > 0 {
         return Err(refuse("the result doesn't mesh into a closed surface: the change is too big for the part's shape".to_string()));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Moves each face outward by its own distance, negative for inward. Sharp edges stay sharp: neighbouring
@@ -586,25 +856,45 @@ pub fn offset_faces(body: &Body, distances: &[f64]) -> Result<Body> {
     if distances.iter().any(|d| !d.is_finite() || d.abs() > MAX_COORD) {
         return Err(refuse("an offset distance must be a sensible number".to_string()));
     }
-    let surfaces = body
-        .faces
-        .iter()
-        .zip(distances)
-        .enumerate()
-        .map(|(i, (f, d))| {
-            let reach = if matches!(f.surface, Surface::Extruded { .. } | Surface::Revolved { .. }) { boundary_samples(body, i) } else { Vec::new() };
-            moved_surface(&f.surface, if f.flipped { -*d } else { *d }, &reach)
-        })
-        .collect::<Result<Vec<Surface>>>()?;
-    let uses = body.edge_uses();
-    let map = |e: usize, p: Vec3| -> Result<Vec3> {
-        let (f, g) = (uses[e][0].0, uses[e][1].0);
-        if (distances[f] - distances[g]).abs() > TOL {
-            return Err(refuse("two faces that meet smoothly can't move by different distances".to_string()));
-        }
-        Ok(p + body.faces[f].outward_normal(p) * distances[f])
-    };
-    with_surfaces(body, &surfaces, &map)
+    // Moving out closes up what's concave, and moving in closes up what's convex.
+    let closes = |f: usize, convex: bool| convex == (distances[f] < 0.0);
+    surviving(
+        body,
+        &mut |current: &Body, from: &[usize]| {
+            let distance = |f: usize| distances[from[f]];
+            let mut surfaces = Vec::with_capacity(current.faces.len());
+            let (mut gone, mut first) = (Vec::new(), None);
+            for (i, f) in current.faces.iter().enumerate() {
+                let d = distance(i);
+                let reach = if matches!(f.surface, Surface::Extruded { .. } | Surface::Revolved { .. }) { boundary_samples(current, i) } else { Vec::new() };
+                match moved_surface(&f.surface, if f.flipped { -d } else { d }, &reach) {
+                    Ok(s) => surfaces.push(s),
+                    Err(why) => {
+                        gone.push(i);
+                        first.get_or_insert(why);
+                        surfaces.push(f.surface.clone());
+                    }
+                }
+            }
+            if let Some(why) = first {
+                return Err(Stuck { why, faces: gone, edges: Vec::new() });
+            }
+            let uses = current.edge_uses();
+            let map = |e: usize, p: Vec3| -> Result<Vec3> {
+                let (f, g) = (uses[e][0].0, uses[e][1].0);
+                if (distance(f) - distance(g)).abs() > TOL {
+                    return Err(refuse("two faces that meet smoothly can't move by different distances".to_string()));
+                }
+                Ok(p + current.faces[f].outward_normal(p) * distance(f))
+            };
+            let done = with_surfaces(current, &surfaces, &map)?;
+            walls_clear(current, &done, &distance)?;
+            meshes_closed(&done)?;
+            Ok(done)
+        },
+        &closes,
+        &|result: &Body, f: usize, points: &[Vec3]| redundant(result, distances[f], points),
+    )
 }
 
 /// Moves every face outward by `distance`, or inward if negative.
@@ -664,14 +954,85 @@ pub fn draft(body: &Body, faces: &[usize], pull: Vec3, neutral: Vec3, angle: f64
         return Err(refuse(format!("a draft of {:.3} degrees is out of range", angle.to_degrees())));
     }
     let pull = pull.normalized();
-    let mut surfaces: Vec<Surface> = body.faces.iter().map(|f| f.surface.clone()).collect();
     for &i in faces {
-        let face = body.faces.get(i).ok_or_else(|| refuse(format!("there is no face {i}")))?;
+        if i >= body.faces.len() {
+            return Err(refuse(format!("there is no face {i}")));
+        }
+    }
+    // A fillet touching a drafted face smoothly can't stay as it is, as its radius would have to change along it. So it
+    // comes off, the draft goes ahead, and it goes back on at the same radius between the same two faces.
+    let uses = body.edge_uses();
+    let mut in_the_way: Vec<usize> = Vec::new();
+    for &f in faces {
+        for c in body.faces[f].loops.iter().flatten() {
+            let [a, b] = uses[c.edge].as_slice() else { continue };
+            let other = if a.0 == f { b.0 } else { a.0 };
+            let g = &body.faces[other];
+            if faces.contains(&other) || g.origin.between.len() != 2 || blend_radius(&g.surface).is_none() || edge_kind(body, &uses, c.edge).is_some() {
+                continue;
+            }
+            // All of that blend.
+            for (h, face) in body.faces.iter().enumerate() {
+                if face.tag.feature == g.tag.feature && !faces.contains(&h) && !in_the_way.contains(&h) && blend_radius(&face.surface).is_some() {
+                    in_the_way.push(h);
+                }
+            }
+        }
+    }
+    if in_the_way.is_empty() {
+        let from: Vec<usize> = (0..body.faces.len()).collect();
+        return draft_once(body, &from, faces, pull, neutral, angle).map_err(|stuck| stuck.why);
+    }
+    let blends: Vec<(u32, f64, Vec<FaceTag>)> = in_the_way.iter().map(|&h| (body.faces[h].tag.feature, blend_radius(&body.faces[h].surface).unwrap_or(0.0), body.faces[h].origin.between.clone())).collect();
+    let (bare, from) = delete_faces_mapped(body, &in_the_way)?;
+    let drafted = draft_once(&bare, &from, faces, pull, neutral, angle).map_err(|stuck| stuck.why)?;
+    let mut done = drafted;
+    let mut todo = blends;
+    todo.sort_by(|x, y| (x.0, x.1).partial_cmp(&(y.0, y.1)).unwrap_or(std::cmp::Ordering::Equal));
+    let mut k = 0;
+    while k < todo.len() {
+        let (feature, radius) = (todo[k].0, todo[k].1);
+        let uses = done.edge_uses();
+        let pairs: Vec<&Vec<FaceTag>> = todo.iter().filter(|t| t.0 == feature && (t.1 - radius).abs() < 1e-9 && t.2.len() == 2).map(|t| &t.2).collect();
+        let edges: Vec<usize> = (0..done.edges.len())
+            .filter(|&e| {
+                let [a, b] = uses[e].as_slice() else { return false };
+                let (x, y) = (done.faces[a.0].tag, done.faces[b.0].tag);
+                pairs.iter().any(|p| (p[0] == x && p[1] == y) || (p[0] == y && p[1] == x))
+            })
+            .collect();
+        if !edges.is_empty() {
+            done = crate::blend::fillet_with(&done, &edges, radius, crate::blend::BlendOptions { propagate: false }, feature)?;
+        }
+        while k < todo.len() && todo[k].0 == feature && (todo[k].1 - radius).abs() < 1e-9 {
+            k += 1;
+        }
+    }
+    Ok(done)
+}
+
+/// A blend's radius, if this is a surface a fillet makes with one.
+fn blend_radius(s: &Surface) -> Option<f64> {
+    match *s {
+        Surface::Cylinder { radius, .. } | Surface::Sphere { radius, .. } => Some(radius),
+        Surface::Torus { minor, .. } => Some(minor),
+        _ => None,
+    }
+}
+
+/// One try at a draft, with `from` saying which face each of these started as.
+fn draft_once(body: &Body, from: &[usize], faces: &[usize], pull: Vec3, neutral: Vec3, angle: f64) -> std::result::Result<Body, Stuck> {
+    let drafted: Vec<bool> = from.iter().map(|f| faces.contains(f)).collect();
+    let mut surfaces: Vec<Surface> = body.faces.iter().map(|f| f.surface.clone()).collect();
+    for (i, face) in body.faces.iter().enumerate() {
+        if !drafted[i] {
+            continue;
+        }
         surfaces[i] = match face.surface {
             Surface::Plane(frame) => {
                 let out = if face.flipped { -frame.z } else { frame.z };
                 if out.dot(pull).abs() > 1e-9 {
-                    return Err(refuse("a planar face can only be drafted if it runs along the pull direction".to_string()));
+                    return Err(refuse("a planar face can only be drafted if it runs along the pull direction".to_string()).into());
                 }
                 // On the neutral plane the face stays put: it turns about the line it meets that plane in.
                 let on_neutral = frame.origin - pull * (frame.origin - neutral).dot(pull);
@@ -683,7 +1044,7 @@ pub fn draft(body: &Body, faces: &[usize], pull: Vec3, neutral: Vec3, angle: f64
             }
             Surface::Cylinder { frame, radius } => {
                 if frame.z.cross(pull).norm() > 1e-9 {
-                    return Err(refuse("a cylindrical face can only be drafted along its axis".to_string()));
+                    return Err(refuse("a cylindrical face can only be drafted along its axis".to_string()).into());
                 }
                 let origin = frame.origin + frame.z * (neutral - frame.origin).dot(frame.z);
                 // A cone widens along its z, so a part's wall narrowing along the pull has z against it.
@@ -691,7 +1052,7 @@ pub fn draft(body: &Body, faces: &[usize], pull: Vec3, neutral: Vec3, angle: f64
                 let half_angle = angle.abs();
                 Surface::Cone { frame: Frame::new(origin, z, frame.x), radius, half_angle }
             }
-            _ => return Err(Error::Unsupported("only planes and cylinders can be drafted".into())),
+            _ => return Err(Error::Unsupported("only planes and cylinders can be drafted".into()).into()),
         };
     }
     // A smooth edge between drafted faces is a straight ruling. It keeps its point on the neutral plane and
@@ -699,7 +1060,7 @@ pub fn draft(body: &Body, faces: &[usize], pull: Vec3, neutral: Vec3, angle: f64
     let uses = body.edge_uses();
     let map = |e: usize, p: Vec3| -> Result<Vec3> {
         let (f, g) = (uses[e][0].0, uses[e][1].0);
-        let (fd, gd) = (faces.contains(&f), faces.contains(&g));
+        let (fd, gd) = (drafted[f], drafted[g]);
         if fd != gd {
             return Err(refuse("a face can't be drafted while a face it meets smoothly isn't: select them both".to_string()));
         }
@@ -713,7 +1074,9 @@ pub fn draft(body: &Body, faces: &[usize], pull: Vec3, neutral: Vec3, angle: f64
         let along = (p - neutral).dot(pull);
         Ok(p - out * (along * angle.tan()))
     };
-    with_surfaces(body, &surfaces, &map)
+    let done = with_surfaces(body, &surfaces, &map)?;
+    meshes_closed(&done)?;
+    Ok(done)
 }
 
 #[cfg(test)]

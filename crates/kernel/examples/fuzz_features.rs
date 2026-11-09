@@ -2,7 +2,7 @@
 //! feature added gives the part before it, a helix's volume has a closed form, and a thick layer's mesh has to agree with
 //! its exact volume. A refusal isn't a failure, and gets counted. A wrong answer is.
 //!
-//! `cargo run --release --example fuzz_features -- <count> [delete|helix|thicken]`, or `-- one <kind> <seed>` to look at one.
+//! `cargo run --release --example fuzz_features -- <count> [delete|helix|thicken|offset]`, or `-- one <kind> <seed>` to look at one.
 
 use coreshape::boolean::{subtract, union};
 use coreshape::profile::{Profile, Wire};
@@ -227,6 +227,93 @@ fn thicken_case(seed: u64) -> Outcome {
     Outcome::Ok
 }
 
+/// Offset, on parts with features small enough to vanish. Whatever gave way, a point closer to the part than the distance
+/// has to be in the result of moving out, and every point in the result of moving in has to be at least that far inside.
+fn offset_case(seed: u64) -> Outcome {
+    use coreshape::boolean::classify::{BodyLoc, Index};
+    let mut rng = Rng::new(seed);
+    let Ok((b, w, d, h)) = base(&mut rng) else { return Outcome::Skipped };
+    let Ok(part) = feature(&b, w, d, h, &mut rng) else { return Outcome::Skipped };
+    let distance = rng.range(0.3, (w.min(d).min(h)) * 0.35) * if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
+    let moved = match offset(&part, distance) {
+        Ok(x) => x,
+        Err(e) => return Outcome::Refused(e.to_string()),
+    };
+    if let Err(why) = validate(&moved) {
+        return Outcome::Wrong(format!("invalid: {}", why.join("; ")));
+    }
+    let mesh_of_moved = match tessellate(&moved, &TessParams::for_size(moved.aabb().diagonal())) {
+        Ok(m) => m,
+        Err(e) => return Outcome::Wrong(format!("doesn't mesh: {e}")),
+    };
+    if mesh_of_moved.open_edge_count() > 0 {
+        return Outcome::Wrong("mesh isn't closed".into());
+    }
+    let m = mass_properties(&moved);
+    if !(m.volume > 0.0) || (mesh_of_moved.volume() - m.volume).abs() > 0.02 * m.volume {
+        return Outcome::Wrong(format!("mesh {} against {}", mesh_of_moved.volume(), m.volume));
+    }
+    // The distance from a point to the part's own surface, by its mesh, which is good to the mesh's own chord.
+    let mesh = match tessellate(&part, &TessParams::for_size(part.aabb().diagonal())) {
+        Ok(m) => m,
+        Err(e) => return Outcome::Wrong(format!("the part doesn't mesh: {e}")),
+    };
+    let to_surface = |p: Vec3| -> f64 {
+        mesh.triangles.iter().map(|t| triangle_distance(p, mesh.positions[t[0] as usize], mesh.positions[t[1] as usize], mesh.positions[t[2] as usize])).fold(f64::INFINITY, f64::min)
+    };
+    let (of_part, of_moved) = (Index::new(&part), Index::new(&moved));
+    let bounds = part.aabb().inflated(distance.abs() * 1.2);
+    let slack = 2e-3 * part.aabb().diagonal();
+    for _ in 0..120 {
+        let p = v3(rng.range(bounds.min.x, bounds.max.x), rng.range(bounds.min.y, bounds.max.y), rng.range(bounds.min.z, bounds.max.z));
+        let (in_part, in_moved) = (of_part.locate_in_body(p), of_moved.locate_in_body(p));
+        if distance > 0.0 {
+            // Moving out: anything in the part, or closer to it than the distance, has to be in the result.
+            if in_moved == BodyLoc::Outside && (in_part != BodyLoc::Outside || to_surface(p) < distance - slack) {
+                return Outcome::Wrong(format!("{p:?} is {} from the part and left out, moving out by {distance}", to_surface(p)));
+            }
+        } else if in_moved == BodyLoc::Inside {
+            // Moving in: anything in the result has to be in the part, and at least the distance inside it.
+            if in_part != BodyLoc::Inside || to_surface(p) < -distance - slack {
+                return Outcome::Wrong(format!("{p:?} is in the result, but {} from the part's surface, moving in by {distance}", to_surface(p)));
+            }
+        }
+    }
+    Outcome::Ok
+}
+
+fn triangle_distance(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f64 {
+    let (ab, ac, ap) = (b - a, c - a, p - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return ap.norm();
+    }
+    let bp = p - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return bp.norm();
+    }
+    let cp = p - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return cp.norm();
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return (ap - ab * (d1 / (d1 - d3))).norm();
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return (ap - ac * (d2 / (d2 - d6))).norm();
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return (bp - (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)))).norm();
+    }
+    let denom = 1.0 / (va + vb + vc);
+    (ap - ab * (vb * denom) - ac * (vc * denom)).norm()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("one") {
@@ -234,6 +321,7 @@ fn main() {
         let out = match args[2].as_str() {
             "delete" => delete_case(seed),
             "helix" => helix_case(seed),
+            "offset" => offset_case(seed),
             _ => thicken_case(seed),
         };
         match out {
@@ -246,7 +334,7 @@ fn main() {
     }
     let count: u64 = args.get(1).and_then(|c| c.parse().ok()).unwrap_or(200);
     let only = args.get(2).cloned();
-    let kinds: Vec<(&str, fn(u64) -> Outcome)> = vec![("delete", delete_case), ("helix", helix_case), ("thicken", thicken_case)];
+    let kinds: Vec<(&str, fn(u64) -> Outcome)> = vec![("delete", delete_case), ("helix", helix_case), ("thicken", thicken_case), ("offset", offset_case)];
     for (name, case) in kinds {
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
@@ -260,7 +348,8 @@ fn main() {
                 Outcome::Skipped => skipped += 1,
                 Outcome::Refused(r) => {
                     refused += 1;
-                    let short: String = r.chars().take(70).collect();
+                    // Without what differs from one to the next.
+                    let short: String = r.split(" near (").next().unwrap_or(&r).chars().take(70).collect();
                     why.entry(short).or_insert((0, seed)).0 += 1;
                 }
                 Outcome::Wrong(r) => {

@@ -85,8 +85,10 @@ fn a_filleted_box_keeps_its_smooth_edges() {
     let inn = offset(&round, -1.0).unwrap();
     close(vol(&inn), rounded(18.0, r - 1.0), 1e-6, "shrunk");
     closed(&inn);
-    // Going in further than the radius would make the rounds vanish.
-    assert!(offset(&round, -3.5).is_err());
+    // Going in further than the radius, the rounds vanish, and what's left is a plain box.
+    let past = offset(&round, -3.5).unwrap();
+    close(vol(&past), 13.0 * 13.0 * 13.0, 1e-6, "past the rounds");
+    closed(&past);
 }
 
 #[test]
@@ -131,7 +133,11 @@ fn too_big_an_offset_is_refused() {
     let s = sphere(&Frame::WORLD, 10.0, 1).unwrap();
     assert!(offset(&s, -11.0).is_err());
     let plate = extrude(&Profile::new(Wire::rect(0.0, 0.0, 40.0, 40.0)).with_hole(Wire::circle(v2(20.0, 20.0), 3.0)), &Frame::WORLD, 10.0, 1).unwrap();
-    assert!(offset(&plate, 3.5).is_err(), "the hole would close");
+    // The hole closes, which is what moving out by more than its radius does.
+    let past = offset(&plate, 3.5).unwrap();
+    assert_eq!(past.faces.len(), 6);
+    let plain = extrude(&Profile::new(Wire::rect(0.0, 0.0, 40.0, 40.0)), &Frame::WORLD, 10.0, 1).unwrap();
+    close(vol(&past), vol(&offset(&plain, 3.5).unwrap()), 1e-9, "the hole closed");
 }
 
 // ----- Shell -----
