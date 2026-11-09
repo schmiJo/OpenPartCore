@@ -375,3 +375,40 @@ fn a_ray_just_grazing_a_face_is_found_however_the_search_splits() {
         assert!((found[0] - 2.850349337770839).abs() < 1e-9, "up to {end}: {found:?}");
     }
 }
+
+#[test]
+fn a_ray_solved_for_agrees_with_one_traced() {
+    // Two ways to the same crossings: solving two polynomials, and following the distance along the ray. Random rays through
+    // free-form faces, with a few aimed along the surface to make the solver say it can't tell.
+    use coreshape::boolean::roots::{curve_surface_contact, Contact};
+    let (a, _, _) = fuzz::make_pair(fuzz::Category::Lofts, 7);
+    let a = a.unwrap();
+    let mut rng = Rng::new(11);
+    let (mut compared, mut unsure) = (0, 0);
+    for face in a.faces.iter() {
+        let Surface::Free { frame, patch } = &face.surface else { continue };
+        let ((u0, u1), (v0, v1)) = patch.domain();
+        for _ in 0..200 {
+            // Toward a point of the surface, so that it has something to find.
+            let q = frame.to_world(patch.eval(rng.range(u0, u1), rng.range(v0, v1)));
+            let from = q + rng.unit_vector() * rng.range(1.0, 15.0);
+            let d = (q - from).normalized();
+            let local = v3(d.dot(frame.x), d.dot(frame.y), d.dot(frame.z));
+            let Some(solved) = patch.ray_crossings(frame.to_local(from), local, 60.0) else {
+                unsure += 1;
+                continue;
+            };
+            let ray = Curve::Line { origin: from, dir: d };
+            let Contact::Roots(traced) = curve_surface_contact(&ray, 0.0, 60.0, &face.surface, 0.0) else { continue };
+            // What's traced also finds crossings past the patch's end, on its tangent planes, which aren't part of it.
+            let on_it: Vec<f64> = traced.into_iter().filter(|t| !patch.foot(frame.to_local(from + d * *t)).boundary).collect();
+            assert!(solved.iter().any(|t| (from + d * *t).dist(q) < 1e-6), "the crossing it was aimed at wasn't found: {solved:?}");
+            for t in &on_it {
+                assert!(solved.iter().any(|s| (s - t).abs() < 1e-6), "traced {t} isn't in {solved:?}");
+            }
+            compared += 1;
+        }
+    }
+    assert!(compared > 500, "{compared} compared, {unsure} unsure");
+    assert!(unsure * 20 < compared, "{compared} compared, {unsure} unsure");
+}

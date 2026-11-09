@@ -134,20 +134,77 @@ fn a_round_rim_and_a_free_form_rim() {
 }
 
 #[test]
-fn walls_that_would_cross_are_refused_and_say_where() {
-    // A thin wall between a pocket and the outside: moving in by more than half of it would split the part.
+fn a_thin_wall_moving_in_opens_the_pocket_through_it() {
+    // A pocket 1 from the side: moving in by 2 passes the wall's other face, so the pocket comes out through the side.
     let b = block(40.0, 30.0, 20.0);
     let pocket = subtract(&b, &box_solid(&at(1.0, 5.0, 5.0), 10.0, 20.0, 20.0, TOOL).unwrap()).unwrap();
-    let why = offset(&pocket, -2.0).unwrap_err().to_string();
-    assert!(why.contains("walls cross near"), "{why}");
-    // Two bosses that would grow into each other.
+    let moved = offset(&pocket, -2.0).unwrap();
+    // The block moved in spans x 2 to 38, y 2 to 28 and z 2 to 18. The pocket moved out spans x to 13, y 3 to 27 and z from 3.
+    close(volume(&moved), 36.0 * 26.0 * 16.0 - 11.0 * 24.0 * 15.0, "opened through the wall");
+    // What's left keeps the names of what it came from, and nothing new gets named.
+    for f in &moved.faces {
+        assert!(pocket.faces.iter().any(|g| g.tag == f.tag), "{:?} isn't a name from the part", f.tag);
+    }
+    assert!(moved.faces.iter().any(|f| f.tag.feature == TOOL), "the pocket's faces keep the pocket's names");
+}
+
+#[test]
+fn a_thin_wall_between_two_pockets_goes() {
+    let b = block(60.0, 30.0, 20.0);
+    let one = subtract(&b, &box_solid(&at(10.0, 5.0, 5.0), 10.0, 20.0, 20.0, TOOL).unwrap()).unwrap();
+    let two = subtract(&one, &box_solid(&at(21.0, 5.0, 5.0), 10.0, 20.0, 20.0, 3).unwrap()).unwrap();
+    let moved = offset(&two, -2.0).unwrap();
+    // Both pockets, out by 2, make one from x 8 to 33, y 3 to 27 and z 3 up, in the block moved in.
+    close(volume(&moved), 56.0 * 26.0 * 16.0 - 25.0 * 24.0 * 15.0, "one cavity");
+}
+
+#[test]
+fn two_bosses_growing_together_join() {
+    let b = block(40.0, 30.0, 20.0);
     let one = union(&b, &box_solid(&at(5.0, 5.0, 15.0), 4.0, 4.0, 15.0, TOOL).unwrap()).unwrap();
     let two = union(&one, &box_solid(&at(11.0, 5.0, 15.0), 4.0, 4.0, 15.0, 3).unwrap()).unwrap();
-    let why = offset(&two, 2.0).unwrap_err().to_string();
-    assert!(why.contains("walls cross near"), "{why}");
-    // And a shell whose cavity would come through a thin neck says the same, or that it doesn't fit.
-    let why = shell(&pocket, &[], 2.0, 5).unwrap_err().to_string();
-    assert!(why.contains("walls cross near") || why.contains("don't fit"), "{why}");
+    let moved = offset(&two, 2.0).unwrap();
+    // The block out by 2, and above its new top at 22, one piece x 3 to 17, y 3 to 11, up to 32.
+    close(volume(&moved), 44.0 * 34.0 * 24.0 + 14.0 * 8.0 * 10.0, "joined");
+}
+
+#[test]
+fn a_hole_near_an_edge_moving_in_breaks_through() {
+    let b = block(40.0, 30.0, 20.0);
+    let holed = subtract(&b, &cylinder(&at(3.0, 15.0, -1.0), 2.0, 22.0, TOOL).unwrap()).unwrap();
+    let moved = offset(&holed, -2.0).unwrap();
+    // Worked out another way: the block moved in, less a cylinder 2 wider.
+    let plain = box_solid(&at(2.0, 2.0, 2.0), 36.0, 26.0, 16.0, BASE).unwrap();
+    let want = subtract(&plain, &cylinder(&at(3.0, 15.0, -5.0), 4.0, 30.0, TOOL).unwrap()).unwrap();
+    close(volume(&moved), mass_properties(&want).volume, "broken through");
+}
+
+#[test]
+fn a_shell_of_a_part_with_a_thin_wall() {
+    let b = block(40.0, 30.0, 20.0);
+    let pocket = subtract(&b, &box_solid(&at(1.0, 5.0, 5.0), 10.0, 20.0, 20.0, TOOL).unwrap()).unwrap();
+    let whole = mass_properties(&pocket).volume;
+    let hollow = shell(&pocket, &[], 2.0, 5).unwrap();
+    close(volume(&hollow), whole - (36.0 * 26.0 * 16.0 - 11.0 * 24.0 * 15.0), "shell");
+}
+
+#[test]
+fn a_neck_with_no_feature_to_take_apart_is_refused_and_says_where() {
+    // A dumbbell in outline. Its neck isn't a pocket or a boss of anything, so nothing here can be taken apart, and moving
+    // in past half the neck's width would split the part.
+    let outline = profile::Wire::polygon(&[v2(0.0, 0.0), v2(20.0, 0.0), v2(20.0, 8.0), v2(40.0, 8.0), v2(40.0, 0.0), v2(60.0, 0.0), v2(60.0, 20.0), v2(40.0, 20.0), v2(40.0, 12.0), v2(20.0, 12.0), v2(20.0, 20.0), v2(0.0, 20.0)]);
+    let bell = extrude(&profile::Profile::new(outline), &Frame::WORLD, 30.0, BASE).unwrap();
+    let result = offset(&bell, -3.0);
+    match result {
+        Ok(moved) => {
+            // If it gets there another way, it has to be right: two pieces, each 14 by 14 by 24.
+            close(volume(&moved), 2.0 * 14.0 * 14.0 * 24.0, "split in two");
+        }
+        Err(why) => {
+            let why = why.to_string();
+            assert!(why.contains("walls cross near") || why.contains("turns round") || why.contains("mesh"), "{why}");
+        }
+    }
 }
 
 #[test]
@@ -164,9 +221,9 @@ fn a_shell_of_a_part_with_small_features() {
 }
 
 #[test]
-fn a_face_that_only_partly_gives_way_is_refused_not_deleted() {
+fn a_face_that_only_partly_gives_way_stays_where_it_still_cuts() {
     // A chamfer that tapers: wide at one end of the edge and narrow at the other. Moving in uses up its narrow end, and its
-    // wide end should still be there. Deleting it would be the wrong answer, with nothing else to show for it.
+    // wide end should still be there. Just deleting it would be the wrong answer, with nothing else to show for it.
     let b = block(40.0, 30.0, 20.0);
     let (p1, p2, p3) = (v3(-1.0, 0.0, 16.8), v3(-1.0, 3.2, 20.0), v3(41.0, 0.45, 20.0));
     let n = (p2 - p1).cross(p3 - p1).normalized();
@@ -175,15 +232,14 @@ fn a_face_that_only_partly_gives_way_is_refused_not_deleted() {
     let tool = box_solid(&Frame { origin: frame.origin - frame.x * 10.0 - frame.y * 100.0, ..frame }, 100.0, 200.0, 50.0, TOOL).unwrap();
     let tapered = subtract(&b, &tool).unwrap();
     assert_eq!(tapered.faces.len(), 7);
-    let result = offset(&tapered, -1.2);
-    if let Ok(moved) = &result {
-        // If it's built at all, it has to keep the chamfer, as the plain box's corner would stick out past it.
-        let plain = 37.6 * 27.6 * 17.6;
-        assert!(mass_properties(moved).volume < plain - 1e-3, "the chamfer went: {}", mass_properties(moved).volume);
-    } else {
-        let why = result.err().unwrap().to_string();
-        assert!(why.contains("partly gives way") || why.contains("turns round"), "{why}");
-    }
+    let moved = offset(&tapered, -1.2).unwrap();
+    // The right answer, worked out with no offset at all: the box moved in, less what's past the plane moved in.
+    let plain = box_solid(&at(1.2, 1.2, 1.2), 37.6, 27.6, 17.6, BASE).unwrap();
+    let inward = frame.origin - frame.z * 1.2;
+    let further = box_solid(&Frame { origin: inward - frame.x * 10.0 - frame.y * 100.0, ..frame }, 100.0, 200.0, 50.0, TOOL).unwrap();
+    let want = subtract(&plain, &further).unwrap();
+    close(volume(&moved), mass_properties(&want).volume, "a tapered chamfer that only partly gives way");
+    assert!(mass_properties(&want).volume < 37.6 * 27.6 * 17.6 - 1e-3, "the chamfer still cuts it");
     // Further in, past all of it, it's redundant, and the plain box comes out.
     close(volume(&offset(&tapered, -6.0).unwrap()), 28.0 * 18.0 * 8.0, "past the whole chamfer");
 }

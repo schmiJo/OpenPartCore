@@ -525,7 +525,8 @@ mod tests {
         let mut rng = coreshape::Rng::new(78);
         let (mut compared, mut kept, mut lost, mut moved) = (0usize, 0usize, Vec::new(), Vec::new());
         for m in models::catalog() {
-            if m.id == "crossed" {
+            // The crossing walls demo is left out as well: faces going away as a slider moves is its whole point.
+            if m.id == "crossed" || m.id == "walls" {
                 continue;
             }
             // The slowest ones get fewer tries, as this is the same check on each.
@@ -578,5 +579,39 @@ mod tests {
             eprintln!("  {line}");
         }
         assert!(moved.is_empty() && lost.is_empty(), "{} lost, {} moved", lost.len(), moved.len());
+    }
+}
+
+#[cfg(test)]
+mod crossing_walls_demo {
+    use crate::models;
+    use coreshape_document::Document;
+
+    /// The demo's whole point: as the slider moves, a wall gives way, and the volume keeps matching what's worked out by hand.
+    #[test]
+    fn the_walls_give_way_and_the_volume_is_right() {
+        let m = models::catalog().iter().find(|m| m.id == "walls").unwrap();
+        let mut doc = Document::new();
+        for p in m.params {
+            doc.set_parameter(p.key, p.default).unwrap();
+        }
+        (m.build)(&mut doc, 0);
+        // Pockets 12 by 18, the first from the side wall at 2, then a wall of 2, floors at 5, in a block 60 by 30 by 20.
+        let want = |d: f64| {
+            let (x0, x1) = (d, 60.0 - d);
+            let (a0, a1, b0, b1) = ((2.0 - d).max(x0), 14.0 + d, 16.0 - d, 28.0 + d);
+            let cut = if a1 >= b0 { b1 - a0 } else { (a1 - a0) + (b1 - b0) };
+            // Moving in takes the top down and a pocket's floor down too, by the same amount, so a pocket stays 15 deep,
+            // until its floor passes the bottom coming up.
+            let deep = (20.0 - d) - (5.0 - d).max(d);
+            (x1 - x0) * (30.0 - 2.0 * d) * (20.0 - 2.0 * d) - cut * (18.0 + 2.0 * d) * deep
+        };
+        for d in [0.5, 0.75, 1.25, 1.5, 2.5, 3.0] {
+            doc.set_parameter("inward", d).unwrap();
+            let o = doc.rebuild(None);
+            assert_eq!(o.failed, None, "moved in by {d}: {:?}", o.steps);
+            let v = coreshape::mass_properties(o.body.as_ref().unwrap()).volume;
+            assert!((v - want(d)).abs() < 1e-6 * want(d), "moved in by {d}: {v} against {}", want(d));
+        }
     }
 }

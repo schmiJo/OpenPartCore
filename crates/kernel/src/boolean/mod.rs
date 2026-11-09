@@ -30,7 +30,7 @@ use crate::surface::{Chart, Surface};
 use crate::topo::{Body, Coedge, Edge, Face, FaceOrigin, FaceTag};
 use crate::validate::validate;
 use classify::{BodyLoc, FaceLoc, Index};
-use roots::{curve_surface_contact, Contact};
+use roots::Contact;
 use ssi::{Ssi, SsiCurve};
 use crate::hash::{HashMap, HashSet};
 use trace::{interior_points, trace_faces, FaceChart};
@@ -177,7 +177,7 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
                     continue;
                 }
                 let surf = &bodies[other].faces[g].surface;
-                let Contact::Roots(found) = curve_surface_contact(&e.curve, e.t0, e.t1, surf, TOL) else {
+                let Contact::Roots(found) = index[other].edge_meets_face(g, &e.curve, e.t0, e.t1, TOL) else {
                     continue;
                 };
                 for t in found {
@@ -206,7 +206,7 @@ pub fn boolean_with(a: &Body, b: &Body, op: BoolOp, checks: Checks) -> Result<Bo
         let p = arr.vertices[v];
         for s in 0..2 {
             for (i, e) in bodies[s].edges.iter().enumerate() {
-                if index[s].edge_boxes[i].inflated(2.0 * MERGE).contains(p) {
+                if index[s].edge_boxes[i].inflated(2.0 * MERGE).contains(p) && e.curve.could_be_within(p, e.t0, e.t1, MERGE) {
                     let (t, d) = e.curve.closest(p, e.t0, e.t1);
                     if d <= MERGE {
                         splits[s][i].push((t, v));
@@ -555,6 +555,9 @@ fn intersect_faces(
     for sc in &curves {
         let mut on_curve: Vec<(f64, usize)> = Vec::new();
         for &v in &candidates {
+            if !sc.curve.could_be_within(arr.vertices[v], sc.t0, sc.t1, 3.0 * MERGE) {
+                continue;
+            }
             let (t, d) = sc.curve.closest(arr.vertices[v], sc.t0, sc.t1);
             if d <= 3.0 * MERGE {
                 on_curve.push((t, v));
@@ -681,6 +684,9 @@ fn sampled_pieces(
                 continue;
             }
             clean.push(*p);
+        }
+        if clean.len() < 2 {
+            return Err(Error::NearDegenerate("two points along an intersection are too close together to tell apart".into()));
         }
         if clean.len() == 2 {
             let m = crate::surface::refine_on_two(&fa.surface, &fb.surface, clean[0].lerp(clean[1], 0.5))

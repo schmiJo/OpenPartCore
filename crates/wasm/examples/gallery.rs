@@ -98,6 +98,18 @@ fn helix_extras() -> Vec<(&'static str, Result<Body>)> {
     let plate_faces: Vec<usize> = (0..plate.faces.len()).filter(|&f| plate.faces[f].tag.feature == 2).collect();
     let round_edges = fillet(&block, &(0..block.edges.len()).collect::<Vec<_>>(), 2.0, 2).unwrap();
     let round_faces: Vec<usize> = (0..round_edges.faces.len()).filter(|&f| round_edges.faces[f].tag.feature == 2).collect();
+    let thin = subtract(&block, &box_solid(&Frame::translation(v3(1.0, 5.0, 5.0)), 10.0, 10.0, 20.0, 2).unwrap()).unwrap();
+    let bosses = {
+        let one = union(&block, &box_solid(&Frame::translation(v3(5.0, 5.0, 5.0)), 4.0, 4.0, 15.0, 2).unwrap()).unwrap();
+        union(&one, &box_solid(&Frame::translation(v3(11.0, 5.0, 5.0)), 4.0, 4.0, 15.0, 3).unwrap()).unwrap()
+    };
+    let tapered = {
+        let (p1, p2, p3) = (v3(-1.0, 0.0, 6.8), v3(-1.0, 3.2, 10.0), v3(31.0, 0.45, 10.0));
+        let n = (p2 - p1).cross(p3 - p1).normalized();
+        let out = if n.dot(v3(0.0, -1.0, 1.0)) > 0.0 { n } else { -n };
+        let frame = Frame::new(p1, out, (p3 - p1).normalized());
+        subtract(&block, &box_solid(&Frame { origin: frame.origin - frame.x * 10.0 - frame.y * 100.0, ..frame }, 100.0, 200.0, 50.0, 2).unwrap()).unwrap()
+    };
     let lean = {
         let f = Frame::rotation(v3(0.0, 0.0, 25.0), Vec3::X, 0.5).compose(&Frame::translation(v3(-50.0, -50.0, 25.0)));
         subtract(&cylinder(&Frame::WORLD, 10.0, 40.0, 1).unwrap(), &box_solid(&f, 100.0, 100.0, 50.0, 2).unwrap()).unwrap()
@@ -121,6 +133,11 @@ fn helix_extras() -> Vec<(&'static str, Result<Body>)> {
         ("vase_offset", offset(&v, 0.5)),
         ("vase_offset_in", offset(&v, -0.5)),
         ("vase_hollow", shell(&v, &[], 0.5, 5)),
+        ("offset_thin_wall", offset(&thin, -2.0)),
+        ("shell_thin_wall", shell(&thin, &[], 2.0, 5)),
+        ("offset_bosses_join", offset(&bosses, 2.0)),
+        ("offset_tapered_chamfer", offset(&tapered, -1.2)),
+        ("shell_past_rounding", shell(&round_edges, &[], 3.0, 5)),
         ("healed_slot", delete_faces(&plate, &plate_faces)),
         ("healed_rounding", delete_faces(&round_edges, &round_faces)),
     ]

@@ -557,6 +557,30 @@ impl BezierCell {
     }
 
     /// A stationary point of the distance, by Newton's method, in the cell's own parameters.
+    /// Where two planes through `p`, with normals `e1` and `e2`, meet on this cell, by Newton's method from a start.
+    fn crossing(&self, p: Vec3, e1: Vec3, e2: Vec3, mut s: f64, mut t: f64) -> Option<(f64, f64)> {
+        for _ in 0..24 {
+            let (q, ds, dt) = self.first(s, t);
+            let r = q - p;
+            let (f1, f2) = (r.dot(e1), r.dot(e2));
+            let (a, b, c, d) = (ds.dot(e1), dt.dot(e1), ds.dot(e2), dt.dot(e2));
+            let det = a * d - b * c;
+            if det == 0.0 || !det.is_finite() {
+                return None;
+            }
+            let (x, y) = ((d * f1 - b * f2) / det, (a * f2 - c * f1) / det);
+            s -= x;
+            t -= y;
+            if !(-0.5..=1.5).contains(&s) || !(-0.5..=1.5).contains(&t) {
+                return None;
+            }
+            if x.abs() + y.abs() < 1e-14 {
+                return Some((s, t));
+            }
+        }
+        None
+    }
+
     /// Whether the distance to `p` is at a minimum here, rather than a saddle or a maximum.
     fn is_minimum(&self, s: f64, t: f64, p: Vec3) -> bool {
         let q = self.local(s, t);
@@ -1573,10 +1597,11 @@ impl Patch {
         self.cells.iter().any(|c| p.x >= c.lo.x - room && p.x <= c.hi.x + room && p.y >= c.lo.y - room && p.y <= c.hi.y + room && p.z >= c.lo.z - room && p.z <= c.hi.z + room)
     }
 
-    /// The stretch of a ray, in the patch's own coordinates, that passes through the boxes of its cells, if any does.
-    pub fn ray_span(&self, p: Vec3, d: Vec3, room: f64) -> Option<(f64, f64)> {
+    /// The stretches of a ray, in the patch's own coordinates, that pass through the boxes of its cells, in order and
+    /// apart. A long face's cells can leave most of a ray with nothing to search.
+    pub fn ray_spans(&self, p: Vec3, d: Vec3, room: f64) -> Vec<(f64, f64)> {
         let room = room + self.offset.abs();
-        let mut span: Option<(f64, f64)> = None;
+        let mut spans: Vec<(f64, f64)> = Vec::new();
         for c in &self.cells {
             let (mut enter, mut leave) = (f64::NEG_INFINITY, f64::INFINITY);
             let mut hit = true;
@@ -1593,10 +1618,107 @@ impl Patch {
                 }
             }
             if hit && enter <= leave {
-                span = Some(span.map_or((enter, leave), |s| (s.0.min(enter), s.1.max(leave))));
+                spans.push((enter, leave));
             }
         }
-        span
+        merged_spans(spans)
+    }
+
+    /// Where a ray from `p` along the unit vector `d`, in the patch's own coordinates, crosses this surface, by distance. It's
+    /// the same kind of problem as the closest point, and certified the same way: two planes through the ray meet the
+    /// surface where two polynomials vanish together, so a box with either one of one sign has no crossing, and a box whose
+    /// Jacobian is regular has at most one, which Newton finds. `None` means it can't tell here, as where a ray runs along the
+    /// surface or through a pole, and then a different ray will do. A moved surface isn't a polynomial, and also gets `None`.
+    pub fn ray_crossings(&self, p: Vec3, d: Vec3, reach: f64) -> Option<Vec<f64>> {
+        if self.offset != 0.0 {
+            return None;
+        }
+        const DEPTH: u32 = 22;
+        let e1 = d.any_perpendicular().normalized();
+        let e2 = d.cross(e1);
+        let mut found: Vec<f64> = Vec::new();
+        for cell in &self.cells {
+            // A quick look at the cell's box first.
+            let (mut enter, mut leave) = (0.0f64, reach);
+            let mut hit = true;
+            for (o, v, lo, hi) in [(p.x, d.x, cell.lo.x, cell.hi.x), (p.y, d.y, cell.lo.y, cell.hi.y), (p.z, d.z, cell.lo.z, cell.hi.z)] {
+                if v.abs() < 1e-300 {
+                    if o < lo - TOL || o > hi + TOL {
+                        hit = false;
+                        break;
+                    }
+                } else {
+                    let (a, b) = ((lo - TOL - o) / v, (hi + TOL - o) / v);
+                    enter = enter.max(a.min(b));
+                    leave = leave.min(a.max(b));
+                }
+            }
+            if !hit || enter > leave {
+                continue;
+            }
+            let shape = (cell.m + 1, cell.n + 1);
+            let grid = |e: Vec3| Grid { r: shape.0, c: shape.1, a: cell.h.iter().map(|q| (q.a - p * q.w).dot(e)).collect() };
+            let mut stack = vec![((0.0f64, 1.0f64), (0.0f64, 1.0f64), grid(e1), grid(e2), 0u32)];
+            while let Some(((s0, s1), (t0, t1), g1, g2, depth)) = stack.pop() {
+                if g1.one_sign() || g2.one_sign() {
+                    continue;
+                }
+                let slopes = Slopes::of(&g1, &g2);
+                if slopes.no_root(&g1, &g2) {
+                    continue;
+                }
+                if slopes.regular() {
+                    if let Some((s, t)) = cell.crossing(p, e1, e2, (s0 + s1) / 2.0, (t0 + t1) / 2.0) {
+                        // Past the box isn't this box's to report, as that's a neighbour's root, if it's anyone's.
+                        const EDGE: f64 = 1e-11;
+                        if s >= s0 - EDGE && s <= s1 + EDGE && t >= t0 - EDGE && t <= t1 + EDGE {
+                            let along = (cell.point(s, t) - p).dot(d);
+                            if along >= 0.0 && along <= reach {
+                                found.push(along);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                if depth >= DEPTH {
+                    return None;
+                }
+                let along_t = cell.speed.1 * (t1 - t0) > cell.speed.0 * (s1 - s0);
+                let ((a0, a1), (b0, b1)) = (g1.halves(along_t), g2.halves(along_t));
+                if along_t {
+                    let m = (t0 + t1) / 2.0;
+                    stack.push(((s0, s1), (t0, m), a0, b0, depth + 1));
+                    stack.push(((s0, s1), (m, t1), a1, b1, depth + 1));
+                } else {
+                    let m = (s0 + s1) / 2.0;
+                    stack.push(((s0, m), (t0, t1), a0, b0, depth + 1));
+                    stack.push(((m, s1), (t0, t1), a1, b1, depth + 1));
+                }
+            }
+        }
+        // A crossing right on a line between two boxes or cells gets reported from both.
+        found.sort_by(f64::total_cmp);
+        found.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        Some(found)
+    }
+
+    /// The stretches of a curve's range whose points could be in the box of one of this patch's cells, with this much room.
+    /// `at` gives a point of the curve in the patch's own coordinates, and `speed` bounds how fast it moves there.
+    pub fn curve_spans(&self, at: &dyn Fn(f64) -> Vec3, t0: f64, t1: f64, speed: f64, room: f64) -> Vec<(f64, f64)> {
+        const PIECES: usize = 48;
+        let room = room + self.offset.abs();
+        let step = (t1 - t0) / PIECES as f64;
+        let reach = speed * step / 2.0 + room;
+        let mut spans: Vec<(f64, f64)> = Vec::new();
+        for k in 0..PIECES {
+            let (a, b) = (t0 + step * k as f64, t0 + step * (k + 1) as f64);
+            let m = at((a + b) / 2.0);
+            let near = self.cells.iter().any(|c| box_distance(m, c.lo, c.hi) <= reach);
+            if near {
+                spans.push((a, b));
+            }
+        }
+        merged_spans(spans)
     }
 
     /// The chart position of these parameters.
@@ -1613,6 +1735,19 @@ impl Patch {
     pub fn chart_breaks_x(&self) -> Vec<f64> {
         self.breaks.0.iter().map(|u| u * self.scale.0).collect()
     }
+}
+
+/// Sorted, with any that touch or overlap made one.
+fn merged_spans(mut spans: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(spans.len());
+    for s in spans {
+        match out.last_mut() {
+            Some(last) if s.0 <= last.1 => last.1 = last.1.max(s.1),
+            _ => out.push(s),
+        }
+    }
+    out
 }
 
 fn consider(cell: &BezierCell, s: f64, t: f64, p: Vec3, best: &mut (f64, f64, f64)) -> f64 {

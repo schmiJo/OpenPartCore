@@ -199,6 +199,26 @@ impl<'a> Index<'a> {
     /// Locates a point relative to the whole body by casting rays. A ray is only
     /// trusted when it crosses faces cleanly. If it grazes a surface or hits an
     /// edge it is thrown away and another direction is tried.
+    /// Where a curve meets a face's surface, looking only where a free-form face's own boxes say that it could. A long face's
+    /// one bounding box says very little, and each distance on it costs a search.
+    pub(crate) fn edge_meets_face(&self, f: usize, curve: &Curve, t0: f64, t1: f64, tol: f64) -> Contact {
+        let surface = &self.body.faces[f].surface;
+        if let (Surface::Free { frame, patch }, true, false) = (surface, self.on_patch[f], matches!(curve, Curve::Sampled(_))) {
+            let spans = patch.curve_spans(&|t| frame.to_local(curve.eval(t)), t0, t1, curve.speed_bound(), tol + TOL * 4.0);
+            let mut found = Vec::new();
+            for (a, b) in spans {
+                match curve_surface_contact(curve, a, b, surface, tol) {
+                    Contact::Roots(list) => found.extend(list),
+                    // Lying on it is for the whole curve to say.
+                    Contact::OnSurface => return curve_surface_contact(curve, t0, t1, surface, tol),
+                }
+            }
+            found.sort_by(f64::total_cmp);
+            return Contact::Roots(found);
+        }
+        curve_surface_contact(curve, t0, t1, surface, tol)
+    }
+
     /// False if a free-form face's own boxes show that a point isn't on it, which is much quicker than finding out how far
     /// off it is. A long face's one bounding box is too big to rule out much.
     fn could_hold(&self, f: usize, p: Vec3) -> bool {
@@ -240,18 +260,27 @@ impl<'a> Index<'a> {
                 continue;
             }
             let surface = &self.body.faces[f].surface;
-            // Only where the ray goes through a free-form face's own boxes, if it does at all.
-            let span = match surface {
-                Surface::Free { frame, patch } if self.on_patch[f] => match patch.ray_span(frame.to_local(p), v3(d.dot(frame.x), d.dot(frame.y), d.dot(frame.z)), TOL * 4.0) {
-                    Some((a, b)) => (a.max(0.0), b.min(reach)),
-                    None => continue,
-                },
-                _ => (0.0, reach),
+            // A free-form face that stays on its patch has its crossings solved for. If they can't be told from here, as when
+            // a ray runs along it, a different ray will do. A moved one is traced, only where its cells' boxes say.
+            let hits: Vec<f64> = match surface {
+                Surface::Free { frame, patch } if self.on_patch[f] => {
+                    let local = v3(d.dot(frame.x), d.dot(frame.y), d.dot(frame.z));
+                    if patch.offset() == 0.0 {
+                        patch.ray_crossings(frame.to_local(p), local, reach)?
+                    } else {
+                        let mut found = Vec::new();
+                        for (a, b) in patch.ray_spans(frame.to_local(p), local, TOL * 4.0) {
+                            let (a, b) = (a.max(0.0), b.min(reach));
+                            if a <= b {
+                                found.extend(ray_surface_between(surface, p, d, (a, b)));
+                            }
+                        }
+                        found
+                    }
+                }
+                _ => ray_surface(surface, p, d, reach),
             };
-            if span.1 < span.0 {
-                continue;
-            }
-            for t in ray_surface_between(surface, p, d, span) {
+            for t in hits {
                 if t <= 0.0 {
                     continue;
                 }
@@ -295,16 +324,13 @@ fn ray_hits_box(p: Vec3, d: Vec3, b: &Aabb) -> bool {
 }
 
 /// Distances along a ray to a surface. Closed form where that is simple.
-/// Where a ray from `p` along `d` meets a surface, looking only between these distances when that's any use.
+/// Where a ray from `p` along `d` meets a free-form surface, looking only between these distances.
 fn ray_surface_between(s: &Surface, p: Vec3, d: Vec3, span: (f64, f64)) -> Vec<f64> {
-    if matches!(s, Surface::Free { .. }) {
-        let ray = Curve::Line { origin: p, dir: d };
-        return match curve_surface_contact(&ray, span.0, span.1, s, 0.0) {
-            Contact::Roots(list) => list,
-            Contact::OnSurface => Vec::new(),
-        };
+    let ray = Curve::Line { origin: p, dir: d };
+    match curve_surface_contact(&ray, span.0, span.1, s, 0.0) {
+        Contact::Roots(list) => list,
+        Contact::OnSurface => Vec::new(),
     }
-    ray_surface(s, p, d, span.1)
 }
 
 fn ray_surface(s: &Surface, p: Vec3, d: Vec3, reach: f64) -> Vec<f64> {

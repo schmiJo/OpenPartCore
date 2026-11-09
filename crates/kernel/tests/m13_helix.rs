@@ -187,3 +187,20 @@ fn a_helix_goes_through_a_step_file() {
     validate(&back[0]).unwrap();
     close(mass_properties(&back[0]).volume, mass_properties(&b).volume, 1e-9, "volume after a round trip");
 }
+
+#[test]
+fn a_thread_at_many_sizes_is_valid_or_refused_and_never_panics() {
+    // One of these once found two points along an intersection too close to tell apart, with nothing to catch it.
+    let upright_at = |z: f64| Frame { origin: v3(0.0, 0.0, z), ..upright() };
+    let mut built = 0;
+    for (radius, length, pitch, depth) in [(9.0, 23.0, 7.5, 1.0), (8.0, 23.0, 6.5, 1.5), (8.0, 25.0, 5.0, 1.0), (10.0, 40.0, 8.0, 2.0), (5.0, 15.0, 4.0, 0.5), (7.5, 17.0, 8.0, 1.0)] {
+        let shaft = cylinder(&Frame::WORLD, radius, length, 1).unwrap();
+        let groove = rect(radius - depth, radius + 1.0, 0.0, pitch * 0.5);
+        let tool = helix(&groove, &upright_at(-pitch * 1.5), &along_z(pitch, length / pitch + 2.0), 2).unwrap();
+        if let Ok(cut) = subtract(&shaft, &tool) {
+            validate(&cut).unwrap();
+            built += 1;
+        }
+    }
+    assert!(built >= 4, "only {built} of 6 built");
+}

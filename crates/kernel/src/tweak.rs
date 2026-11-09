@@ -6,9 +6,14 @@
 //!
 //! A change can be too big for a face to survive: a fillet smaller than the distance, a hole that closes, a chamfer that
 //! gets used up. Such a face is redundant by then, as its neighbours have moved past it, so it's deleted, with `delete`,
-//! and the change is tried again without it, which comes to the same result. That finds a chain of them in turn. What this
-//! can't do is walls that cross each other, where the part would split in two or two parts would join. Those are found
-//! and refused, saying where.
+//! and the change is tried again without it, which comes to the same result. That finds a chain of them in turn.
+//!
+//! Walls can also cross each other, where the part would split in two or two parts of it would join. A surface crossing
+//! itself isn't untangled here. It's avoided, by taking the part apart: moving in, a part with a pocket is the pocket's
+//! surroundings moved in, less the pocket moved out, since a point is that far inside the first if and only if it's that far
+//! inside the block and that far from the pocket. Moving out, a part with a boss is the part without it moved out, together
+//! with the boss moved out. Those pieces don't cross themselves, and a Boolean settles what they do to each other, including
+//! any splitting or joining. `delete` finds the pieces, so this takes what it takes: pockets, bosses, slots and the like.
 
 use crate::boolean::classify::{BodyLoc, FaceLoc, Index};
 use crate::boolean::simplify::simplify;
@@ -840,7 +845,8 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
 
 /// Whether a result meshes into a closed surface, which a change too big for the part's shape often doesn't.
 fn meshes_closed(body: &Body) -> Result<()> {
-    let check = crate::tess::tessellate(body, &crate::tess::TessParams::for_size(body.aabb().diagonal()))?;
+    let check = crate::tess::tessellate(body, &crate::tess::TessParams::for_size(body.aabb().diagonal()))
+        .map_err(|why| refuse(format!("the result doesn't mesh, as a face's edges cross each other, so the change is too big for the part's shape: {why}")))?;
     if check.open_edge_count() > 0 {
         return Err(refuse("the result doesn't mesh into a closed surface: the change is too big for the part's shape".to_string()));
     }
@@ -856,6 +862,150 @@ pub fn offset_faces(body: &Body, distances: &[f64]) -> Result<Body> {
     if distances.iter().any(|d| !d.is_finite() || d.abs() > MAX_COORD) {
         return Err(refuse("an offset distance must be a sensible number".to_string()));
     }
+    offset_within(body, distances, 0)
+}
+
+/// How many times over a part gets taken apart, and how many ways of doing that get tried each time.
+const MOST_DEPTH: usize = 6;
+const MOST_FEATURES: usize = 6;
+
+fn offset_within(body: &Body, distances: &[f64], depth: usize) -> Result<Body> {
+    match offset_directly(body, distances) {
+        Ok(done) => Ok(done),
+        Err(why) => {
+            if depth >= MOST_DEPTH {
+                return Err(why);
+            }
+            taken_apart(body, distances, depth).map_err(|_| why)
+        }
+    }
+}
+
+/// The faces joined to one by edges of one kind, convex or concave, and by seams and smooth edges: a pocket's faces by the
+/// concave edges among them, and a boss's by the convex ones.
+fn feature_from(body: &Body, uses: &[Vec<(usize, usize, usize, bool)>], start: usize, convex: bool) -> Vec<usize> {
+    let mut group = vec![start];
+    let mut k = 0;
+    while k < group.len() {
+        let f = group[k];
+        k += 1;
+        for c in body.faces[f].loops.iter().flatten() {
+            for u in &uses[c.edge] {
+                if u.0 != f && !group.contains(&u.0) && edge_kind(body, uses, c.edge).is_none_or(|kind| kind == convex) {
+                    group.push(u.0);
+                }
+            }
+        }
+    }
+    group.sort_unstable();
+    group
+}
+
+/// Offsets a part by offsetting two simpler parts and combining them, as the module's notes describe.
+fn taken_apart(body: &Body, distances: &[f64], depth: usize) -> Result<Body> {
+    let uses = body.edge_uses();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for f in 0..body.faces.len() {
+        for convex in [false, true] {
+            let group = feature_from(body, &uses, f, convex);
+            if group.len() < body.faces.len() && !groups.contains(&group) {
+                groups.push(group);
+            }
+        }
+    }
+    // The smallest first, as a small feature is the likeliest to be what's crossing, and the cheapest to try.
+    let size = |g: &Vec<usize>| g.iter().map(|&f| body.face_aabb(f).diagonal()).fold(0.0f64, f64::max);
+    groups.sort_by(|a, b| size(a).total_cmp(&size(b)));
+    let mut tried = 0;
+    let mut last = None;
+    for group in &groups {
+        // Whether this is a feature at all is for delete face to say.
+        let Ok((plain, from)) = delete_faces_mapped(body, group) else { continue };
+        tried += 1;
+        if tried > MOST_FEATURES {
+            break;
+        }
+        match with_feature_apart(body, distances, depth, group, &plain, &from) {
+            Ok(done) => return Ok(done),
+            Err(why) => last = Some(why),
+        }
+    }
+    Err(last.unwrap_or_else(|| refuse("nothing in this part can be taken apart to get past where its walls cross".to_string())))
+}
+
+fn with_feature_apart(body: &Body, distances: &[f64], depth: usize, group: &[usize], plain: &Body, from: &[usize]) -> Result<Body> {
+    let (with, without) = (crate::mass::mass_properties(body).volume, crate::mass::mass_properties(plain).volume);
+    // Filling it in made the part bigger, so it's a pocket. Otherwise it's a boss.
+    let pocket = without > with;
+    let feature = if pocket { subtract(plain, body)? } else { subtract(body, plain)? };
+    let index = Index::new(body);
+    let plain_index = Index::new(plain);
+    let feature_index = Index::new(&feature);
+    let tol = 1e-6;
+    // Each face of the feature is one of the faces that went, or a cap across where it meets the rest of the part.
+    let mut moves = Vec::with_capacity(feature.faces.len());
+    for f in 0..feature.faces.len() {
+        let samples = samples_across(&feature, &feature_index, f);
+        let middle = samples.iter().rev().copied().find(|q| feature_index.locate_on_face(f, *q, tol) == FaceLoc::Inside).or(samples.first().copied());
+        let Some(q) = middle else {
+            return Err(refuse("a feature's face has no points to tell it by".to_string()));
+        };
+        let wall = group.iter().copied().find(|&g| index.locate_on_face(g, q, tol) != FaceLoc::Outside);
+        moves.push(match wall {
+            // It faces the other way from the part's, so what moves the part's out moves this in, for a pocket.
+            Some(g) => {
+                if pocket {
+                    -distances[g]
+                } else {
+                    distances[g]
+                }
+            }
+            // A cap stays out of the way of the plain part as that moves, flush with it if it comes that way.
+            None => {
+                let on = (0..plain.faces.len()).find(|&h| plain_index.locate_on_face(h, q, tol) != FaceLoc::Outside);
+                let d = on.map_or(0.0, |h| distances[from[h]]);
+                if pocket {
+                    d.max(0.0)
+                } else {
+                    (-d).max(0.0)
+                }
+            }
+        });
+    }
+    let plain_moves: Vec<f64> = from.iter().map(|&f| distances[f]).collect();
+    let moved_plain = offset_within(plain, &plain_moves, depth + 1)?;
+    let moved_feature = offset_within(&feature, &moves, depth + 1)?;
+    let result = if pocket { subtract(&moved_plain, &moved_feature)? } else { crate::boolean::union(&moved_plain, &moved_feature)? };
+    if result.faces.is_empty() {
+        return Err(refuse("moving this far leaves nothing of the part".to_string()));
+    }
+    validate(&result).map_err(|defects| refuse(format!("the result isn't a valid solid: {}", defects.join("; "))))?;
+    meshes_closed(&result)?;
+    // Every point of the result's surface is still at least the distance from the part's, if everything moved one way.
+    let d0 = distances[0];
+    if distances.iter().all(|d| *d == d0) && d0 != 0.0 {
+        stays_clear(body, &result, d0.abs())?;
+    }
+    Ok(result)
+}
+
+/// That a result is nowhere nearer a part's surface than this.
+fn stays_clear(base: &Body, result: &Body, reach: f64) -> Result<()> {
+    let Ok(mesh) = crate::tess::tessellate(result, &crate::tess::TessParams::draft_for_size(result.aabb().diagonal())) else {
+        return Ok(());
+    };
+    let index = Index::new(base);
+    let stride = (mesh.positions.len() / 400).max(1);
+    for q in mesh.positions.iter().step_by(stride) {
+        if distance_to_surface(base, &index, *q) < reach - 1e-5 {
+            return Err(refuse(format!("taking it apart left part of the result too near ({:.3}, {:.3}, {:.3})", q.x, q.y, q.z)));
+        }
+    }
+    Ok(())
+}
+
+/// One way through, moving faces where they are, which is exact and keeps the most names.
+fn offset_directly(body: &Body, distances: &[f64]) -> Result<Body> {
     // Moving out closes up what's concave, and moving in closes up what's convex.
     let closes = |f: usize, convex: bool| convex == (distances[f] < 0.0);
     surviving(
@@ -917,10 +1067,11 @@ pub fn shell(body: &Body, open: &[usize], thickness: f64, feature: u32) -> Resul
     // Open faces move out, so that the cavity passes cleanly through them.
     let distances: Vec<f64> = (0..body.faces.len()).map(|f| if open.contains(&f) { thickness } else { -thickness }).collect();
     let mut inner = offset_faces(body, &distances)?;
-    // The cavity has to be inside the part wherever it's closed.
+    // The cavity has to be inside the part wherever it's closed. Faces can have gone along the way, so it's by name.
+    let open_names: Vec<FaceTag> = open.iter().map(|&f| body.faces[f].tag).collect();
     let index = Index::new(body);
     for (v, p) in inner.vertices.iter().enumerate() {
-        let touches_open = inner.faces.iter().enumerate().any(|(f, face)| open.contains(&f) && face.loops.iter().flatten().any(|c| {
+        let touches_open = inner.faces.iter().any(|face| open_names.contains(&face.tag) && face.loops.iter().flatten().any(|c| {
             let e = &inner.edges[c.edge];
             e.v0 == v || e.v1 == v
         }));

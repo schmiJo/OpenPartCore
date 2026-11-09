@@ -190,9 +190,16 @@ impl Curve {
                 result
             }
             Curve::Sampled(c) => {
-                // Find the best chord, then polish on the true curve.
+                // The best chord, then the stored cubic through the samples, which is far cheaper than a point of the curve
+                // itself, as each of those is solved for on both surfaces. Only the last steps need the curve itself.
                 let (lo, hi) = (t0.max(0.0), t1.min((c.points.len() - 1) as f64));
-                let mut result = best(lo);
+                let rough = |t: f64| {
+                    let t = t.clamp(lo, hi);
+                    let (i, s) = c.segment(t);
+                    (t, c.hermite_local(i, s).dist(p))
+                };
+                let mut result = rough(lo);
+                result = pick(result, rough(hi));
                 let first = lo.floor() as usize;
                 let last = (hi.ceil() as usize).min(c.points.len() - 1);
                 for i in first..last {
@@ -201,15 +208,38 @@ impl Curve {
                     let s = ((p - a).dot(d) / d.norm2()).clamp(0.0, 1.0);
                     let t = (i as f64 + s).clamp(lo, hi);
                     if (a + d * s).dist(p) < result.1 + d.norm() {
-                        result = pick(result, best(t));
+                        result = pick(result, rough(t));
                     }
                 }
                 let mut h = 0.25;
-                for _ in 0..40 {
+                for _ in 0..24 {
                     for t in [result.0 - h, result.0 + h] {
-                        result = pick(result, best(t));
+                        result = pick(result, rough(t));
                     }
                     h *= 0.6;
+                }
+                // Newton on the curve itself from there, which takes few steps from so close.
+                let cubic = |t: f64| {
+                    let (i, s) = c.segment(t);
+                    c.hermite_local(i, s)
+                };
+                let mut result = best(result.0);
+                for _ in 0..6 {
+                    let t = result.0;
+                    let (a, b) = ((t - 1e-4).max(0.0), (t + 1e-4).min((c.points.len() - 1) as f64));
+                    if !(b > a) {
+                        break;
+                    }
+                    let along = (cubic(b) - cubic(a)) / (b - a);
+                    let speed2 = along.norm2();
+                    if !(speed2 > 0.0) {
+                        break;
+                    }
+                    let next = best(t + (p - self.eval(t)).dot(along) / speed2);
+                    if next.1 >= result.1 {
+                        break;
+                    }
+                    result = next;
                 }
                 result
             }

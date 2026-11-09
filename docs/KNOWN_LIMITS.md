@@ -14,7 +14,7 @@ cargo run --release -p coreshape --example replay -- <grid|rot|prism|gen|al|ext|
 These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 
 - **More kinds of loft.** No loft to a point, closed loop, guide curve or tangency at the ends: see [below](#free-form-surfaces-and-lofts).
-- **Offset and shell where walls cross.** A part that would split in two, or two parts of it that would join, is refused, saying where. Faces that vanish are handled: see [below](#offset-shell-and-draft).
+- **Offset and shell where walls cross and nothing can be taken apart,** such as the neck of a dumbbell in outline. Crossing around pockets, bosses, holes and slots works: see [below](#offset-shell-and-draft).
 - **Draft on spline and free-form faces,** and any draft that changes the topology, other than taking a fillet off and putting it back.
 - **Sheet bodies.** Everything here is a closed solid, so thicken takes faces of a solid, and a surface can't exist alone.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
@@ -60,7 +60,7 @@ tangency, because the curve touches a face boundary tangentially at a vertex.
 | Spline profiles, revolved | 1,000 | 1 (0.1%) | 0 |
 | Lofts through mixed sections | 1,000 | 1 (0.1%) | 0 |
 
-Rerun on 2026-11-09 after changes to the search and to point and ray tests: 500 of each category here, with 0 wrong, 2,000 of each in the table above, with 0 wrong, and 1,000 lofts, with 0 wrong and the same one refused.
+Rerun on 2026-11-09 after solving ray crossings directly: 1,000 of each category here, with 0 wrong and the same three refused, and 3,000 of each in the table above, with 0 wrong.
 
 A loft fuzz case on 2026-11-09 (`loft 535`) showed that whether a curve just grazing a free-form face got found depended on where the search's range happened to be halved, which could put a point on the wrong side of a part. The fix keeps halving wherever a dip could hide, and a test holds that ray over ranges from 4 to 40. It's an old fault that a faster ray test happened to expose, so earlier runs' 0 wrong were lucky on this one.
 
@@ -213,16 +213,17 @@ hadn't found it because its curves have several spans, while the vase's single s
 These move a body's surfaces, so they are exact.
 
 - **A face that doesn't survive goes, and the change is tried again.** A fillet smaller than the wall of a shell, a chamfer that gets used up, a hole, pocket or slot that closes moving out, and a boss that goes moving in. By then the face is redundant, as its neighbours have moved past it, so this gives the same shape as a part that never had it. It uses [delete face](#delete-face), so what that refuses is refused here too.
-- **Only if it's really redundant.** A face can give way only in part, such as a tapered chamfer whose narrow end is used up while its wide end isn't, and deleting that would give a plausible, wrong shape. So points across every face that went have to be the full distance from the result, on the right side, or it's refused as "only partly gives way". That's sampled at up to 121 points of each face, so what's left of one smaller than those could get through.
-- **Walls that cross are refused, saying where:** a thin wall moving in, which would split the part, or two bosses growing together. This is what commercial kernels restructure, and it's the largest gap left here. It's found by whether a moved face comes nearer another face than that face has moved, at 4 points along each edge and up to 24 across each face, so a crossing smaller than those could get through.
-- **Fuzz:** 300 random parts with a random feature, moved by up to 35% of their smallest size (`--example fuzz_features -- 300 offset`): 230 right, 62 refused, 0 wrong and 8 skipped. The check holds however many faces went: moving out, every point closer to the part than the distance has to be in the result, and moving in, every point in the result has to be at least that far inside. 43 of the refusals are crossing walls, and the other 19 are cuts that cross each other, such as a slot through a hole, whose gap has more sides than delete face takes, or a floor that meets the bottom and would split the part.
+- **Only if it's really redundant.** A face can give way only in part, such as a tapered chamfer whose narrow end is used up while its wide end isn't, and just deleting that would give a plausible, wrong shape. So points across every face that went have to be the full distance from the result, on the right side, or that route is abandoned for the next one. That's sampled at up to 121 points of each face.
+- **Walls that cross are settled by taking the part apart.** Moving in, a part with a pocket is its surroundings moved in, less the pocket moved out, which is an exact identity: a point is that far inside the part if and only if it's that far inside the surroundings and that far from the pocket. Moving out, a part with a boss is the part without it moved out, together with the boss moved out. Neither piece crosses itself, and a Boolean settles what they do to each other, which covers a wall opening through, two pockets joining, a hole breaking out of an edge, two bosses growing together, and a part splitting into separate solids. The faces of the result keep the names they came from.
+- **What it can't take apart is refused, saying where,** when delete face can't lift out either of the features involved. The clearest case is a part with no feature at all to lift out: a dumbbell in outline, moving in past half the neck's width, whose neck isn't a pocket or a boss of anything. Crossing is found by whether a moved face comes nearer another face than that face has moved, at 4 points along each edge and up to 24 across each face, so a crossing smaller than those could get through.
+- **Fuzz** (`--example fuzz_features -- 2000 offset`, and `curved`), on random parts with a random feature, moved by up to 35% of their smallest size. Whatever gave way, moving out, every point in the part or closer to it than the distance has to be in the result, and nothing more than twice that outside it can be. Moving in, every point in the result has to be in the part and at least the distance inside it, and nothing more than twice that inside the part can be left out. On blocks: 1,894 right, 45 refused, 0 wrong and 61 skipped, of 2,000. On cylinders, lofts and spline extrusions: 210 right, 52 refused, 0 wrong and 38 skipped, of 300. Before taking parts apart, the blocks were 77% right.
 - **Past the distance of a concave edge moving in, or a convex one moving out, edges stay sharp,** meeting further along. There are no rounded joins, so the result isn't the set of points at that distance, only what's inside the moved faces.
 - **A free-form or swept spline face moves exactly.** Its offset isn't a spline, so it isn't stored as one: the surface is the patch plus a distance, and the distance to it is the distance to the patch less that one. Checked on a vase, by a one-dimensional integral from its own profile, at offsets from 0.25 to 3: 6152.276608 against 6152.276661 at 0.75, and 12447.1833 against 12447.1844 at 3. On a spline sphere, 5575.279763 against 5575.279763.
 - **Past the end of a free-form face, a moved surface carries on along its tangent.** An outward offset of a part with caps needs that, as a side has to reach a cap that has moved away from it, and the true offset of the side isn't defined there. The extended part is a ruled surface and not a continuation of the curvature.
 - **Refused on a free-form surface:** a move past a center of curvature, found by sampling, where it would fold; a surface with a sharp crease at a knot; and a pole with a point to it, like the tip of a cone, as each of those would need a gap filled. A smooth pole is fine.
 - **The never-overstating promise is weaker on a moved surface.** It holds as long as the moved surface hasn't come back near its own unmoved one, which is what a fold or a thin neck does. A search out of budget reports where it got to, rather than a lower bound, as the difference between a lower bound and the offset would look like a real gap.
 - **In a STEP file a moved free-form face is a fit, within 1e-5.** STEP has `OFFSET_SURFACE`, which this kernel reads, but OpenCASCADE refuses one on a surface that isn't C1 ("Offset with no C1 Surface"), and a circle's double knots aren't. So it's a B-spline of up to degree 9 on few pieces. A two-face vase goes from 10 KB to 185 KB, and reading that back here takes about 5 s, as closest points on degree 9 are slow to set up. The kernel's own copy stays exact.
-- **OpenCASCADE disagrees about thin moved solids.** On `thick_vase` it gets a volume of 617.12, on `vase_hollow` 843.71, and on the `cup` demo 4322.14. Those differ by 0.4 to 1%, and a one-dimensional integral from each one's own profile gives 623.19315, 836.33638 and 4305.74617, which is what this kernel gets. The gallery flags these three, with the three lofts it has flagged before, for the same reason: 87 of 93 pass, and those 6 are the rest.
+- **OpenCASCADE disagrees about thin moved solids.** On `thick_vase` it gets a volume of 617.12, on `vase_hollow` 843.71, and on the `cup` demo 4322.14. Those differ by 0.4 to 1%, and a one-dimensional integral from each one's own profile gives 623.19315, 836.33638 and 4305.74617, which is what this kernel gets. The gallery flags these three, with the three lofts it has flagged before, for the same reason: 92 of 98 pass, and those 6 are the rest.
 
 - **Faces that meet smoothly must move together.** Shelling with one of a smooth pair open is refused, as is
   drafting half of one.
@@ -244,6 +245,7 @@ A profile carried by a screw motion: a spring, a thread, or with the section acr
 - **Checks that the turns clear each other,** by following 8 points per curve piece around their helixes to see whether any lands back inside the section, at 64 steps a turn. A section touching itself exactly counts as a collision. A narrower collision than those samples could get through.
 - **Refused by name:** a section touching or crossing the axis while holding it, a section lying along the path, a pitch of zero, and over 200 turns.
 - **A thread on a shaft of the same radius is a tangency,** as a helical face isn't exactly on the cylinder, so a ridge has to bury itself in the shaft, as the tests' does, and a groove has to reach past its surface.
+- **Threaded shaft refusals.** Scanning its sliders at 60 random positions, 2 are refused: `[5.5, 32.5, 5.5, 1.0]` as "the result does not close", and `[6.0, 38.0, 5.5, 1.0]` as "a region touches" the other body. Neither is a wrong answer, and both are cutting a thread whose end falls awkwardly against the shaft's end.
 - **Fuzz:** 300 random helixes (`--example fuzz_features -- 300 helix`) against the closed-form volume: 259 right, 0 refused, 0 wrong, and 41 skipped as too tall for their pitch, where a refusal is right.
 - **OpenCASCADE:** the square spring's volume and area match it to 1.5e-11, the twisted bar's to 1.7e-10, and the thread to 9.6e-7. On round wire it differs by 7.6e-5 at 2131.67, where the closed form is 2131.8345, which is also what this kernel gets.
 
@@ -329,16 +331,17 @@ slider, since the first usually affects more features. `python3 scripts/selftest
 | Crossed cylinders | 73, 7 | 11, 4 | 23, 4 |
 | Turned knob | 27, 31 | 3, 3 | 13, 12 |
 | Ring sector | 88, 93 | 4, 6 | 31, 22 |
-| Spline vase |  | 98, 114 | 208, 200 |
-| Filleted tee |  | 101, 88 | 366, 555 |
-| Free-form nozzle |  | 221, 202 | 498, 423 |
-| Spline cam |  | 156, 154 | 715, 675 |
-| Delete face |  | 7, 14 | 8, 14 |
-| Helical spring |  | 122, 182 | 762, 476 |
-| Shelled cup |  | 400, 513 | 969, 1378 |
-| Threaded shaft |  | 1207, 1190 | 2031, 2371 |
+| Spline vase |  | 111, 94 | 168, 190 |
+| Filleted tee |  | 93, 103 | 374, 513 |
+| Free-form nozzle |  | 140, 117 | 426, 392 |
+| Spline cam |  | 154, 121 | 676, 604 |
+| Delete face |  | 7, 15 | 15, 15 |
+| Helical spring |  | 120, 135 | 576, 456 |
+| Shelled cup |  | 366, 413 | 992, 1009 |
+| Threaded shaft |  | 516, 569 | 1301, 1520 |
+| Crossing walls |  | 3, 5 | 5, 6 |
 
-"Before" is before the speed work, and the rest were measured again on 2026-11-08 or, for the spline and free-form demos, on 2026-11-09. **The threaded shaft is too slow to feel like a slider,** at over a second a step: it's a Boolean against 56 free-form faces. The spline and free-form demos came later, and they're the slowest: each distance on one of those surfaces costs a search. Most of the cam's pause is its mass properties.
+"Before" is before the speed work, and the rest were measured again on 2026-11-08 or, for the spline and free-form demos, on 2026-11-09. The spline and free-form demos came later, and they're the slowest: each distance on one of those surfaces costs a search. Most of the cam's pause is its mass properties.
 
 **How many triangles the page sends,** as these demos stand at their default sizes:
 
@@ -368,7 +371,8 @@ The kernel itself got two to four times faster on these models:
 Free-form surfaces got a good deal faster for the helix demos, in ways that help every free-form part:
 
 - **Most distances are to a point on the surface,** so a few Newton steps come first, and a patch only builds its search structures if something needs them. Rebuilding the spring went from 233 ms to 20 ms.
-- **A free-form face's own cell boxes rule things out** in a point or ray test, and each chart position along an edge is only worked out once. That took cutting a thread from 2.6 s to under 1 s natively.
+- **A ray's crossings with a free-form patch are solved for,** as two polynomials that vanish together, certified the same way the closest point is. A box with either one of one sign has no crossing, and one whose Jacobian is regular has one at most, for Newton to find. It used to follow the distance along the ray, which took a full search at each step. A test compares the two ways on random rays. Where a ray runs along the surface or through a pole, it says it can't tell, and a different ray is used.
+- **A free-form face's own cell boxes rule things out** in point and edge tests, each chart position along an edge is only worked out once, and the closest point on a traced curve searches its stored cubic, solving onto the surfaces only at the end. With the above, that took cutting a thread from 2.6 s to 0.4 s natively.
 - **A shell of free-form faces no longer integrates three times** to check a volume that the Boolean's own checks cover. That took the cup from 1.5 s to 0.3 s natively. A closed shell of analytic faces still checks it.
 - **A long tube gets long triangles.** The mesher stretches a free-form face's chart by how much it bends each way, which took the spring's screen mesh from 21,532 triangles to 7,948. The boundaries don't change, so neighbours still match.
 

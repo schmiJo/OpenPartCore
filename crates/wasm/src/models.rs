@@ -215,6 +215,18 @@ fn healed(doc: &mut Document, _: usize) {
     });
 }
 
+/// A block with two pockets close together and close to the side, with every face then moved in. Past half of either wall,
+/// the moved faces would cross: the pockets join, or one opens through the side.
+fn walls(doc: &mut Document, _: usize) {
+    let plate = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rect(0.0, 0.0, 60.0, 30.0))]));
+    doc.with(Op::extrude(plate, 0.0, 20.0, Mode::Add));
+    let first = doc.with(Op::sketch(Placement::xy(5.0), vec![Region::new(Shape::rect("side", 6.0, 12.0, 18.0))]));
+    doc.with(Op::extrude(first, 0.0, 20.0, Mode::Remove));
+    let second = doc.with(Op::sketch(Placement::xy(5.0), vec![Region::new(Shape::rect("side + 12 + between", 6.0, 12.0, 18.0))]));
+    doc.with(Op::extrude(second, 0.0, 20.0, Mode::Remove));
+    doc.with(Op::Offset { distance: "-inward".into() });
+}
+
 /// A branch off a pipe, with the saddle between them filleted. No exact surface exists for that, so it's a fitted one.
 fn tee(doc: &mut Document, _: usize) {
     let along = doc.with(Op::sketch(
@@ -486,6 +498,11 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("bore", "Hole radius", 2.0, 5.0, 3.0),
         mm("round", "Blend size", 0.5, 2.5, 1.5),
     ];
+    static WALLS: [ParamDef; 3] = [
+        mm("inward", "Moved in by", 0.25, 3.0, 0.5),
+        mm("side", "Wall to the side", 1.0, 5.0, 2.0),
+        mm("between", "Wall between", 1.0, 5.0, 2.0),
+    ];
     static TEE: [ParamDef; 5] = [
         mm("main", "Pipe radius", 8.0, 16.0, 12.0),
         mm("branch", "Branch radius", 3.0, 7.0, 5.0),
@@ -573,7 +590,7 @@ pub fn catalog() -> &'static [ModelDef] {
         default: 0.0,
         choices: &STRESS_NAMES,
     }];
-    static MODELS: [ModelDef; 17] = [
+    static MODELS: [ModelDef; 18] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -657,6 +674,13 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A plate with a row of holes, a fillet and a chamfer, with the middle hole and the fillet then deleted. Their neighbours grow to close the gap.",
             params: &HEALED,
             build: healed,
+        },
+        ModelDef {
+            id: "walls",
+            name: "Crossing walls",
+            blurb: "Every face moved in. Past half of a thin wall the moved faces would cross, so the part is taken apart: its surroundings moved in, less each pocket moved out. The pockets join, then open through the side.",
+            params: &WALLS,
+            build: walls,
         },
         ModelDef {
             id: "tee",

@@ -2,7 +2,7 @@
 //! feature added gives the part before it, a helix's volume has a closed form, and a thick layer's mesh has to agree with
 //! its exact volume. A refusal isn't a failure, and gets counted. A wrong answer is.
 //!
-//! `cargo run --release --example fuzz_features -- <count> [delete|helix|thicken|offset]`, or `-- one <kind> <seed>` to look at one.
+//! `cargo run --release --example fuzz_features -- <count> [delete|helix|thicken|offset|curved]`, or `-- one <kind> <seed>` to look at one.
 
 use coreshape::boolean::{subtract, union};
 use coreshape::profile::{Profile, Wire};
@@ -230,9 +230,39 @@ fn thicken_case(seed: u64) -> Outcome {
 /// Offset, on parts with features small enough to vanish. Whatever gave way, a point closer to the part than the distance
 /// has to be in the result of moving out, and every point in the result of moving in has to be at least that far inside.
 fn offset_case(seed: u64) -> Outcome {
-    use coreshape::boolean::classify::{BodyLoc, Index};
     let mut rng = Rng::new(seed);
     let Ok((b, w, d, h)) = base(&mut rng) else { return Outcome::Skipped };
+    offset_check(b, w, d, h, rng)
+}
+
+/// The same on round and free-form parts.
+fn offset_curved_case(seed: u64) -> Outcome {
+    let mut rng = Rng::new(seed ^ 0xC0FFEE);
+    let (w, d, h) = (rng.range(24.0, 50.0), rng.range(24.0, 50.0), rng.range(10.0, 30.0));
+    let (cx, cy) = (w / 2.0, d / 2.0);
+    let r = w.min(d) / 2.0;
+    let made = match rng.int(0, 2) {
+        0 => cylinder(&at(cx, cy, 0.0), r, h, BASE),
+        1 => {
+            let (a, b) = (r * rng.range(0.7, 1.0), r * rng.range(0.6, 1.0));
+            let (p, q) = (Profile::new(Wire::circle(v2(cx, cy), r)), Profile::new(Wire::circle(v2(cx, cy), a)));
+            let top = Profile::new(Wire::circle(v2(cx, cy), b));
+            loft(&[(&p, at(0.0, 0.0, 0.0)), (&q, at(0.0, 0.0, h * 0.5)), (&top, at(0.0, 0.0, h))], BASE)
+        }
+        _ => {
+            let c = coreshape::spline::Spline::ellipse_arc(v3(cx, cy, 0.0), Vec3::X, Vec3::Y, r, r * rng.range(0.6, 0.95), 0.0, TAU);
+            match c {
+                Ok(c) => extrude(&Profile::new(coreshape::profile::PathBuilder::new(v2(cx + r, cy)).spline_to(c).close()), &Frame::WORLD, h, BASE),
+                Err(e) => Err(e),
+            }
+        }
+    };
+    let Ok(b) = made else { return Outcome::Skipped };
+    offset_check(b, w, d, h, rng)
+}
+
+fn offset_check(b: Body, w: f64, d: f64, h: f64, mut rng: Rng) -> Outcome {
+    use coreshape::boolean::classify::{BodyLoc, Index};
     let Ok(part) = feature(&b, w, d, h, &mut rng) else { return Outcome::Skipped };
     let distance = rng.range(0.3, (w.min(d).min(h)) * 0.35) * if rng.int(0, 1) == 0 { 1.0 } else { -1.0 };
     let moved = match offset(&part, distance) {
@@ -267,15 +297,26 @@ fn offset_case(seed: u64) -> Outcome {
     for _ in 0..120 {
         let p = v3(rng.range(bounds.min.x, bounds.max.x), rng.range(bounds.min.y, bounds.max.y), rng.range(bounds.min.z, bounds.max.z));
         let (in_part, in_moved) = (of_part.locate_in_body(p), of_moved.locate_in_body(p));
+        // Sharp corners make the result reach further than the distance, by up to the root of 3 at a corner of three square
+        // faces, so anything well past that has to be on the other side, as well as anything nearer than the distance.
+        const REACH: f64 = 2.0;
         if distance > 0.0 {
             // Moving out: anything in the part, or closer to it than the distance, has to be in the result.
             if in_moved == BodyLoc::Outside && (in_part != BodyLoc::Outside || to_surface(p) < distance - slack) {
                 return Outcome::Wrong(format!("{p:?} is {} from the part and left out, moving out by {distance}", to_surface(p)));
             }
-        } else if in_moved == BodyLoc::Inside {
+            // And anything far outside the part stays out of it.
+            if in_moved == BodyLoc::Inside && in_part == BodyLoc::Outside && to_surface(p) > REACH * distance + slack {
+                return Outcome::Wrong(format!("{p:?} is {} outside the part, but in the result of moving out by {distance}", to_surface(p)));
+            }
+        } else {
             // Moving in: anything in the result has to be in the part, and at least the distance inside it.
-            if in_part != BodyLoc::Inside || to_surface(p) < -distance - slack {
+            if in_moved == BodyLoc::Inside && (in_part != BodyLoc::Inside || to_surface(p) < -distance - slack) {
                 return Outcome::Wrong(format!("{p:?} is in the result, but {} from the part's surface, moving in by {distance}", to_surface(p)));
+            }
+            // And anything deep inside the part stays in it.
+            if in_moved == BodyLoc::Outside && in_part == BodyLoc::Inside && to_surface(p) > -REACH * distance + slack {
+                return Outcome::Wrong(format!("{p:?} is {} inside the part, but left out of the result of moving in by {distance}", to_surface(p)));
             }
         }
     }
@@ -322,6 +363,7 @@ fn main() {
             "delete" => delete_case(seed),
             "helix" => helix_case(seed),
             "offset" => offset_case(seed),
+            "curved" => offset_curved_case(seed),
             _ => thicken_case(seed),
         };
         match out {
@@ -334,7 +376,7 @@ fn main() {
     }
     let count: u64 = args.get(1).and_then(|c| c.parse().ok()).unwrap_or(200);
     let only = args.get(2).cloned();
-    let kinds: Vec<(&str, fn(u64) -> Outcome)> = vec![("delete", delete_case), ("helix", helix_case), ("thicken", thicken_case), ("offset", offset_case)];
+    let kinds: Vec<(&str, fn(u64) -> Outcome)> = vec![("delete", delete_case), ("helix", helix_case), ("thicken", thicken_case), ("offset", offset_case), ("curved", offset_curved_case)];
     for (name, case) in kinds {
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
