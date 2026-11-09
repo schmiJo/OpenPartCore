@@ -202,6 +202,21 @@ impl Wire {
     /// Rectangle centred on the origin with rounded corners.
     pub fn rounded_rect(w: f64, h: f64, r: f64) -> Wire {
         let (x, y) = (w / 2.0, h / 2.0);
+        // Corners that meet make a slot, or a circle, and there's no straight side left between them. What's left keeps its
+        // number, so a side's name doesn't change as the radius comes up to it.
+        let r = if (r - x).abs() < MIN_FEATURE / 2.0 {
+            x
+        } else if (r - y).abs() < MIN_FEATURE / 2.0 {
+            y
+        } else {
+            r
+        };
+        let mut wire = Wire::rounded_rect_with_sides(x, y, r);
+        wire.segs.retain(|s| s.length() >= MIN_FEATURE / 2.0);
+        wire
+    }
+
+    fn rounded_rect_with_sides(x: f64, y: f64, r: f64) -> Wire {
         PathBuilder::new(v2(-x + r, -y))
             .line_to(v2(x - r, -y))
             .arc_to(v2(x, -y + r), v2(x - r, -y + r), true)
@@ -280,11 +295,36 @@ impl Wire {
     /// crossing count has to handle.
     fn contains(&self, p: Vec2) -> bool {
         let mut winding = 0.0;
-        for (a, b, _) in self.flatten() {
+        for (a, b, i) in self.flatten() {
             let (u, v) = (a - p, b - p);
             winding += u.cross(v).atan2(u.dot(v));
+            // A point between an arc and its chord is on the other side of the wire from where the chord puts it.
+            if let SegGeom::Arc { center, radius, a0, a1 } = self.segs[i].geom {
+                let turn = if a1 > a0 { 1.0 } else { -1.0 };
+                if p.dist(center) < radius && (b - a).cross(p - a) * turn < 0.0 {
+                    winding += turn * TAU;
+                }
+            }
         }
         winding.abs() > PI
+    }
+
+    /// The wire as pieces for checking crossings: lines and arcs as they are, and splines as lines. An arc's chord can
+    /// stray by more than a thin wall is thick, so it's only good for working out which way round something is.
+    fn pieces(&self) -> Vec<(Piece, usize)> {
+        let mut out = Vec::new();
+        for (i, s) in self.segs.iter().enumerate() {
+            match s.geom {
+                SegGeom::Line { a, b } => out.push((Piece::Line(a, b), i)),
+                SegGeom::Arc { center, radius, a0, a1 } => out.push((Piece::Arc { center, radius, a0, a1 }, i)),
+                SegGeom::Spline(ref c) => {
+                    for w in c.graded_polyline(FLAT_PER_SPAN).windows(2) {
+                        out.push((Piece::Line(v2(w[0].x, w[0].y), v2(w[1].x, w[1].y)), i));
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn check(&self, what: &str) -> Result<()> {
@@ -306,11 +346,11 @@ impl Wire {
         if self.signed_area().abs() < MIN_FEATURE * MIN_FEATURE {
             return Err(Error::InvalidProfile(format!("{what} wire encloses no area")));
         }
-        let flat = self.flatten();
+        let flat = self.pieces();
         for i in 0..flat.len() {
             for j in i + 1..flat.len() {
-                let (a, b, si) = flat[i];
-                let (c, d, sj) = flat[j];
+                let (first, si) = flat[i];
+                let (second, sj) = flat[j];
                 // Pieces of one segment and neighbouring segments meet at their
                 // shared endpoint by construction.
                 let n = self.segs.len();
@@ -322,12 +362,12 @@ impl Wire {
                     if !(curved(si) || curved(sj)) {
                         continue;
                     }
-                    let side_by_side = (b - c).norm() <= TOL || (a - d).norm() <= TOL;
+                    let side_by_side = (first.end() - second.start()).norm() <= TOL || (first.start() - second.end()).norm() <= TOL;
                     if j == i + 1 || side_by_side {
                         continue;
                     }
                 }
-                if segments_cross(a, b, c, d) {
+                if first.crosses(&second) {
                     return Err(Error::InvalidProfile(format!(
                         "{what} wire crosses itself between segments {si} and {sj}"
                     )));
@@ -346,6 +386,85 @@ fn segments_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     let (d1, d2) = (side(a, b, c), side(a, b, d));
     let (d3, d4) = (side(c, d, a), side(c, d, b));
     d1 * d2 < 0.0 && d3 * d4 < 0.0
+}
+
+/// A piece of a wire, for telling whether two wires cross.
+#[derive(Clone, Copy)]
+enum Piece {
+    Line(Vec2, Vec2),
+    Arc { center: Vec2, radius: f64, a0: f64, a1: f64 },
+}
+
+impl Piece {
+    fn start(&self) -> Vec2 {
+        match *self {
+            Piece::Line(a, _) => a,
+            Piece::Arc { center, radius, a0, .. } => center + v2(a0.cos(), a0.sin()) * radius,
+        }
+    }
+
+    fn end(&self) -> Vec2 {
+        match *self {
+            Piece::Line(_, b) => b,
+            Piece::Arc { center, radius, a1, .. } => center + v2(a1.cos(), a1.sin()) * radius,
+        }
+    }
+
+    /// Whether a point on the arc's circle is strictly along the arc.
+    fn along_arc(a0: f64, a1: f64, angle: f64) -> bool {
+        let (lo, hi) = (a0.min(a1), a0.max(a1));
+        let mut a = angle;
+        while a < lo {
+            a += TAU;
+        }
+        while a > hi + 1e-15 && a - TAU >= lo {
+            a -= TAU;
+        }
+        a > lo && a < hi
+    }
+
+    fn line_crosses_arc(a: Vec2, b: Vec2, center: Vec2, radius: f64, a0: f64, a1: f64) -> bool {
+        let (d, f) = (b - a, a - center);
+        let (qa, qb, qc) = (d.dot(d), 2.0 * f.dot(d), f.dot(f) - radius * radius);
+        let disc = qb * qb - 4.0 * qa * qc;
+        // Just touching isn't crossing, as with two lines.
+        if qa <= 0.0 || disc <= 0.0 {
+            return false;
+        }
+        let root = disc.sqrt();
+        [(-qb - root) / (2.0 * qa), (-qb + root) / (2.0 * qa)].iter().any(|&t| {
+            if !(t > 0.0 && t < 1.0) {
+                return false;
+            }
+            let q = a + d * t - center;
+            Piece::along_arc(a0, a1, q.y.atan2(q.x))
+        })
+    }
+
+    fn arcs_cross(c0: Vec2, r0: f64, a0: (f64, f64), c1: Vec2, r1: f64, a1: (f64, f64)) -> bool {
+        let between = c1 - c0;
+        let d = between.norm();
+        if d <= 0.0 || d >= r0 + r1 || d <= (r0 - r1).abs() {
+            return false;
+        }
+        let along = (d * d + r0 * r0 - r1 * r1) / (2.0 * d);
+        let h = (r0 * r0 - along * along).max(0.0).sqrt();
+        let unit = between * (1.0 / d);
+        let foot = c0 + unit * along;
+        let across = v2(-unit.y, unit.x) * h;
+        [foot + across, foot - across].iter().any(|&q| {
+            let (u, v) = (q - c0, q - c1);
+            Piece::along_arc(a0.0, a0.1, u.y.atan2(u.x)) && Piece::along_arc(a1.0, a1.1, v.y.atan2(v.x))
+        })
+    }
+
+    fn crosses(&self, other: &Piece) -> bool {
+        match (*self, *other) {
+            (Piece::Line(a, b), Piece::Line(c, d)) => segments_cross(a, b, c, d),
+            (Piece::Line(a, b), Piece::Arc { center, radius, a0, a1 }) | (Piece::Arc { center, radius, a0, a1 }, Piece::Line(a, b)) => Piece::line_crosses_arc(a, b, center, radius, a0, a1),
+            (Piece::Arc { center, radius, a0, a1 }, Piece::Arc { center: c2, radius: r2, a0: b0, a1: b1 }) => Piece::arcs_cross(center, radius, (a0, a1), c2, r2, (b0, b1)),
+        }
+    }
 }
 
 /// Builds a wire from connected line and arc moves.
@@ -476,14 +595,23 @@ impl Profile {
             }
         }
         self.outer.check("outer")?;
-        let outer_flat = self.outer.flatten();
+        let outer_pieces = self.outer.pieces();
+        let bounds_of = |p: &Piece| -> (Vec2, Vec2) {
+            match *p {
+                Piece::Line(a, b) => (v2(a.x.min(b.x), a.y.min(b.y)), v2(a.x.max(b.x), a.y.max(b.y))),
+                // The whole circle, which is enough to rule things out.
+                Piece::Arc { center, radius, .. } => (center - v2(radius, radius), center + v2(radius, radius)),
+            }
+        };
         let bounds = |flat: &[(Vec2, Vec2, usize)]| {
             let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
             for &(a, _, _) in flat {
                 lo = v2(lo.x.min(a.x), lo.y.min(a.y));
                 hi = v2(hi.x.max(a.x), hi.y.max(a.y));
             }
-            (lo, hi)
+            // Chords can fall short of an arc's reach by this share of how far across it is.
+            let margin = hi - lo;
+            (lo - margin * 0.01, hi + margin * 0.01)
         };
         let flats: Vec<Vec<(Vec2, Vec2, usize)>> = self.holes.iter().map(Wire::flatten).collect();
         let boxes: Vec<(Vec2, Vec2)> = flats.iter().map(|f| bounds(f)).collect();
@@ -493,13 +621,14 @@ impl Profile {
                 return Err(Error::InvalidProfile(format!("hole {i} is outside the outer wire")));
             }
             let (lo, hi) = boxes[i];
-            for &(c, d, _) in &outer_flat {
-                let clear = c.x.max(d.x) < lo.x || c.x.min(d.x) > hi.x || c.y.max(d.y) < lo.y || c.y.min(d.y) > hi.y;
-                if clear {
+            let hole_pieces = h.pieces();
+            for (outer_piece, _) in &outer_pieces {
+                let (low, high) = bounds_of(outer_piece);
+                if high.x < lo.x || low.x > hi.x || high.y < lo.y || low.y > hi.y {
                     continue;
                 }
-                for &(a, b, _) in &flats[i] {
-                    if segments_cross(a, b, c, d) {
+                for (piece, _) in &hole_pieces {
+                    if piece.crosses(outer_piece) {
                         return Err(Error::InvalidProfile(format!("hole {i} crosses the outer wire")));
                     }
                 }
@@ -519,9 +648,10 @@ impl Profile {
                     continue;
                 }
                 let (first, second) = (i.min(j), i.max(j));
-                for &(a, b, _) in &flats[i] {
-                    for &(c, d, _) in &flats[j] {
-                        if segments_cross(a, b, c, d) {
+                let (these, those) = (self.holes[i].pieces(), self.holes[j].pieces());
+                for (a, _) in &these {
+                    for (b, _) in &those {
+                        if a.crosses(b) {
                             return Err(Error::InvalidProfile(format!("holes {first} and {second} cross")));
                         }
                     }

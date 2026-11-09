@@ -415,7 +415,7 @@ fn plane_torus(f: &Frame, frame: &Frame, major: f64, minor: f64, size: f64) -> S
     let (a, n) = (frame.z, f.z);
     let contains_axis = a.dot(n).abs() * size.max(1.0) <= TOL && (frame.origin - f.origin).dot(n).abs() <= TOL;
     if !contains_axis {
-        return Ssi::General;
+        return plane_on_torus_waist(f, frame, major, minor, size).unwrap_or(Ssi::General);
     }
     let e = a.cross(n).normalized();
     let circle = |c: Vec3| closed_circle(Frame::new(c, n, e), minor);
@@ -423,6 +423,42 @@ fn plane_torus(f: &Frame, frame: &Frame, major: f64, minor: f64, size: f64) -> S
         curves: vec![circle(frame.origin + e * major), circle(frame.origin - e * major)],
         crossings: Vec::new(),
     }
+}
+
+/// A plane along a torus's axis, just touching the inside of its waist. They meet in a figure of eight, crossing where they
+/// touch, which tracing can't get past. Around the tube, the distance from the axis says how far along the plane a point is,
+/// to one side or the other, and those are the two loops.
+fn plane_on_torus_waist(f: &Frame, frame: &Frame, major: f64, minor: f64, size: f64) -> Option<Ssi> {
+    let (a, n) = (frame.z, f.z);
+    if a.dot(n).abs() * size.max(1.0) > TOL || major <= minor {
+        return None;
+    }
+    let signed = (f.origin - frame.origin).dot(n);
+    let d = major - minor;
+    if (signed.abs() - d).abs() > TOL {
+        return None;
+    }
+    let toward = n * signed.signum();
+    let along = a.cross(toward);
+    let touching = frame.origin + toward * d;
+    let loop_of = |sign: f64| -> Option<SsiCurve> {
+        const SAMPLES: usize = 256;
+        let mut points = Vec::with_capacity(SAMPLES + 1);
+        points.push(touching);
+        for k in 1..SAMPLES {
+            // From the waist, round the tube and back.
+            let (sin, cos) = (TAU * k as f64 / SAMPLES as f64).sin_cos();
+            let radius = major - minor * cos;
+            let y = (radius * radius - d * d).max(0.0).sqrt();
+            points.push(frame.origin + toward * d + along * (sign * y) + a * (minor * sin));
+        }
+        points.push(touching);
+        let (one, other) = (Surface::Plane(*f), Surface::Torus { frame: *frame, major, minor });
+        let curve = sampled_from_points(points, &one, &other).ok()?;
+        let n = curve_len(&curve);
+        Some(SsiCurve { curve, closed: true, t0: 0.0, t1: (n - 1) as f64 })
+    };
+    Some(Ssi::Curves { curves: vec![loop_of(1.0)?, loop_of(-1.0)?], crossings: vec![touching] })
 }
 
 fn cylinder_cylinder(f: &Frame, r: f64, g: &Frame, s: f64, region: &Aabb) -> Ssi {
@@ -451,7 +487,7 @@ fn cylinder_cylinder(f: &Frame, r: f64, g: &Frame, s: f64, region: &Aabb) -> Ssi
         return lines(vec![f.origin + u * x + w * h, f.origin + u * x - w * h]);
     }
     if (r - s).abs() > TOL {
-        return Ssi::General;
+        return tangent_cylinders(f, r, g, s).unwrap_or(Ssi::General);
     }
     // Equal radii with crossing axes: two ellipses in the bisecting planes.
     let n = f.z.cross(g.z);
@@ -469,6 +505,49 @@ fn cylinder_cylinder(f: &Frame, r: f64, g: &Frame, s: f64, region: &Aabb) -> Ssi
         curves: vec![plane_cylinder_ellipse(&p1, f, r), plane_cylinder_ellipse(&p2, f, r)],
         crossings: vec![centre + side, centre - side],
     }
+}
+
+/// A cylinder inside another's reach, just touching its wall from within, as a tangential inlet does. Their intersection is
+/// two loops that cross where they touch, and tracing can't get past that crossing, as the surfaces are tangent there. It
+/// doesn't have to. Each line along the smaller cylinder meets the larger at two points, by a quadratic, and those are the loops.
+fn tangent_cylinders(f: &Frame, r: f64, g: &Frame, s: f64) -> Option<Ssi> {
+    let (big, big_r, small, small_r) = if r > s { (f, r, g, s) } else { (g, s, f, r) };
+    let across = big.z.cross(small.z);
+    if across.norm() < 1e-9 {
+        return None;
+    }
+    let between = small.origin - big.origin;
+    let signed = between.dot(across) / across.norm();
+    if (signed.abs() - (big_r - small_r)).abs() > TOL {
+        return None;
+    }
+    // Toward the smaller cylinder's axis from the larger's, and the nearest point of that axis to the other.
+    let u = across.normalized() * signed.signum();
+    let n1 = small.z.cross(big.z);
+    let foot = small.origin + small.z * ((big.origin - small.origin).cross(big.z).dot(n1) / n1.norm2());
+    let touching = foot + u * small_r;
+    let v = small.z.cross(u);
+    let flat = |q: Vec3| q - big.z * q.dot(big.z);
+    let along = flat(small.z);
+    let loop_of = |sign: f64| -> Option<SsiCurve> {
+        const SAMPLES: usize = 360;
+        let mut points = Vec::with_capacity(SAMPLES + 1);
+        points.push(touching);
+        for k in 1..SAMPLES {
+            let (sin, cos) = (TAU * k as f64 / SAMPLES as f64).sin_cos();
+            let q = foot + (u * cos + v * sin) * small_r;
+            let b = flat(q - big.origin);
+            let (qa, qb, qc) = (along.dot(along), along.dot(b), b.dot(b) - big_r * big_r);
+            let h = (-qb + sign * (qb * qb - qa * qc).max(0.0).sqrt()) / qa;
+            points.push(q + small.z * h);
+        }
+        points.push(touching);
+        let (one, other) = (Surface::Cylinder { frame: *small, radius: small_r }, Surface::Cylinder { frame: *big, radius: big_r });
+        let curve = sampled_from_points(points, &one, &other).ok()?;
+        let n = curve_len(&curve);
+        Some(SsiCurve { curve, closed: true, t0: 0.0, t1: (n - 1) as f64 })
+    };
+    Some(Ssi::Curves { curves: vec![loop_of(1.0)?, loop_of(-1.0)?], crossings: vec![touching] })
 }
 
 /// A plane cutting across the sweep of a swept curve. Every point moves along the sweep direction by an
@@ -880,9 +959,20 @@ const MAX_SAMPLE_TURN: f64 = 12.0 * PI / 180.0;
 /// along a smooth curve and never vanishes, so one sign fits the whole curve.
 fn curve_tangents(points: &[Vec3], a: &Surface, b: &Surface) -> Result<Vec<Vec3>> {
     let mut tangents = Vec::with_capacity(points.len());
-    for &p in points {
+    let last = points.len().saturating_sub(1);
+    for (i, &p) in points.iter().enumerate() {
         let t = a.normal(p).cross(b.normal(p));
         if t.norm() < 1e-7 {
+            // A curve can run up to a place where its surfaces just touch, as where two loops cross, and stop there. It's well
+            // defined up to there, and its direction there is the way it came.
+            if (i == 0 || i == last) && points.len() >= 3 {
+                let (near, along) = if i == 0 { (points[2], points[1] - p) } else { (points[last - 2], p - points[last - 1]) };
+                let n = a.normal(near).cross(b.normal(near));
+                if along.norm() > 0.0 && n.norm() >= 1e-7 {
+                    tangents.push(along.normalized());
+                    continue;
+                }
+            }
             return Err(Error::NearDegenerate(format!(
                 "{} and {} are tangent along their intersection",
                 a.name(),
@@ -891,13 +981,20 @@ fn curve_tangents(points: &[Vec3], a: &Surface, b: &Surface) -> Result<Vec<Vec3>
         }
         tangents.push(t.normalized());
     }
+    // The cross product's sign comes out the same all along, but what was worked out from the curve's own points already
+    // goes the right way, so it's only the rest that can need turning round.
+    let from_points: Vec<bool> = points.iter().map(|&p| a.normal(p).cross(b.normal(p)).norm() < 1e-7).collect();
     let mut agreement = 0.0;
-    for (w, t) in points.windows(2).zip(&tangents) {
-        agreement += (w[1] - w[0]).dot(*t);
+    for (i, w) in points.windows(2).enumerate() {
+        if !from_points[i] {
+            agreement += (w[1] - w[0]).dot(tangents[i]);
+        }
     }
     if agreement < 0.0 {
-        for t in &mut tangents {
-            *t = -*t;
+        for (t, fixed) in tangents.iter_mut().zip(&from_points) {
+            if !fixed {
+                *t = -*t;
+            }
         }
     }
     Ok(tangents)

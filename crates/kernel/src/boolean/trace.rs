@@ -256,12 +256,57 @@ pub fn interior_points(
     wanted: usize,
     quick: bool,
 ) -> Vec<Vec2> {
+    let found = points_at_resolution(surface, chart, edges, loops, wanted, quick, 16);
+    // The polygon can stray further from a large arc than a thin wall is thick, and then a point well inside the polygons can
+    // be nowhere near the region. So where that can happen, each point is checked against the true curves, and if too few
+    // of them were really inside, the polygons get finer. A free-form surface's chart costs too much to do this on, and its
+    // edges are short by comparison with what they bound.
+    let curved = !matches!(surface, Surface::Free { .. }) && loops.iter().flatten().any(|c| !matches!(edges[c.edge].curve, crate::curve::Curve::Line { .. }) || !matches!(surface, Surface::Plane(_)));
+    if !curved {
+        return found;
+    }
+    let inside = |q: &Vec2| {
+        let mut memo = |t: f64, exact: &dyn Fn(f64) -> Vec2| {
+            let _ = t;
+            exact(t)
+        };
+        let turns: f64 = loops.iter().flatten().map(|c| super::classify::edge_winding(surface, chart, &edges[c.edge], c.reversed, *q, &mut memo)).sum::<f64>() / TAU;
+        turns.abs() > 0.5
+    };
+    let mut kept: Vec<Vec2> = found.iter().copied().filter(|q| inside(q)).collect();
+    if kept.len() == found.len() {
+        return found;
+    }
+    if !quick {
+        for finer in [64, 256, 1024] {
+            kept = points_at_resolution(surface, chart, edges, loops, wanted, quick, finer).into_iter().filter(|q| inside(q)).collect();
+            if kept.len() >= wanted.min(2) {
+                break;
+            }
+        }
+    }
+    if kept.is_empty() && !quick {
+        return found;
+    }
+    kept
+}
+
+#[allow(clippy::too_many_arguments)]
+fn points_at_resolution(
+    surface: &Surface,
+    chart: &Chart,
+    edges: &[Edge],
+    loops: &[Vec<Coedge>],
+    wanted: usize,
+    quick: bool,
+    samples: usize,
+) -> Vec<Vec2> {
     let fc = FaceChart { surface, chart, flipped: false };
     // Each loop with its bounds, so that far-away loops cost one comparison.
     let polys: Vec<(Vec<Vec2>, Vec2, Vec2)> = loops
         .iter()
         .map(|l| {
-            let poly = polygon_with(&fc, edges, l, 16);
+            let poly = polygon_with(&fc, edges, l, samples);
             let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
             for p in &poly {
                 lo = v2(lo.x.min(p.x), lo.y.min(p.y));
