@@ -89,11 +89,111 @@ pub fn fillet_with(body: &Body, edges: &[usize], radius: f64, options: BlendOpti
         return Err(Error::InvalidInput(format!("fillet radius {radius} is too small")));
     }
     let selected = if options.propagate { propagate_tangents(body, edges)? } else { edges.to_vec() };
-    // An exact surface where there is one. Where there isn't, a fitted one, held to a stated tolerance.
-    match blend(body, &selected, Kind::Fillet(radius), feature) {
-        Err(Error::Unsupported(_)) => crate::rolling::blend(body, edges, Kind::Fillet(radius), feature),
+    // A corner where convex edges and concave ones meet has no ball that touches them all. It does once the odd one out
+    // is done first, as the others then run smoothly around it.
+    let first = odd_ones_at_corners(body, &selected, radius);
+    if !first.is_empty() && first.len() < selected.len() {
+        let rest: Vec<usize> = selected.iter().copied().filter(|e| !first.contains(e)).collect();
+        let done = fillet_route(body, &first, &first, radius, feature)?;
+        let left = same_edges_in(body, &rest, &done);
+        if left.is_empty() {
+            return Ok(done);
+        }
+        // They now run around what was just done, whether or not this was asked to follow tangents.
+        let chain = propagate_tangents(&done, &left)?;
+        return fillet_route(&done, &chain, &left, radius, feature);
+    }
+    fillet_route(body, &selected, edges, radius, feature)
+}
+
+/// An exact surface where there is one. Where there isn't, a fitted one, held to a stated tolerance.
+fn fillet_route(body: &Body, selected: &[usize], asked: &[usize], radius: f64, feature: u32) -> Result<Body> {
+    match blend(body, selected, Kind::Fillet(radius), feature) {
+        Err(Error::Unsupported(_)) => crate::rolling::blend(body, asked, Kind::Fillet(radius), feature),
         other => other,
     }
+}
+
+/// Whether an edge is convex, with the material inside the angle its faces make.
+fn edge_is_convex(body: &Body, uses: &[Vec<(usize, usize, usize, bool)>], e: usize) -> Option<bool> {
+    let [a, b] = uses[e].as_slice() else {
+        return None;
+    };
+    let edge = &body.edges[e];
+    let p = edge.eval_mid();
+    let t = edge.curve.derivative((edge.t0 + edge.t1) / 2.0).normalized();
+    let (na, nb) = (body.faces[a.0].outward_normal(p), body.faces[b.0].outward_normal(p));
+    if na.cross(nb).norm() < 1e-6 {
+        return None;
+    }
+    // Going into the second face takes you below the first, if it's convex.
+    let along = if b.3 { -t } else { t };
+    Some(nb.cross(along).dot(na) < 0.0)
+}
+
+/// At each vertex where three selected edges meet that aren't all convex or all concave, the one that's different. The same
+/// goes for one too short to be a wall for the others, as on a thin plate: rounded first, the others run around it.
+fn odd_ones_at_corners(body: &Body, selected: &[usize], radius: f64) -> Vec<usize> {
+    let uses = body.edge_uses();
+    let mut at_vertex: Vec<Vec<usize>> = vec![Vec::new(); body.vertices.len()];
+    for &e in selected {
+        if e < body.edges.len() {
+            at_vertex[body.edges[e].v0].push(e);
+            at_vertex[body.edges[e].v1].push(e);
+        }
+    }
+    let mut odd = Vec::new();
+    for list in &at_vertex {
+        let [x, y, z] = list.as_slice() else {
+            continue;
+        };
+        let (Some(a), Some(b), Some(c)) = (edge_is_convex(body, &uses, *x), edge_is_convex(body, &uses, *y), edge_is_convex(body, &uses, *z)) else {
+            continue;
+        };
+        let length = |e: usize| -> f64 {
+            let edge = &body.edges[e];
+            edge.curve.eval(edge.t0).dist(edge.curve.eval(edge.t1))
+        };
+        let shortest = [*x, *y, *z].into_iter().min_by(|p, q| length(*p).total_cmp(&length(*q))).unwrap_or(*x);
+        let pick = if a == b && b != c {
+            *z
+        } else if a == c && b != c {
+            *y
+        } else if b == c && a != b {
+            *x
+        } else if length(shortest) < radius * (1.0 - 1e-9) {
+            shortest
+        } else {
+            continue;
+        };
+        if !odd.contains(&pick) {
+            odd.push(pick);
+        }
+    }
+    odd
+}
+
+/// Where edges of one body have got to in another made from it: whatever lies along them, between the same faces.
+fn same_edges_in(old: &Body, edges: &[usize], new: &Body) -> Vec<usize> {
+    let (old_uses, new_uses) = (old.edge_uses(), new.edge_uses());
+    let tags = |b: &Body, list: &[(usize, usize, usize, bool)]| -> Vec<FaceTag> {
+        let mut out: Vec<FaceTag> = list.iter().map(|u| b.faces[u.0].tag).collect();
+        out.sort_unstable();
+        out
+    };
+    let mut found = Vec::new();
+    for (g, list) in new_uses.iter().enumerate() {
+        let edge = &new.edges[g];
+        let m = edge.eval_mid();
+        for &e in edges {
+            let o = &old.edges[e];
+            if o.curve.closest(m, o.t0, o.t1).1 < 1e-7 && tags(new, list) == tags(old, &old_uses[e]) {
+                found.push(g);
+                break;
+            }
+        }
+    }
+    found
 }
 
 /// Adds every edge reachable from the selection through tangent continuation. An edge
@@ -386,6 +486,8 @@ struct Corner {
     p: Vec2,
     sides: [Side; 2],
     convex: bool,
+    /// One side's wall is too short for the ball, which takes this blend through its far edge instead.
+    through_edge: bool,
 }
 
 fn corner_of(body: &Body, run: &Run, section: &Section, size: f64) -> Result<Corner> {
@@ -428,18 +530,32 @@ fn corner_of(body: &Body, run: &Run, section: &Section, size: f64) -> Result<Cor
     }
     // Convex if going into one face takes you below the other.
     let convex = sides[1].into.dot(sides[0].normal) < 0.0;
-    Ok(Corner { p: section.project(p3), sides, convex })
+    Ok(Corner { p: section.project(p3), sides, convex, through_edge: false })
 }
 
 /// The swept profile for a corner, and the points used to judge its reach.
-fn profile_of(corner: &Corner, kind: Kind, circular: bool) -> Result<(Profile, Vec<Vec2>)> {
+fn profile_of(corner: &Corner, kind: Kind, circular: bool, far: [Option<Vec2>; 2]) -> Result<(Profile, Vec<Vec2>)> {
     let p = corner.p;
     let [a, b] = corner.sides;
     match kind {
         Kind::Fillet(r) => {
             let (c, t1, t2) = fillet_circle(p, &a, &b, r, corner.convex)?;
+            let (c, t1, t2) = match far {
+                [None, Some(e)] => {
+                    let (c, t) = circle_through(p, &a, e, r, corner.convex, c)?;
+                    (c, t, e)
+                }
+                [Some(e), None] => {
+                    let (c, t) = circle_through(p, &b, e, r, corner.convex, c)?;
+                    (c, e, t)
+                }
+                _ => (c, t1, t2),
+            };
             let arc_ccw = (t1 - c).cross(t2 - c) > 0.0;
             if circular && c.x < -TOL {
+                if far != [None, None] {
+                    return Err(Error::InvalidInput(format!("a fillet of radius {r} going through the far edge of its wall crosses this edge's axis")));
+                }
                 return clipped_at_axis(p, &a, &b, c, r, t1, t2);
             }
             let mut path = PathBuilder::new(p);
@@ -469,7 +585,7 @@ fn profile_of(corner: &Corner, kind: Kind, circular: bool) -> Result<(Profile, V
                     }
                 }
             };
-            let (t1, t2) = (walk(&a), walk(&b));
+            let (t1, t2) = (far[0].unwrap_or_else(|| walk(&a)), far[1].unwrap_or_else(|| walk(&b)));
             let mut path = PathBuilder::new(p);
             path = match a.trace {
                 Trace::Line => path.line_to(t1),
@@ -600,6 +716,146 @@ fn fillet_circle(p: Vec2, a: &Side, b: &Side, r: f64, convex: bool) -> Result<(V
     Ok((c, t1, t2))
 }
 
+/// The circle of radius `r` tangent to one trace and through a point, for a wall too short for the ball to touch: the ball
+/// rides on the wall's far edge instead. Of the two, it's the one nearer where the ball would have been. Gives its center,
+/// and where it touches.
+fn circle_through(p: Vec2, s: &Side, e: Vec2, r: f64, convex: bool, usual: Vec2) -> Result<(Vec2, Vec2)> {
+    let side = if convex { -1.0 } else { 1.0 };
+    let too_big = || Error::InvalidInput(format!("a fillet of radius {r} doesn't fit between its face and the far edge of its wall"));
+    let centers: Vec<Vec2> = match s.trace {
+        Trace::Line => {
+            let (q, d) = (p + s.normal * (side * r), s.into);
+            let foot = q + d * (e - q).dot(d);
+            let off = foot.dist(e);
+            if off > r + TOL {
+                return Err(too_big());
+            }
+            let h = (r * r - off * off).max(0.0).sqrt();
+            vec![foot + d * h, foot - d * h]
+        }
+        Trace::Arc { centre, radius } => {
+            let bulging = s.normal.dot(p - centre) > 0.0;
+            let around = if bulging { radius + side * r } else { radius - side * r };
+            let dist = centre.dist(e);
+            if around <= TOL || dist < 1e-12 || dist > around + r + TOL || dist < (around - r).abs() - TOL {
+                return Err(too_big());
+            }
+            let u = (e - centre) / dist;
+            let x = (dist * dist + around * around - r * r) / (2.0 * dist);
+            let h = (around * around - x * x).max(0.0).sqrt();
+            let w = v2(-u.y, u.x);
+            vec![centre + u * x + w * h, centre + u * x - w * h]
+        }
+    };
+    let touching = |c: Vec2| -> Vec2 {
+        match s.trace {
+            Trace::Line => p + s.into * (c - p).dot(s.into),
+            Trace::Arc { centre, radius } => centre + (c - centre).normalized() * radius,
+        }
+    };
+    let c = centers.into_iter().filter(|c| (touching(*c) - p).dot(s.into) > 0.0).min_by(|x, y| x.dist(usual).total_cmp(&y.dist(usual))).ok_or_else(too_big)?;
+    Ok((c, touching(c)))
+}
+
+/// Where along a run to look: between its ends, since those are shared with whatever is there.
+fn stations_of(run: &Run, section: &Section) -> Vec<f64> {
+    let (from, to) = if section.circular { (run.t0, run.t1) } else { (0.0, run.t1 - run.t0) };
+    [0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99].iter().map(|k| from + (to - from) * k).collect()
+}
+
+/// The stretch of a run where a contact lands on its face, if it runs off only near the ends, found to well within what
+/// matters. Gives where it starts and stops, in the same terms as the stations.
+fn on_face_span(stations: &[f64], clear: f64, landed: impl Fn(f64) -> bool) -> Option<(f64, f64)> {
+    let (lo, hi) = (*stations.first()?, *stations.last()?);
+    let first = stations.iter().position(|st| landed(*st))?;
+    let last = stations.iter().rposition(|st| landed(*st))?;
+    if first >= last || (first..=last).any(|i| !landed(stations[i])) {
+        return None;
+    }
+    let settle = |mut off: f64, mut on: f64| -> f64 {
+        for _ in 0..40 {
+            let m = (off + on) / 2.0;
+            if landed(m) {
+                on = m;
+            } else {
+                off = m;
+            }
+        }
+        on
+    };
+    let a = if first == 0 { lo } else { settle(stations[first - 1], stations[first]) + clear };
+    let b = if last + 1 == stations.len() { hi } else { settle(stations[last + 1], stations[last]) - clear };
+    (b > a).then_some((a, b))
+}
+
+/// How far along a side's trace from the corner a point is, if it's on the trace at all.
+fn along_trace(s: &Side, p: Vec2, q: Vec2) -> Option<f64> {
+    match s.trace {
+        Trace::Line => {
+            let d = q - p;
+            (d.cross(s.into).abs() < 1e-6).then(|| d.dot(s.into))
+        }
+        Trace::Arc { centre, radius } => {
+            if (q.dist(centre) - radius).abs() > 1e-6 {
+                return None;
+            }
+            let (u, w) = (p - centre, q - centre);
+            let sense = if u.cross(s.into) > 0.0 { 1.0 } else { -1.0 };
+            let turn = (u.cross(w) * sense).atan2(u.dot(w));
+            Some(turn * radius)
+        }
+    }
+}
+
+/// The faces along one side of a run: a rim's wall can be two halves.
+fn faces_along(body: &Body, run: &Run, side: &Side, size: f64) -> Vec<usize> {
+    let uses = body.edge_uses();
+    let mut out = vec![side.face];
+    for &m in &run.members {
+        for u in &uses[m] {
+            if !out.contains(&u.0) && coincident(&body.faces[u.0].surface, &body.faces[side.face].surface, size).is_some() {
+                out.push(u.0);
+            }
+        }
+    }
+    out
+}
+
+/// The far edge of a side's faces, if they're too short for what's asked of them all along this run: the nearest edge
+/// that's one point in section, on the trace before the contact, and that's there at every station.
+#[allow(clippy::too_many_arguments)]
+fn far_edge_of(body: &Body, run: &Run, section: &Section, s: &Side, faces: &[usize], p: Vec2, contact: Vec2, stations: &[f64]) -> Option<Vec2> {
+    let limit = along_trace(s, p, contact)?;
+    let mut found: Vec<(f64, Vec2)> = Vec::new();
+    for c in faces.iter().flat_map(|f| body.faces[*f].loops.iter().flatten()) {
+        if run.members.contains(&c.edge) {
+            continue;
+        }
+        let e = &body.edges[c.edge];
+        let q = section.project(e.curve.eval(e.t0));
+        let one_point = [0.25, 0.5, 0.75, 1.0].iter().all(|k| section.project(e.curve.eval(e.t0 + (e.t1 - e.t0) * k)).dist(q) < 1e-7);
+        if !one_point {
+            continue;
+        }
+        let Some(d) = along_trace(s, p, q) else {
+            continue;
+        };
+        if d > MIN_FEATURE && d < limit - TOL {
+            found.push((d, q));
+        }
+    }
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // All along, on that same line: a window in the wall has edges like this too, for part of the way.
+    let there = |q: Vec2, st: f64| -> bool {
+        let at = section.lift(q, st);
+        faces.iter().flat_map(|f| body.faces[*f].loops.iter().flatten()).any(|c| {
+            let e = &body.edges[c.edge];
+            !run.members.contains(&c.edge) && e.curve.closest(at, e.t0, e.t1).1 < 1e-7
+        })
+    };
+    found.into_iter().map(|x| x.1).find(|q| stations.iter().all(|st| there(*q, *st)))
+}
+
 /// Region centre for probing what lies past the end of an edge.
 fn centroid(points: &[Vec2]) -> Vec2 {
     let mut c = Vec2::default();
@@ -692,8 +948,9 @@ fn end_condition(
     if let [only] = blockers.as_slice() {
         if let Some(plane) = plane_of(*only) {
             if plane.z.cross(dir).norm() > 1e-6 {
-                // An oblique wall: the tool has to end along it, not square across.
-                let inward = section.lift(c, station) - dir * step;
+                // An oblique wall: the tool has to end along it, not square across. Which side of it to keep is the side the
+                // middle of the run is on. Right at the end, the section can already be on the other side of a slanted wall.
+                let inward = section.lift(c, section.station);
                 return Ok(End::Clip { plane, keep: inward, reach: reach_section * 3.0 + margin });
             }
         }
@@ -745,7 +1002,8 @@ fn sweep(profile: &Profile, run: &Run, section: &Section, ends: [End; 2], featur
     for end in &ends {
         if let End::Clip { plane, keep, reach } = end {
             let centre = *keep;
-            let keep_side = half_space(plane, *keep, centre, reach * 4.0, feature)?;
+            // Big enough for all of the tool, however long its run.
+            let keep_side = half_space(plane, *keep, centre, reach * 4.0 + tool.aabb().diagonal() * 2.0, feature)?;
             tool = boolean_with(&tool, &keep_side, BoolOp::Intersect, Checks::Interim)?;
         }
     }
@@ -775,24 +1033,36 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
     let mut cuts = Vec::new();
     let mut adds = Vec::new();
     let mut corners: Vec<(usize, Vec<Vec2>, Corner, Section)> = Vec::new();
+    // What each run's tool was made from, to make it again running further.
+    let mut made: Vec<(Profile, [End; 2], f64)> = Vec::new();
+    let name = match kind {
+        Kind::Fillet(_) => "fillet",
+        Kind::Chamfer(_) => "chamfer",
+    };
     for (i, run) in runs.iter().enumerate() {
         let section = section_of(run, size)?;
-        let corner = corner_of(body, run, &section, size)?;
-        let (profile, points) = profile_of(&corner, kind, section.circular)?;
-        // Both contacts must land on their faces, or the blend overruns them.
-        for (s, &q) in corner.sides.iter().zip(&points[1..3]) {
-            let p3 = section.lift(q, section.station);
-            if index.locate_on_face(s.face, p3, 2.0 * TOL) == FaceLoc::Outside {
-                return Err(Error::InvalidInput(format!(
-                    "a {} of this size runs off the neighbouring {}",
-                    match kind {
-                        Kind::Fillet(_) => "fillet",
-                        Kind::Chamfer(_) => "chamfer",
-                    },
-                    body.faces[s.face].surface.name()
-                )));
+        let mut corner = corner_of(body, run, &section, size)?;
+        let (mut profile, mut points) = profile_of(&corner, kind, section.circular, [None, None])?;
+        let stations = stations_of(run, &section);
+        let along = [faces_along(body, run, &corner.sides[0], size), faces_along(body, run, &corner.sides[1], size)];
+        let landed = |s: usize, q: Vec2, st: f64| along[s].iter().any(|f| index.locate_on_face(*f, section.lift(q, st), 2.0 * TOL) != FaceLoc::Outside);
+        // A wall too short for the ball all along the run: it rides on the wall's far edge.
+        let far_of = |s: usize, points: &[Vec2]| -> Option<Vec2> {
+            let q = points[s + 1];
+            if stations.iter().any(|st| landed(s, q, *st)) {
+                return None;
             }
+            far_edge_of(body, run, &section, &corner.sides[s], &along[s], corner.p, q, &stations)
+        };
+        let far = [far_of(0, &points), far_of(1, &points)];
+        if far[0].is_some() && far[1].is_some() {
+            return Err(Error::InvalidInput(format!("a {name} of this size doesn't fit: both of the faces beside this edge are too short for it")));
         }
+        let through_edge = far != [None, None];
+        if through_edge {
+            (profile, points) = profile_of(&corner, kind, section.circular, far)?;
+        }
+        corner.through_edge = through_edge;
         if section.circular && points.iter().any(|q| q.x < -TOL) {
             return Err(Error::InvalidInput("the blend crosses the axis of this circular edge".into()));
         }
@@ -810,25 +1080,140 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
                 end_condition(body, &index, run, &runs, &section, &points, corner.convex, run.v1, d1, s1)?,
             ]
         };
-        let mut tool = sweep(&profile, run, &section, ends, feature)?;
+        // Where a contact has nothing to land on, part of the way along, it's only wrong if the tool would then do damage:
+        // cut into material beyond the wall, or stick out with nothing under it. Otherwise there's a hole there, say, and
+        // the Boolean finishes the job.
+        let mut hold_to: Vec<usize> = Vec::new();
+        for s in 0..2 {
+            if far[s].is_some() {
+                continue;
+            }
+            let q = points[s + 1];
+            for st in &stations {
+                if landed(s, q, *st) {
+                    continue;
+                }
+                let at = section.lift(q, *st);
+                let n = body.faces[corner.sides[s].face].outward_normal(at);
+                let damage = if corner.convex { index.locate_in_body(at) == BodyLoc::Inside } else { index.locate_in_body(at - n * (1e-3 * size.min(1.0))) == BodyLoc::Outside };
+                if damage {
+                    hold_to.push(s);
+                    break;
+                }
+            }
+        }
+        // What it does past the end of a face is kept to what's over or under that face.
+        let reach_section = points.iter().flat_map(|a| points.iter().map(move |b| a.dist(*b))).fold(0.0, f64::max);
+        // The face's edge can be exactly where it can't be cut, as where a web runs tangent into a boss. If it's only near the
+        // ends that it runs off, the blend can stop where it does, a little short of that, or it ends right on the face's edge,
+        // which is just as hard to cut.
+        let stopped_short = |sides: &[usize]| -> Option<Result<Body>> {
+            let (mut from, mut to) = (f64::MIN, f64::MAX);
+            for &s in sides {
+                let q = points[s + 1];
+                let clear = 0.02 * reach_section / if section.circular { q.x.max(1e-9) } else { 1.0 };
+                let (a, b) = on_face_span(&stations, clear, |st| landed(s, q, st))?;
+                from = from.max(a);
+                to = to.min(b);
+            }
+            if !(to > from) {
+                return None;
+            }
+            let (from, to) = if section.circular { (from, to) } else { (run.t0 + from, run.t0 + to) };
+            let short = Run { t0: from, t1: to, ..run.clone() };
+            Some(section_of(&short, size).and_then(|place| sweep(&profile, &short, &place, [End::Flush, End::Flush], feature)))
+        };
+        let swept = sweep(&profile, run, &section, ends, feature);
+        let mut tool = match swept {
+            Ok(tool) => tool,
+            Err(why) => {
+                let off: Vec<usize> = (0..2).filter(|s| far[*s].is_none() && stations.iter().any(|st| !landed(*s, points[*s + 1], *st))).collect();
+                if off.is_empty() {
+                    return Err(why);
+                }
+                match stopped_short(&off) {
+                    Some(Ok(tool)) => tool,
+                    _ => return Err(why),
+                }
+            }
+        };
+        for s in hold_to {
+            let thickness = 2.0 * reach_section * if corner.convex { -1.0 } else { 1.0 };
+            let kept = crate::thicken::thicken(body, &along[s], thickness, feature).and_then(|over| boolean_with(&tool, &over, BoolOp::Intersect, Checks::Interim));
+            tool = match kept {
+                Ok(kept) => kept,
+                Err(why) => match stopped_short(&[s]) {
+                    Some(Ok(short)) => short,
+                    _ => return Err(Error::InvalidInput(format!("a {name} of this size runs off the neighbouring {}, part of the way along, and can't be kept to it: {why}", body.faces[corner.sides[s].face].surface.name()))),
+                },
+            };
+        }
         mark_source(&mut tool, body, &run.faces);
         if corner.convex {
             cuts.push(tool);
         } else {
             adds.push(tool);
         }
+        made.push((profile, ends, reach_section));
         corners.push((i, points, corner, section));
     }
 
-    // Corners where three blended convex edges meet get a sphere, the shape a rolling
-    // ball actually makes. The tools alone would leave a sharp peak there.
+    // Two blended edges that meet at an angle with their tools stopped short: in a reflex corner, say, where going on would
+    // cut what the other doesn't. Where the tools would both have gone, they meet in a mitre.
+    for v in 0..body.vertices.len() {
+        let here: Vec<(usize, usize)> = runs.iter().enumerate().filter(|(_, run)| !run.closed).flat_map(|(i, run)| [(i, 0, run.v0), (i, 1, run.v1)]).filter(|x| x.2 == v).map(|x| (x.0, x.1)).collect();
+        let [(a, ea), (b, eb)] = here.as_slice() else {
+            continue;
+        };
+        let valence = body.edges.iter().filter(|e| e.v0 == v || e.v1 == v).count();
+        if a == b || valence != 3 || corners[*a].2.convex != corners[*b].2.convex || !matches!(made[*a].1[*ea], End::Flush) || !matches!(made[*b].1[*eb], End::Flush) {
+            continue;
+        }
+        let leaving = |i: usize, end: usize| -> Vec3 {
+            let run = &runs[i];
+            if end == 0 {
+                run.curve.derivative(run.t0).normalized()
+            } else {
+                -run.curve.derivative(run.t1).normalized()
+            }
+        };
+        let sine = leaving(*a, *ea).cross(leaving(*b, *eb)).norm();
+        if sine < 1e-6 {
+            continue;
+        }
+        let on_past = |i: usize, end: usize| -> Result<Body> {
+            let (profile, ends, reach) = &made[i];
+            let mut ends = *ends;
+            ends[end] = End::Extend(3.0 * reach / sine);
+            sweep(profile, &runs[i], &corners[i].3, ends, feature)
+        };
+        let piece = on_past(*a, *ea).and_then(|x| on_past(*b, *eb).and_then(|y| boolean_with(&x, &y, BoolOp::Intersect, Checks::Interim)));
+        if let Ok(mut piece) = piece {
+            if !piece.faces.is_empty() {
+                let meeting: Vec<usize> = [*a, *b].iter().flat_map(|i| runs[*i].faces).collect();
+                mark_source(&mut piece, body, &meeting);
+                if corners[*a].2.convex {
+                    cuts.push(piece);
+                } else {
+                    adds.push(piece);
+                }
+            }
+        }
+    }
+
+    // Corners where three blended edges meet, all convex or all concave, get a sphere, the shape a
+    // rolling ball actually makes. The tools alone would leave a sharp peak there.
     if let Kind::Fillet(r) = kind {
         for v in 0..body.vertices.len() {
-            if let Some(mut tool) = sphere_corner(body, &runs, &corners, v, r, feature)? {
+            if let Some((mut tool, convex)) = sphere_corner(body, &runs, &corners, v, r, feature)? {
                 let meeting: Vec<usize> =
                     runs.iter().filter(|run| !run.closed && (run.v0 == v || run.v1 == v)).flat_map(|run| run.faces).collect();
                 mark_source(&mut tool, body, &meeting);
-                cuts.push(tool);
+                if convex {
+                    cuts.push(tool);
+                } else {
+                    adds.push(tool);
+                }
             }
         }
     }
@@ -855,8 +1240,8 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
     Ok(out)
 }
 
-/// The piece of corner outside the rolling ball, where three convex blended straight
-/// edges between planes meet at a vertex.
+/// The piece of corner outside the rolling ball, where three blended straight edges between planes meet at a vertex, all
+/// convex or all concave. Which of those it is comes with it: it's cut from a convex corner and added to a concave one.
 fn sphere_corner(
     body: &Body,
     runs: &[Run],
@@ -864,7 +1249,7 @@ fn sphere_corner(
     v: usize,
     r: f64,
     feature: u32,
-) -> Result<Option<Body>> {
+) -> Result<Option<(Body, bool)>> {
     let here: Vec<usize> = runs
         .iter()
         .enumerate()
@@ -875,9 +1260,10 @@ fn sphere_corner(
         return Ok(None);
     };
     let mut planes: Vec<Frame> = Vec::new();
+    let convex = corners[*a].2.convex;
     for &i in &[*a, *b, *c] {
         let (_, _, corner, section) = &corners[i];
-        if !corner.convex || section.circular {
+        if corner.convex != convex || corner.through_edge || section.circular {
             return Ok(None);
         }
         for s in &corner.sides {
@@ -896,13 +1282,14 @@ fn sphere_corner(
     let [p1, p2, p3] = planes.as_slice() else {
         return Ok(None);
     };
-    // The ball's centre is `r` under each of the three planes.
+    // The ball's centre is `r` under each of the three planes, or over them in a concave corner.
     let (n1, n2, n3) = (p1.z, p2.z, p3.z);
     let det = n1.dot(n2.cross(n3));
     if det.abs() < 1e-9 {
         return Ok(None);
     }
-    let (d1, d2, d3) = (n1.dot(p1.origin) - r, n2.dot(p2.origin) - r, n3.dot(p3.origin) - r);
+    let off = if convex { -r } else { r };
+    let (d1, d2, d3) = (n1.dot(p1.origin) + off, n2.dot(p2.origin) + off, n3.dot(p3.origin) + off);
     let centre = (n2.cross(n3) * d1 + n3.cross(n1) * d2 + n1.cross(n2) * d3) / det;
     let corner_point = body.vertices[v];
 
@@ -934,7 +1321,7 @@ fn sphere_corner(
     }
     let block = block.unwrap();
     let ball = sphere(&Frame::new(centre, (corner_point - centre).normalized(), Vec3::X), r, feature)?;
-    Ok(Some(boolean_with(&block, &ball, BoolOp::Subtract, Checks::Interim)?))
+    Ok(Some((boolean_with(&block, &ball, BoolOp::Subtract, Checks::Interim)?, convex)))
 }
 
 // ----- Picking edges -----

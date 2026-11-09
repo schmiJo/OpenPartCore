@@ -133,8 +133,8 @@ fn rollback_shows_earlier_states_without_recomputing() {
 fn a_failing_feature_keeps_the_last_good_body_and_recovers() {
     let (mut doc, _) = plate();
     doc.rebuild(None);
-    // A fillet bigger than the 6 mm face it runs along.
-    doc.set_parameter("r", 7.0).unwrap();
+    // A fillet bigger than both of the faces it's between.
+    doc.set_parameter("r", 500.0).unwrap();
     let o = doc.rebuild(None);
     assert_eq!(o.failed, Some(2));
     assert!(matches!(o.steps[2].state, StepState::Failed(_)));

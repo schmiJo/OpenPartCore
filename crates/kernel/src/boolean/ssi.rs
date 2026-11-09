@@ -858,7 +858,32 @@ fn contour_at(
                 }
             }
         }
-        let curve = sampled_from_points(points, a, b).map_err(Trouble::Fatal)?;
+        let curve = match sampled_from_points(points.clone(), a, b) {
+            Ok(curve) => curve,
+            // A stretch that's tangent all along is only touching, as where two parts of a blend meet, and it can't be
+            // followed. What's on either side of it is still a crossing. If that leaves a loose end that matters, the result
+            // won't close, and that gets refused.
+            Err(why) => {
+                if !sines.iter().any(|s| *s < 1e-3) {
+                    return Err(Trouble::Fatal(why));
+                }
+                let mut part: Vec<Vec3> = Vec::new();
+                for (i, p) in points.iter().enumerate() {
+                    if sines[i] >= 1e-3 {
+                        part.push(*p);
+                    }
+                    if sines[i] < 1e-3 || i + 1 == points.len() {
+                        if part.len() >= 2 {
+                            let curve = sampled_from_points(part.clone(), a, b).map_err(Trouble::Fatal)?;
+                            let n = curve_len(&curve);
+                            out.push(SsiCurve { curve, closed: false, t0: 0.0, t1: (n - 1) as f64 });
+                        }
+                        part.clear();
+                    }
+                }
+                continue;
+            }
+        };
         let n = curve_len(&curve);
         out.push(SsiCurve { curve, closed, t0: 0.0, t1: (n - 1) as f64 });
     }

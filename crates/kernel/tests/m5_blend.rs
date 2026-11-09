@@ -300,10 +300,28 @@ fn fillet_the_foot_of_a_boss() {
 fn oversized_blends_are_refused() {
     let b = block();
     let e = edge_at(&b, v3(10.0, 0.0, 6.0));
-    assert!(fillet(&b, &[e], 7.0, 9).is_err(), "radius larger than the 6 mm face");
-    assert!(chamfer(&b, &[e], 7.0, 9).is_err());
+    // Too big for both of the faces beside it, a 6 mm wall and a 10 mm top.
+    assert!(fillet(&b, &[e], 12.0, 9).is_err(), "radius larger than both faces");
+    assert!(chamfer(&b, &[e], 12.0, 9).is_err());
     assert!(fillet(&b, &[e], 0.0, 9).is_err());
     assert!(chamfer(&b, &[9999], 1.0, 9).is_err());
+}
+
+#[test]
+fn a_blend_too_big_for_one_face_runs_to_its_far_edge() {
+    let b = block();
+    let e = edge_at(&b, v3(10.0, 0.0, 6.0));
+    // Tangent to the top this far back, and through the wall's bottom edge. How deep the cut is at `x` back from the corner
+    // is r - sqrt(r^2 - (a - x)^2), and that adds up to this.
+    let (r, h): (f64, f64) = (7.0, 6.0);
+    let a = (2.0 * r * h - h * h).sqrt();
+    let cut = a * r - 0.5 * a * (r - h) - 0.5 * r * r * (a / r).asin();
+    let f = fillet(&b, &[e], r, 9).unwrap();
+    close(vol(&f), 1200.0 - cut * 20.0, 1e-10, "fillet too big for the wall");
+    mesh_ok(&f, "fillet too big for the wall");
+    let f = chamfer(&b, &[e], 7.0, 9).unwrap();
+    close(vol(&f), 1200.0 - 0.5 * 7.0 * 6.0 * 20.0, 1e-10, "chamfer too big for the wall");
+    mesh_ok(&f, "chamfer too big for the wall");
 }
 
 #[test]

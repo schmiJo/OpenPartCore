@@ -231,7 +231,11 @@ Supported:
 - A rim whose corner radius equals the fillet radius: a sphere at each corner, matching
   OpenCASCADE to 1e-9.
 - A rim whose corner radius is below the fillet radius: see the difference below.
-- A sphere patch where three convex edges between planes meet.
+- A sphere patch where three edges between planes meet, all convex or all concave.
+- Corners where convex and concave edges meet, or where one of three is too short to be a wall for the others. The odd one is done first, and the other two then run smoothly around it. OpenCASCADE gets the same volume to 1e-15 on an L's rim and uprights and a pocket's floor, walls and mouth.
+- Two edges meeting at an angle with the third left sharp: a mitre, in a reflex corner as well, where they used to stop short with a step.
+- **A wall too short for the ball.** If a face beside the edge ends before the ball can touch it, all along the edge, the fillet stays tangent to the other face and runs through that face's far edge, which stays where it was. That takes straight and round edges, convex and concave: thin plates, the rims of holes in them, low bosses and ribs, steps and shaft shoulders. Each is checked against a formula, as OpenCASCADE refuses every one of them. A chamfer does the same.
+- **A face that ends part of the way along the edge.** A hole across the contact line just cuts the fillet. Where the blend would otherwise cut into what's beyond a wall or hang out over nothing, it's kept to what's under or over that face, so a boss's fillet near the plate's edge stops at the plate's side, which rises to meet it.
 
 Supported, but fitted and not exact, which makes them the only results in this kernel that are neither exact nor refused:
 
@@ -241,8 +245,7 @@ Supported, but fitted and not exact, which makes them the only results in this k
 Not supported, returning an error:
 
 - Variable radius.
-- A radius that runs off a neighbouring face. Real kernels can absorb the overrun and restructure
-  the neighbours. This one refuses.
+- A radius too big for both of the faces beside the edge.
 - A fitted blend passing a vertex where a sharp edge meets it, or that ends where more than one face lies beyond it. Those need corner blends.
 - A fitted blend's end at a reflex corner, where its side would end past the neighbouring edge, which takes reshaping that neighbour.
 - A surface so kinked that the fit doesn't reach its tolerance within 1,024 stations.
@@ -263,8 +266,10 @@ Works, but differs from commercial CAD:
 
 - Two filleted edges meeting at a corner with a third edge left sharp end in a plain mitre, with
   no vertex blend.
-- Mixed convex and concave edges at one vertex have little test coverage. The Boolean checks
-  still guard the result, but the shape may not be the one you'd pick.
+- **A web running exactly tangent into a boss.** The fillet where they meet would run off the web near each tangent point, and the web's side can't be cut there, as a plane touches the fillet's surface at a single point. So the fillet stops just before it runs off, and what's left of that edge stays sharp. OpenCASCADE refuses this one. Real kernels can blend it all the way.
+- **A wall that's too short for only part of the way along** keeps the usual arc, cut off by the wall's far edge or kept to the face, so there's a crease where the two meet. Real kernels can roll along that edge for a smoother result. On a boss 2 mm from a plate's edge with a fillet of 5, this kernel adds 367.1 and OpenCASCADE, which rolls over the plate's edge, 348.1. This one's is checked against a formula for what it does.
+
+**Realistic parts** (`--example fillet_cases`, `scripts/check_fillets.sh`): 62 parts, with one that should be refused. Of the first 51 tried, 13 were refused, and several more came out valid but with a shape OpenCASCADE or a formula disagreed with, in three ways: a step at a reflex corner, a sharp peak in a concave corner, and a fillet ending on a slanted face that stopped short of the far end of its edge, or that next to nothing was left of. All 61 now come out valid and closed, 24 of them match a formula, and all 61 read back in OpenCASCADE valid and with the same volume. Where it does them at all, it agrees to 1e-6 relative on all but the two known differences described here: a rim tighter than the radius, and a fillet running off part of a face.
 
 **Random slider positions on the demos** (200 per model, `--example scan` in `crates/wasm`): no invalid bodies.
 
