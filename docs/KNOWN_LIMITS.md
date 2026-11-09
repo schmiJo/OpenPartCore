@@ -151,13 +151,12 @@ Parts held by a fastened mate that's already met move as one and cost next to no
 
 - **A drag gets as close as it can, and says how far off that is.** A chain at full stretch can't reach a point beside its end, and `remaining` is the right distance, by formula.
 - **Whether two faces start out facing each other.** A mate brings z axes together, and Onshape's help says the same, with a flip to reverse them. I couldn't find it stated what Onshape picks by default for two faces, so here, nothing is picked for you. Two outward faces end up with one inside the other until flipped.
-- **A sub-assembly's mates keep no turn count.** Its own `turned` is kept in its own tab, so a limit or relation inside one, past a whole turn, is measured from where it starts each time it's solved from above.
 - **A sub-assembly's parts in STEP are flattened** into uses under one top product: the positions and parts are right, and its tree isn't kept. Reading a file keeps uses and part names, and also flattens.
 - **A mate connector's centroid on a curved outline** comes from 64 straight pieces per edge. On a 40 mm plate with a 10 mm hole a test holds it within 0.01 mm, which is fine for a place to put something, and it isn't used for anything measured.
 - **A connector found from a key that covers several faces** uses the first. Keys naming a piece (`#0`) avoid this.
 - **Interference is by Boolean,** so what a Boolean refuses comes back in `couldnt_tell` rather than as an answer, and every pair whose boxes meet takes a Boolean. Parts that only touch don't count. It's only as fast as the Booleans: an assembly of many complicated parts close together will take a while.
 - **Mates aren't undone by failing.** A mate that can't be met stays there, named, as in Onshape, and the rest still solve.
-- **Drive steps.** Taking a mate to a value goes in steps of 15 degrees, or 1/24 of the assembly's size, stopping at the last that worked. So stopped by a limit or a mechanism's end, it can be up to one step short of it, whereas a drag gets all the way.
+- **Drive steps.** Taking a mate to a value goes in steps of 15 degrees, or 1/24 of the assembly's size, so it stays on its branch. Stopped by a limit or a mechanism's end, it narrows down the place, to about 0.004 of a degree, and says where it got to. A jump between branches at a step can't be told from a move along one, but a test holds a slider-crank to its formula over two turns at five sets of lengths.
 
 ## Swept spline surfaces
 

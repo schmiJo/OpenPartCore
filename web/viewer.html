@@ -213,6 +213,8 @@ dd { margin: 0; text-align: right; font: 400 13.5px/1.6 var(--num); font-variant
             <dt>Surface area</dt><dd id="rArea"></dd>
             <dt>Faces, edges, vertices</dt><dd id="rTopo"></dd>
             <dt>Bodies</dt><dd id="rBodies"></dd>
+            <dt id="lMates" hidden>Mates</dt><dd id="rMates" hidden></dd>
+            <dt id="lReading" hidden></dt><dd id="rReading" hidden></dd>
             <dt>Shells, genus</dt><dd id="rShells"></dd>
             <dt>Touches itself at</dt><dd id="rContacts"></dd>
             <dt>Triangles</dt><dd id="rTris"></dd>
@@ -789,6 +791,25 @@ async function start() {
       $("failure").textContent = `${failed.name} failed at these dimensions, so the model stops before it. ${failed.error}`;
     } else if (!info.ok) {
       $("failure").textContent = "This state cannot be shown. " + info.error;
+    }
+    // A mechanism says how free it is, where it's got to, and when something stopped it getting where it was asked.
+    const asm = info.assembly;
+    const reading = asm && asm.readout[0];
+    $("lMates").hidden = $("rMates").hidden = !asm;
+    $("lReading").hidden = $("rReading").hidden = !reading;
+    if (asm) {
+      $("rMates").textContent = `${asm.mates} on ${asm.parts} instances, ${asm.freedom} free ${asm.freedom === 1 ? "motion" : "motions"}`;
+      if (reading) {
+        $("lReading").textContent = reading.label;
+        $("rReading").textContent = `${reading.value.toFixed(2)} ${reading.unit}`;
+      }
+      const wrong = asm.failing.map((f) => f.why).concat(asm.problems);
+      if (!failed && (asm.stopped || wrong.length)) {
+        $("failure").hidden = false;
+        $("failure").textContent = wrong.length
+          ? `A mate can't be met: ${wrong.join("; ")}`
+          : `Asked for ${asm.asked.toFixed(1)}\u00b0, it stops at ${asm.reached.toFixed(1)}\u00b0: the other mates don't let it go further at these lengths.`;
+      }
     }
     $("rRebuilt").textContent = `${info.rebuilt} of ${info.features.length}`;
     $("rTime").textContent = ms.toFixed(1) + " ms";

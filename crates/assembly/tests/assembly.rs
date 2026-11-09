@@ -468,7 +468,44 @@ fn a_slider_driven_past_where_it_can_go_stops_at_the_end() {
     assert!(solved.failing.is_empty());
     let at = pose(&solved, s.slider).to_world(v3(10.0, 10.0, 0.0));
     assert!(at.x <= s.crank + s.rod + 1e-6, "{at:?}");
+    // It starts at the very end of its travel, so there's nowhere further to go.
+    assert!(at.x > s.crank + s.rod - 1e-3, "{at:?}");
     assert!(solved.remaining.is_none());
+}
+
+#[test]
+fn a_mate_driven_past_a_stop_ends_up_at_the_stop() {
+    let (mut p, studio, assembly, parts) = project(vec![block("10", "10", "10"), block("100", "10", "10")]);
+    let (a, b) = (instance(&mut p, assembly, studio, parts[0], "Base"), instance(&mut p, assembly, studio, parts[1], "Arm"));
+    p.assembly_mut(assembly).unwrap().instance_mut(a).unwrap().fixed = true;
+    let (ca, cb) = (at_point(&mut p, assembly, a, Vec3::ZERO, Vec3::Z, Vec3::X), at_point(&mut p, assembly, b, Vec3::ZERO, Vec3::Z, Vec3::X));
+    let m = mate(&mut p, assembly, MateKind::Revolute, ca, cb);
+    p.assembly_mut(assembly).unwrap().mate_mut(m).unwrap().limits = vec![MateLimit { dof: Dof::Angle, min: -30.0, max: 47.0 }];
+    p.solve(assembly).unwrap();
+    // Steps of 15 degrees would stop short of it at 45, if that was all there was to it.
+    let got = value(&p.set_mate_value(assembly, m, Dof::Angle, 180.0).unwrap(), m, Dof::Angle);
+    assert!((got - 47.0).abs() < 0.01 && got <= 47.0 + 1e-6, "stopped at {got}");
+    let got = value(&p.set_mate_value(assembly, m, Dof::Angle, -180.0).unwrap(), m, Dof::Angle);
+    assert!((got + 30.0).abs() < 0.01 && got >= -30.0 - 1e-6, "stopped at {got}");
+}
+
+#[test]
+fn a_mate_failing_elsewhere_doesnt_stop_one_being_driven() {
+    let (mut p, studio, assembly, parts) = project(vec![block("10", "10", "10"), block("100", "10", "10"), block("10", "10", "10"), block("10", "10", "10")]);
+    let (a, b, c, d) = (instance(&mut p, assembly, studio, parts[0], "A"), instance(&mut p, assembly, studio, parts[1], "B"), instance(&mut p, assembly, studio, parts[2], "C"), instance(&mut p, assembly, studio, parts[3], "D"));
+    let asm = p.assembly_mut(assembly).unwrap();
+    asm.instance_mut(a).unwrap().fixed = true;
+    // C and D are both fixed, apart, with a mate that can't be met between them.
+    asm.instance_mut(c).unwrap().fixed = true;
+    asm.instance_mut(d).unwrap().fixed = true;
+    asm.instance_mut(d).unwrap().at = Frame::translation(v3(500.0, 0.0, 0.0));
+    let (ca, cb) = (at_point(&mut p, assembly, a, Vec3::ZERO, Vec3::Z, Vec3::X), at_point(&mut p, assembly, b, Vec3::ZERO, Vec3::Z, Vec3::X));
+    let (cc, cd) = (at_point(&mut p, assembly, c, Vec3::ZERO, Vec3::Z, Vec3::X), at_point(&mut p, assembly, d, Vec3::ZERO, Vec3::Z, Vec3::X));
+    let m = mate(&mut p, assembly, MateKind::Revolute, ca, cb);
+    let bad = mate(&mut p, assembly, MateKind::Fastened, cc, cd);
+    let solved = p.set_mate_value(assembly, m, Dof::Angle, 90.0).unwrap();
+    assert!((value(&solved, m, Dof::Angle) - 90.0).abs() < 1e-5, "{}", value(&solved, m, Dof::Angle));
+    assert_eq!(solved.failing.iter().map(|f| f.0).collect::<Vec<_>>(), vec![bad]);
 }
 
 #[test]
@@ -538,9 +575,9 @@ fn a_limit_is_in_the_units_it_says() {
     p.solve(assembly).unwrap();
     let solved = p.set_mate_value(assembly, m, Dof::Angle, 40.0).unwrap();
     assert!((value(&solved, m, Dof::Angle) - 40.0).abs() < 1e-5);
-    // Asked for more than the limit, it goes as far as it can, in its steps of up to 15 degrees.
+    // Asked for more than the limit, it goes as far as it can.
     let solved = p.set_mate_value(assembly, m, Dof::Angle, 80.0).unwrap();
-    assert!(value(&solved, m, Dof::Angle) <= 45.0 + 1e-6, "{}", value(&solved, m, Dof::Angle));
+    assert!(value(&solved, m, Dof::Angle) <= 45.0 + 1e-6 && value(&solved, m, Dof::Angle) > 44.99, "{}", value(&solved, m, Dof::Angle));
     // Dragging stops at it too.
     let solved = p.drag_point(assembly, &[b], v3(100.0, 0.0, 0.0), v3(0.0, -100.0, 0.0)).unwrap();
     assert!((value(&solved, m, Dof::Angle) + 30.0).abs() < 1e-5, "{}", value(&solved, m, Dof::Angle));
@@ -823,6 +860,98 @@ fn a_nested_locked_assembly_keeps_its_shape_two_levels_up() {
     close(p.solve(outer).unwrap().placed[1].at.origin, v3(500.0, 2000.0, 0.0));
 }
 
+/// A sub-assembly holding two parts on revolutes in a frame, geared together, held still at the top by its frame.
+fn geared_sub_assembly(ratio: f64) -> (Project, TabId, u32, u32, u32, u32) {
+    let mut p = Project::new();
+    let studio = p.tabs[0].id;
+    let doc = p.studio_mut(studio).unwrap();
+    let frame = BodyId { feature: doc.with(block("200", "10", "1")), index: 0 };
+    let arm = BodyId { feature: doc.with(block("30", "10", "10")), index: 0 };
+    let inner = p.add_assembly("Gears");
+    let (g, a, b) = (instance(&mut p, inner, studio, frame, "Frame"), instance(&mut p, inner, studio, arm, "A"), instance(&mut p, inner, studio, arm, "B"));
+    p.assembly_mut(inner).unwrap().instance_mut(g).unwrap().fixed = true;
+    p.assembly_mut(inner).unwrap().instance_mut(b).unwrap().at = Frame::translation(v3(100.0, 0.0, 0.0));
+    let (g1, g2) = (at_point(&mut p, inner, g, Vec3::ZERO, Vec3::Z, Vec3::X), at_point(&mut p, inner, g, v3(100.0, 0.0, 0.0), Vec3::Z, Vec3::X));
+    let (ca, cb) = (at_point(&mut p, inner, a, Vec3::ZERO, Vec3::Z, Vec3::X), at_point(&mut p, inner, b, Vec3::ZERO, Vec3::Z, Vec3::X));
+    let (ma, mb) = (mate(&mut p, inner, MateKind::Revolute, g1, ca), mate(&mut p, inner, MateKind::Revolute, g2, cb));
+    p.solve(inner).unwrap();
+    let r = p.assembly_mut(inner).unwrap().add_relation(RelationKind::Gear { ratio }, ma, mb, false).unwrap();
+    p.settle_relation(inner, r).unwrap();
+    assert_eq!(p.solve(inner).unwrap().freedom, 1);
+    // Up here its frame isn't fixed, so a fixed base holds it.
+    let top = p.add_assembly("Top");
+    let base = instance(&mut p, top, studio, frame, "Base");
+    p.assembly_mut(top).unwrap().instance_mut(base).unwrap().fixed = true;
+    let sub = p.assembly_mut(top).unwrap().add_instance(Source::Assembly { tab: inner }, "Gears <1>".into(), Frame::WORLD);
+    let c1 = at_point(&mut p, top, base, Vec3::ZERO, Vec3::Z, Vec3::X);
+    let c2 = p.assembly_mut(top).unwrap().add_connector(vec![sub, g], Anchor::Frame(Frame::WORLD)).unwrap();
+    mate(&mut p, top, MateKind::Fastened, c1, c2);
+    (p, top, sub, g, a, b)
+}
+
+/// How far a part has turned about Z, from X, between -180 and 180.
+fn turned_to(f: &Frame) -> f64 {
+    f.x.y.atan2(f.x.x).to_degrees()
+}
+
+fn same_angle(a: f64, b: f64) -> bool {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d) < 1e-3
+}
+
+#[test]
+fn a_gear_in_a_sub_assembly_holds_from_above_past_a_whole_turn() {
+    let (mut p, top, sub, _, a, b) = geared_sub_assembly(2.0);
+    let solved = p.solve(top).unwrap();
+    assert!(solved.failing.is_empty(), "{:?}", solved.failing);
+    assert_eq!(solved.freedom, 1, "the gear leaves one between them");
+    // Round by hand, a little at a time, for a turn and a half of A, so three of B.
+    for k in 1..=18 {
+        let angle = k as f64 * 30.0;
+        let to = v3(30.0 * angle.to_radians().cos(), 30.0 * angle.to_radians().sin(), 0.0);
+        let solved = p.drag_point(top, &[sub, a], v3(30.0, 0.0, 0.0), to).unwrap();
+        assert!(solved.failing.is_empty() && solved.failing_relations.is_empty(), "at {angle}: {:?} {:?}", solved.failing, solved.failing_relations);
+        assert!(solved.remaining.unwrap() < 1e-5, "at {angle}: {:?}", solved.remaining);
+        let (ta, tb) = (turned_to(&at_path(&solved, &[sub, a])), turned_to(&at_path(&solved, &[sub, b])));
+        assert!(same_angle(ta, angle), "at {angle}, A is at {ta}");
+        assert!(same_angle(tb, 2.0 * angle), "at {angle}, B is at {tb}");
+        // And a solve on its own leaves it there, as it's the same state.
+        let again = p.solve(top).unwrap();
+        assert!(same_angle(turned_to(&at_path(&again, &[sub, b])), 2.0 * angle), "at {angle}, solved again");
+    }
+    // It's all in the file: where it's got to, and how many turns that is.
+    let mut back = Project::load_text(&p.save_text()).unwrap();
+    let solved = back.solve(top).unwrap();
+    assert!(solved.failing.is_empty() && solved.failing_relations.is_empty());
+    assert!(same_angle(turned_to(&at_path(&solved, &[sub, b])), 2.0 * 540.0));
+    let to = v3(30.0 * 570f64.to_radians().cos(), 30.0 * 570f64.to_radians().sin(), 0.0);
+    let solved = back.drag_point(top, &[sub, a], v3(30.0, 0.0, 0.0), to).unwrap();
+    assert!(same_angle(turned_to(&at_path(&solved, &[sub, b])), 2.0 * 570.0));
+}
+
+#[test]
+fn deleting_a_sub_assembly_forgets_where_its_mates_had_got_to() {
+    let (mut p, top, sub, _, a, _) = geared_sub_assembly(2.0);
+    p.drag_point(top, &[sub, a], v3(30.0, 0.0, 0.0), v3(0.0, 30.0, 0.0)).unwrap();
+    assert!(!p.assembly(top).unwrap().moved_turns.is_empty());
+    let asm = p.assembly_mut(top).unwrap();
+    asm.delete_instance(sub).unwrap();
+    assert!(asm.moved.is_empty() && asm.moved_turns.is_empty());
+}
+
+#[test]
+fn a_locked_sub_assembly_with_a_gear_in_it_moves_as_one() {
+    let (mut p, top, sub, _, a, b) = geared_sub_assembly(2.0);
+    p.drag_point(top, &[sub, a], v3(30.0, 0.0, 0.0), v3(0.0, 30.0, 0.0)).unwrap();
+    p.assembly_mut(top).unwrap().instance_mut(sub).unwrap().locked = true;
+    // As its own tab has it, where neither has been turned.
+    let solved = p.solve(top).unwrap();
+    assert!(solved.failing.is_empty() && solved.failing_relations.is_empty());
+    assert!(same_angle(turned_to(&at_path(&solved, &[sub, a])), 0.0));
+    assert!(same_angle(turned_to(&at_path(&solved, &[sub, b])), 0.0));
+    assert_eq!(solved.freedom, 0);
+}
+
 #[test]
 fn an_assembly_cant_end_up_inside_itself() {
     let mut p = Project::new();
@@ -1013,6 +1142,7 @@ fn every_kind_of_connector_and_mate_comes_back() {
     asm.relations.push(Relation { id: 902, kind: kinds[2], a: mates[2], b: mates[2], reverse: false, offset: 0.0, suppressed: false });
     asm.relations.push(Relation { id: 903, kind: RelationKind::Screw { lead: 5.0 }, a: mates[3], b: mates[3], reverse: false, offset: 0.0, suppressed: false });
     asm.moved.insert(vec![b, 7], Frame::translation(v3(1.0, 0.0, 0.0)));
+    asm.moved_turns.insert((vec![b], 7), -12.5);
     asm.next_id = 904;
     let want = asm.clone();
     let back = Project::load_text(&p.save_text()).unwrap();

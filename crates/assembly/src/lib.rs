@@ -139,6 +139,9 @@ pub struct Assembly {
     /// a locked sub-assembly nested in another. By their paths, relative to the top-level instance they're in, so that
     /// moving that takes them along.
     pub moved: BTreeMap<Vec<u32>, Frame>,
+    /// How far a sub-assembly's mates have turned here, in radians with their turns, by the path of the sub-assembly and
+    /// the mate's id, so that the next turn can be told from this one, as `Mate::turned` is for this assembly's own.
+    pub moved_turns: BTreeMap<(Vec<u32>, u32), f64>,
     /// Whatever an app wants kept with it.
     pub app: Option<Value>,
 }
@@ -281,6 +284,7 @@ impl Assembly {
         }
         self.groups.retain(|g| g.instances.len() >= 2);
         self.moved.retain(|p, _| p.first() != Some(&id));
+        self.moved_turns.retain(|(p, _), _| p.first() != Some(&id));
         Ok(())
     }
 
@@ -546,6 +550,10 @@ impl Assembly {
             let moved = self.moved.iter().map(|(p, f)| Value::obj(vec![("path", path_value(p)), ("at", frame_value(f))])).collect();
             items.push(("moved", Value::Arr(moved)));
         }
+        if !self.moved_turns.is_empty() {
+            let turns = self.moved_turns.iter().map(|((p, m), t)| Value::obj(vec![("path", path_value(p)), ("mate", num(*m as f64)), ("turned", num(*t))])).collect();
+            items.push(("moved_turns", Value::Arr(turns)));
+        }
         if let Some(app) = &self.app {
             items.push(("app", app.clone()));
         }
@@ -553,7 +561,7 @@ impl Assembly {
     }
 
     pub fn from_json(v: &Value) -> Result<Assembly> {
-        known(v, &["next_id", "instances", "connectors", "mates", "groups", "relations", "moved", "app"])?;
+        known(v, &["next_id", "instances", "connectors", "mates", "groups", "relations", "moved", "moved_turns", "app"])?;
         let mut out = Assembly::new();
         out.app = v.get("app").cloned();
         let list = |key: &str| v.get(key).and_then(Value::as_array).unwrap_or(&[]);
@@ -633,6 +641,10 @@ impl Assembly {
         for entry in list("moved") {
             known(entry, &["path", "at"])?;
             out.moved.insert(read_path(entry.get("path"), "a moved part's path")?, read_frame(entry.get("at").ok_or_else(|| bad("a moved part's place"))?)?);
+        }
+        for entry in list("moved_turns") {
+            known(entry, &["path", "mate", "turned"])?;
+            out.moved_turns.insert((read_path(entry.get("path"), "a moved mate's path")?, read_id(entry.get("mate"), "a moved mate's id")?), read_number(entry, "turned", 0.0)?);
         }
         // Every reference has to be to something here, and ids stay above all those ever handed out.
         let mut ids: Vec<u32> = out.instances.iter().map(|i| i.id).chain(out.connectors.iter().map(|c| c.id)).chain(out.mates.iter().map(|m| m.id)).chain(out.groups.iter().map(|g| g.id)).chain(out.relations.iter().map(|r| r.id)).collect();

@@ -49,5 +49,6 @@ name = "coreshape-wasm"
 version = "0.1.0"
 dependencies = [
  "coreshape",
+ "coreshape-assembly",
  "coreshape-document",
 ]

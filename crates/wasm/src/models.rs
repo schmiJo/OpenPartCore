@@ -3,6 +3,7 @@
 //! file and opened again, or driven by the MCP server.
 
 use coreshape::*;
+use coreshape_assembly::{Anchor, Dof, FacePoint, MateKind, Project, Solved, Source, TabId};
 use coreshape_document::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -26,6 +27,27 @@ pub struct ModelDef {
     pub params: &'static [ParamDef],
     /// Adds the features. The sliders' parameters are already in the document.
     pub build: fn(&mut Document, usize),
+    /// For a mechanism: the assembly of the parts it adds.
+    pub assembly: Option<AssemblyStep>,
+}
+
+/// What makes a model a mechanism: an assembly of its parts, moved by one of its sliders.
+#[derive(Clone, Copy)]
+pub struct AssemblyStep {
+    /// Puts the assembly together from the parts in a Part Studio, and gives the mate the slider turns.
+    pub assemble: fn(&mut Project, TabId, TabId) -> u32,
+    /// The slider that turns it, in degrees.
+    pub drive: &'static str,
+    /// What to show of where it's got to: a label, a value and a unit for each.
+    pub readout: fn(&Solved) -> Vec<(&'static str, f64, &'static str)>,
+}
+
+/// A mechanism being worked on: its tabs, and the mate that moves it.
+pub struct Mechanism {
+    pub project: Project,
+    pub studio: TabId,
+    pub assembly: TabId,
+    pub drive: u32,
 }
 
 impl ModelDef {
@@ -59,6 +81,28 @@ impl ModelDef {
 
     pub fn defaults(&self) -> Vec<f64> {
         self.params.iter().map(|p| p.default).collect()
+    }
+
+    /// A new mechanism with its sliders at their defaults, if this is one.
+    pub fn mechanism(&self) -> Option<Mechanism> {
+        let step = self.assembly?;
+        let mut project = Project::from_document(self.document(0));
+        let studio = project.tabs[0].id;
+        let assembly = project.add_assembly(self.name);
+        let drive = (step.assemble)(&mut project, studio, assembly);
+        Some(Mechanism { project, studio, assembly, drive })
+    }
+
+    /// Writes slider values into a mechanism: dimensions into its parts, and the driving slider into its mate, which goes
+    /// as far as the others let it. Gives what comes of that, and the value that slider asked for.
+    pub fn move_mechanism(&self, m: &mut Mechanism, values: &[f64]) -> Option<(Solved, f64)> {
+        let step = self.assembly?;
+        let doc = m.project.studio_mut(m.studio).ok()?;
+        self.apply(doc, values);
+        let at = self.params.iter().position(|p| p.key == step.drive)?;
+        let asked = *values.get(at)?;
+        let solved = m.project.set_mate_value(m.assembly, m.drive, Dof::Angle, asked).ok()?;
+        Some((solved, asked))
     }
 }
 
@@ -507,6 +551,113 @@ fn stress(doc: &mut Document, case: usize) {
     }
 }
 
+/// How thick the mechanism's plates are. Its mates' offsets stack the plates by this, so it isn't a slider.
+const LAYER: f64 = 8.0;
+
+/// A crank, a rod and a piston on a frame, as plates in layers so that they can pass each other. Each is its own part, and
+/// each hole is what a mate connector is found from, so changing a length carries the mates with it. The frame keeps the
+/// piston between two guides, as long as its travel, from a stop past the far end of it.
+fn slider_crank(doc: &mut Document, _: usize) {
+    let t = LAYER;
+    for (name, value) in [("far", "crank + rod + 60"), ("near", "rod - crank - 20"), ("wide", "crank + 20"), ("gap", "12.5"), ("guide", "18.5")] {
+        doc.set_parameter(name, value).expect("valid derived parameters");
+    }
+    let named = |doc: &mut Document, name: &str, op: Op| doc.insert(op, Some(name.to_string()), usize::MAX).expect("the feature is valid");
+    // The frame: a plate behind everything, with the pivot's hole in it, then a post, then the guides on top of that.
+    let plate = named(
+        doc,
+        "Frame sketch",
+        Op::sketch(Placement::xy(-t), vec![Region::new(Shape::rect("-wide", "-wide", "wide + far + 20", "2 * wide")).hole(Shape::circle(0.0, 0.0, 4.0))]),
+    );
+    let frame = named(doc, "Frame", Op::extrude(plate, 0.0, t, Mode::NewBody));
+    let only_frame = vec![BodyId { feature: frame, index: 0 }];
+    let post = named(doc, "Post sketch", Op::sketch(xy(), vec![Region::new(Shape::rect("far + 1", "-guide", 6.0, "2 * guide"))]));
+    let posted = named(doc, "Post", Op::extrude(post, 0.0, 2.0 * t, Mode::Add));
+    doc.set_scope(posted, only_frame.clone()).expect("the frame comes before it");
+    let guides = named(
+        doc,
+        "Guides sketch",
+        Op::sketch(
+            Placement::xy(2.0 * t),
+            vec![Region::new(Shape::polygon(vec![
+                point("near", "-guide"),
+                point("far + 8", "-guide"),
+                point("far + 8", "guide"),
+                point("near", "guide"),
+                point("near", "gap"),
+                point("far", "gap"),
+                point("far", "-gap"),
+                point("near", "-gap"),
+            ]))],
+        ),
+    );
+    let guided = named(doc, "Guides", Op::extrude(guides, 0.0, t, Mode::Add));
+    doc.set_scope(guided, only_frame).expect("the frame comes before it");
+    // A plate with a hole at each end.
+    let link = |doc: &mut Document, name: &str, length: &str| {
+        let outline = Shape::rounded(format!("({length}) / 2").as_str(), 0.0, format!("({length}) + 18").as_str(), 18.0, 8.0);
+        let sketch = doc.with(Op::sketch(xy(), vec![Region::new(outline).hole(Shape::circle(0.0, 0.0, 4.0)).hole(Shape::circle(length, 0.0, 4.0))]));
+        doc.insert(Op::extrude(sketch, 0.0, t, Mode::NewBody), Some(name.to_string()), usize::MAX).expect("the feature is valid")
+    };
+    link(doc, "Crank", "crank");
+    link(doc, "Rod", "rod");
+    let piston = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rect(-15.0, -12.0, 30.0, 24.0)).hole(Shape::circle(0.0, 0.0, 4.0))]));
+    named(doc, "Piston", Op::extrude(piston, 0.0, t, Mode::NewBody));
+    let pin = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle(0.0, 0.0, 3.9))]));
+    named(doc, "Pin", Op::extrude(pin, 0.0, 2.0 * t, Mode::NewBody));
+}
+
+fn assemble_slider_crank(p: &mut Project, studio: TabId, tab: TabId) -> u32 {
+    let t = LAYER;
+    let feature = |p: &Project, name: &str| p.studio(studio).expect("it's a Part Studio").features().iter().find(|f| f.name == name).expect("the model has it").id;
+    let (frame, crank, rod, piston, pin) = (feature(p, "Frame"), feature(p, "Crank"), feature(p, "Rod"), feature(p, "Piston"), feature(p, "Pin"));
+    let guides = feature(p, "Guides");
+    let a = p.assembly_mut(tab).expect("it's an assembly");
+    let part = |feature| Source::Part { studio, body: BodyId { feature, index: 0 } };
+    // Roughly where they belong, at the sliders' defaults, so that it starts on the branch with the piston out along X.
+    let place = |x: f64, z: f64| Frame::translation(v3(x, 0.0, z));
+    let ground = a.add_instance(part(frame), "Frame".to_string(), Frame::WORLD);
+    a.instance_mut(ground).expect("just added").fixed = true;
+    let on_crank = a.add_instance(part(crank), "Crank".to_string(), Frame::WORLD);
+    let on_rod = a.add_instance(part(rod), "Rod".to_string(), place(30.0, t));
+    let on_piston = a.add_instance(part(piston), "Piston".to_string(), place(130.0, 2.0 * t));
+    let pins = [
+        a.add_instance(part(pin), "Pin <1>".to_string(), place(0.0, -t)),
+        a.add_instance(part(pin), "Pin <2>".to_string(), place(30.0, 0.0)),
+        a.add_instance(part(pin), "Pin <3>".to_string(), place(130.0, t)),
+    ];
+    // Each found from a hole's axis, or from a face, so that it follows when the part changes.
+    let mut connect = |instance: u32, face: FaceRef, point: FacePoint| a.add_connector(vec![instance], Anchor::Face { key: FaceKey::plain(face), point }).expect("the instance is there");
+    let pivot = connect(ground, frame.hole_side(0, 0), FacePoint::AxisMiddle);
+    let (crank_start, crank_end) = (connect(on_crank, crank.hole_side(0, 0), FacePoint::AxisMiddle), connect(on_crank, crank.hole_side(1, 0), FacePoint::AxisMiddle));
+    let (rod_start, rod_end) = (connect(on_rod, rod.hole_side(0, 0), FacePoint::AxisMiddle), connect(on_rod, rod.hole_side(1, 0), FacePoint::AxisMiddle));
+    let wrist = connect(on_piston, piston.hole_side(0, 0), FacePoint::AxisMiddle);
+    // The stop past the guides and the piston's front, each facing along X, so a slider between them runs along X.
+    let (stop, front) = (connect(ground, guides.side(1), FacePoint::Centroid), connect(on_piston, piston.side(1), FacePoint::Centroid));
+    let pin_axes = [connect(pins[0], pin.side(0), FacePoint::AxisMiddle), connect(pins[1], pin.side(0), FacePoint::AxisMiddle), connect(pins[2], pin.side(0), FacePoint::AxisMiddle)];
+    let mut mate = |kind: MateKind, from: u32, to: u32, name: &str, along: f64| {
+        let id = a.add_mate(kind, from, to).expect("two different instances");
+        let m = a.mate_mut(id).expect("just added");
+        m.name = name.to_string();
+        m.offset = [0.0, 0.0, along];
+        id
+    };
+    // The next plate in, one layer on.
+    let drive = mate(MateKind::Revolute, pivot, crank_start, "Crank on frame", t);
+    mate(MateKind::Revolute, crank_end, rod_start, "Rod on crank", t);
+    mate(MateKind::Revolute, rod_end, wrist, "Piston on rod", t);
+    mate(MateKind::Slider, stop, front, "Piston in guides", 0.0);
+    // A pin reaches half way out of each of the two plates it joins.
+    mate(MateKind::Fastened, crank_start, pin_axes[0], "Pin in crank", -t / 2.0);
+    mate(MateKind::Fastened, crank_end, pin_axes[1], "Pin in crank", t / 2.0);
+    mate(MateKind::Fastened, rod_end, pin_axes[2], "Pin in rod", t / 2.0);
+    drive
+}
+
+fn slider_crank_readout(solved: &Solved) -> Vec<(&'static str, f64, &'static str)> {
+    solved.placed.iter().filter(|q| q.name == "Piston").map(|q| ("Piston from the pivot", q.at.origin.x, "mm")).collect()
+}
+
 pub fn catalog() -> &'static [ModelDef] {
     static VASE: [ParamDef; 6] = [
         mm("height", "Height", 60.0, 160.0, 110.0),
@@ -649,13 +800,15 @@ pub fn catalog() -> &'static [ModelDef] {
         default: 0.0,
         choices: &STRESS_NAMES,
     }];
-    static MODELS: [ModelDef; 19] = [
+    static SLIDER_CRANK: [ParamDef; 3] = [mm("crank", "Crank length", 15.0, 80.0, 30.0), mm("rod", "Rod length", 40.0, 160.0, 100.0), deg("angle", "Crank angle", 0.0, 720.0, 30.0)];
+    static MODELS: [ModelDef; 20] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
             blurb: "Sketch, extrude, fillet the bends and corners, drill, chamfer the holes. Each dimension rebuilds only what depends on it.",
             params: &BRACKET,
             build: bracket,
+            assembly: None,
         },
         ModelDef {
             id: "flange",
@@ -663,6 +816,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A revolved flange with a filleted hub, chamfered edges and a bolt circle. The hub fillet is a true torus.",
             params: &FLANGE,
             build: flange,
+            assembly: None,
         },
         ModelDef {
             id: "block",
@@ -670,6 +824,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "Every edge filleted. Twelve cylinders, six planes and eight sphere patches that meet exactly.",
             params: &BLOCK,
             build: rounded_block,
+            assembly: None,
         },
         ModelDef {
             id: "plate",
@@ -677,6 +832,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "All top edges filleted and all bottom edges chamfered, with each feature selecting edges by the face they bound.",
             params: &PLATE,
             build: plate,
+            assembly: None,
         },
         ModelDef {
             id: "crossed",
@@ -684,6 +840,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "Two cylinders intersected. Equal radii crossing square make a Steinmetz solid of volume 16r\u{b3}/3. Offsets or unequal radii need the general curve tracer.",
             params: &CROSSED,
             build: crossed,
+            assembly: None,
         },
         ModelDef {
             id: "pockets",
@@ -691,6 +848,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "Slide the tools off the plate's edge. Many positions line faces up exactly. If the kernel refuses a position, the reason appears here.",
             params: &POCKETS,
             build: pockets,
+            assembly: None,
         },
         ModelDef {
             id: "stress",
@@ -698,6 +856,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "The contacts Booleans find hardest: coplanar faces, edges and corners that only touch, and tangent surfaces. The last case is a known limit, where the kernel refuses rather than guess.",
             params: &STRESS,
             build: stress,
+            assembly: None,
         },
         ModelDef {
             id: "vase",
@@ -705,6 +864,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A sketched spline revolved, with a second spline cut out to hollow it. The curve stays an exact spline all the way to the STEP file.",
             params: &VASE,
             build: vase,
+            assembly: None,
         },
         ModelDef {
             id: "joint",
@@ -712,6 +872,15 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "Two flanges, bolts and nuts, each a body of its own, so they stay separate parts though they touch all around. Changing a flange's size leaves every bolt as it is, without rebuilding it.",
             params: &JOINT,
             build: joint,
+            assembly: None,
+        },
+        ModelDef {
+            id: "crank",
+            name: "Slider-crank",
+            blurb: "Five parts, three of the pin, on real mates found from the holes: revolutes and a slider, leaving one free motion. A test holds the piston to the crank-and-rod formula within a millionth of a millimetre, over two turns at five sets of lengths. Make the rod shorter than the crank and it stops where the rod runs out, and says so.",
+            params: &SLIDER_CRANK,
+            build: slider_crank,
+            assembly: Some(AssemblyStep { assemble: assemble_slider_crank, drive: "angle", readout: slider_crank_readout }),
         },
         ModelDef {
             id: "spring",
@@ -719,6 +888,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A round wire carried along a helix. The section is exact, and the path is fitted to within 1e-7 of the true helix, as measured.",
             params: &SPRING,
             build: spring,
+            assembly: None,
         },
         ModelDef {
             id: "screw",
@@ -726,6 +896,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A square groove cut along a helix through a shaft, running off both ends. Every wall of the thread is a free-form face, through a Boolean.",
             params: &SCREW,
             build: screw,
+            assembly: None,
         },
         ModelDef {
             id: "cup",
@@ -733,6 +904,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A lofted cup hollowed by a shell, whose inner wall is the free-form side moved along its own normals by exactly the wall thickness.",
             params: &CUP,
             build: cup,
+            assembly: None,
         },
         ModelDef {
             id: "healed",
@@ -740,6 +912,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A plate with a row of holes, a fillet and a chamfer, with the middle hole and the fillet then deleted. Their neighbours grow to close the gap.",
             params: &HEALED,
             build: healed,
+            assembly: None,
         },
         ModelDef {
             id: "walls",
@@ -747,6 +920,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "Every face moved in. Past half of a thin wall the moved faces would cross, so the part is taken apart: its surroundings moved in, less each pocket moved out. The pockets join, then open through the side.",
             params: &WALLS,
             build: walls,
+            assembly: None,
         },
         ModelDef {
             id: "tee",
@@ -754,6 +928,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A branch off a pipe with the saddle between them rounded. A true rolling-ball surface has no exact form here, so this one is fitted to within 1.5e-7 mm of the two pipes.",
             params: &TEE,
             build: tee,
+            assembly: None,
         },
         ModelDef {
             id: "nozzle",
@@ -761,6 +936,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A loft from a rectangle through a circle to an ellipse, so all its sides are free-form patches, with a hole across them that follows the surface. Slower than the others: it's the hardest thing the kernel does.",
             params: &NOZZLE,
             build: nozzle,
+            assembly: None,
         },
         ModelDef {
             id: "cam",
@@ -768,6 +944,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "One spline around the outline, with a bore, an elliptical window and a cross hole. Slicing a spline surface by a plane gives an exact spline back, and the cross hole has to follow the curve.",
             params: &CAM,
             build: cam,
+            assembly: None,
         },
         ModelDef {
             id: "knob",
@@ -775,6 +952,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "One revolve that generates all five surface types: plane, cylinder, cone, torus and sphere.",
             params: &KNOB,
             build: knob,
+            assembly: None,
         },
         ModelDef {
             id: "sector",
@@ -782,6 +960,7 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A partial revolve with end caps. Past 180 degrees the kernel splits each swept face in two.",
             params: &SECTOR,
             build: sector,
+            assembly: None,
         },
     ];
     &MODELS

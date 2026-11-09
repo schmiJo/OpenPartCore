@@ -7,7 +7,8 @@
 pub mod models;
 
 use coreshape::*;
-use coreshape_document::{Document, Outcome, StepState};
+use coreshape_assembly::Solved;
+use coreshape_document::{Document, NamedBody, Outcome, StepState};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -27,6 +28,8 @@ struct Output {
     bodies: Vec<Arc<Body>>,
     /// One document per model and variant, each keeping its own cached results.
     documents: HashMap<(usize, usize), Document>,
+    /// One assembly per mechanism among the models, with the Part Studio it's made from.
+    mechanisms: HashMap<usize, models::Mechanism>,
     /// The document shown by the last build.
     current: Option<(usize, usize)>,
     table: [u32; 12],
@@ -180,8 +183,21 @@ fn fill_mesh(out: &mut Output, outcome: &Outcome, body: &Body, draft: bool) -> R
         out.normals.extend_from_slice(&[n.x as f32, n.y as f32, n.z as f32]);
     }
     out.kinds.resize(mesh.positions.len(), 0);
+    // Each part its own tint, with the copies of one part alike.
+    let mut parts = Vec::new();
+    let tint_of: Vec<usize> = outcome
+        .bodies
+        .iter()
+        .map(|b| {
+            parts.iter().position(|id| *id == b.id).unwrap_or_else(|| {
+                parts.push(b.id);
+                parts.len() - 1
+            })
+        })
+        .collect();
     for (t, &f) in mesh.triangles.iter().zip(&mesh.face_of_triangle) {
-        let tint = outcome.bodies.partition_point(|b| b.first_face <= f as usize).saturating_sub(1) % KINDS as usize;
+        let body_at = outcome.bodies.partition_point(|b| b.first_face <= f as usize).saturating_sub(1);
+        let tint = tint_of.get(body_at).copied().unwrap_or(0) % KINDS as usize;
         let k = surface_kind(&body.faces[f as usize].surface) + KINDS * tint as u8;
         for &v in t {
             out.kinds[v as usize] = k;
@@ -273,6 +289,77 @@ fn fill(out: &mut Output, outcome: &Outcome, draft: bool) {
     out.body = Some(body);
 }
 
+/// A solved assembly as an outcome to show: each part where it goes, as a body of its own.
+fn assembled(steps: Vec<coreshape_document::Step>, failed: Option<usize>, solved: &Solved) -> Outcome {
+    let moved: Vec<Body> = solved.placed.iter().map(|p| p.body.transformed(&p.at)).collect();
+    let list: Vec<&Body> = moved.iter().collect();
+    let body = (!list.is_empty()).then(|| Arc::new(Body::side_by_side(&list)));
+    let (mut first_face, mut first_edge) = (0, 0);
+    let mut bodies = Vec::with_capacity(moved.len());
+    for (p, b) in solved.placed.iter().zip(&moved) {
+        let (faces, edges) = (b.faces.len(), b.edges.len());
+        bodies.push(NamedBody { id: p.part, body: Arc::new(b.clone()), first_face, first_edge });
+        first_face += faces;
+        first_edge += edges;
+    }
+    Outcome { steps, body, bodies, failed }
+}
+
+/// What a mechanism adds to a build's info: how free it is, where it's got to, and whether it got there.
+fn assembly_json(step: &models::AssemblyStep, m: &models::Mechanism, solved: &Solved, asked: f64) -> String {
+    let reached = solved.values.iter().find(|v| v.0 == m.drive && v.1 == coreshape_assembly::Dof::Angle).map_or(f64::NAN, |v| v.2);
+    // Asked for 720 and stopped at 30 is a stop. Solved to within what the solver goes to is not.
+    let stopped = (reached - asked).abs() > 1e-5;
+    let failing: Vec<String> = solved.failing.iter().map(|f| format!("{{\"mate\":{},\"why\":{}}}", f.0, json_str(&f.1))).collect();
+    let problems: Vec<String> = solved.problems.iter().map(|p| json_str(p)).collect();
+    let readout: Vec<String> = (step.readout)(solved).iter().map(|r| format!("{{\"label\":{},\"value\":{},\"unit\":{}}}", json_str(r.0), r.1, json_str(r.2))).collect();
+    let mates = m.project.assembly(m.assembly).map_or(0, |a| a.mates.len());
+    format!(
+        "{{\"parts\":{},\"mates\":{mates},\"freedom\":{},\"asked\":{asked},\"reached\":{reached},\"stopped\":{stopped},\"failing\":[{}],\"problems\":[{}],\"readout\":[{}]}}",
+        solved.placed.len(),
+        solved.freedom,
+        failing.join(","),
+        problems.join(","),
+        readout.join(",")
+    )
+}
+
+/// Builds a model at these slider values into the output.
+fn build_into(out: &mut Output, model: usize, values: &[f64], rollback: i32, draft: bool) {
+    let catalog = models::catalog();
+    let def = &catalog[model];
+    let variant = def.variant(values);
+    let upto = (rollback >= 0).then_some(rollback as usize);
+    out.current = Some((model, variant));
+    if let Some(step) = &def.assembly {
+        let m = out.mechanisms.entry(model).or_insert_with(|| def.mechanism().expect("it has an assembly"));
+        let Ok(doc) = m.project.studio_mut(m.studio) else { return };
+        def.apply(doc, values);
+        let parts = doc.rebuild(upto);
+        // Rolled back or stopped short, the parts are all there is to show, as a Part Studio has them.
+        if upto.is_some() || parts.failed.is_some() {
+            fill(out, &parts, draft);
+            return;
+        }
+        let Some((solved, asked)) = def.move_mechanism(m, values) else {
+            fill(out, &parts, draft);
+            return;
+        };
+        let info = assembly_json(step, m, &solved, asked);
+        let shown = assembled(parts.steps, parts.failed, &solved);
+        fill(out, &shown, draft);
+        if out.info.ends_with('}') {
+            out.info.pop();
+            let _ = write!(out.info, ",\"assembly\":{info}}}");
+        }
+        return;
+    }
+    let doc = out.documents.entry((model, variant)).or_insert_with(|| def.document(variant));
+    def.apply(doc, values);
+    let outcome = doc.rebuild(upto);
+    fill(out, &outcome, draft);
+}
+
 /// Rebuilds a model. `rollback` is the index of the last feature to apply, or
 /// negative for all of them. `draft` is non-zero for a lighter result, while a dimension is
 /// being dragged. Returns a pointer to a table of twelve `u32`s: pointer
@@ -289,14 +376,7 @@ pub unsafe extern "C" fn cs_build(model: usize, params: *const f64, n: usize, ro
         let out = &mut *out;
         let catalog = models::catalog();
         if model < catalog.len() {
-            let def = &catalog[model];
-            let variant = def.variant(values);
-            let doc = out.documents.entry((model, variant)).or_insert_with(|| def.document(variant));
-            def.apply(doc, values);
-            let upto = (rollback >= 0).then_some(rollback as usize);
-            let outcome = doc.rebuild(upto);
-            out.current = Some((model, variant));
-            fill(out, &outcome, draft != 0);
+            build_into(out, model, values, rollback, draft != 0);
         }
         out.table = [
             out.positions.as_ptr() as u32,
@@ -345,6 +425,15 @@ pub extern "C" fn cs_export_step() -> *const u8 {
         if out.bodies.is_empty() {
             return std::ptr::null();
         }
+        // A mechanism goes out as what it is: each part once, and a use of it for each instance.
+        if let Some(m) = out.current.and_then(|k| out.mechanisms.get_mut(&k.0)) {
+            let name = models::catalog().get(out.current.map_or(0, |k| k.0)).map_or("model", |d| d.name);
+            let Ok(text) = m.project.step_text(m.assembly, name) else {
+                return std::ptr::null();
+            };
+            out.export = text.into_bytes();
+            return out.export.as_ptr();
+        }
         let list: Vec<&Body> = out.bodies.iter().map(Arc::as_ref).collect();
         out.export = coreshape::export::step::write_step_bodies(&list, "model").into_bytes();
         out.export.as_ptr()
@@ -357,6 +446,10 @@ pub extern "C" fn cs_export_document() -> *const u8 {
     STATE.with(|s| {
         let mut out = s.borrow_mut();
         let out = &mut *out;
+        if let Some(m) = out.current.and_then(|k| out.mechanisms.get(&k.0)) {
+            out.export = m.project.save_text().into_bytes();
+            return out.export.as_ptr();
+        }
         let Some(doc) = out.current.and_then(|k| out.documents.get(&k)) else {
             return std::ptr::null();
         };
@@ -373,6 +466,232 @@ pub extern "C" fn cs_export_len() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- The slider-crank -----
+
+    fn crank_model() -> usize {
+        models::catalog().iter().position(|m| m.id == "crank").expect("the model is there")
+    }
+
+    fn crank_at(out: &mut Output, crank: f64, rod: f64, angle: f64) -> coreshape_document::json::Value {
+        build_into(out, crank_model(), &[crank, rod, angle], -1, true);
+        coreshape_document::json::parse(&out.info).unwrap_or_else(|e| panic!("{e}: {}", out.info))
+    }
+
+    fn field(v: &coreshape_document::json::Value, key: &str) -> f64 {
+        v.get("assembly").and_then(|a| a.get(key)).and_then(|x| x.as_f64()).unwrap_or_else(|| panic!("no {key} in {}", v.to_text()))
+    }
+
+    fn piston(v: &coreshape_document::json::Value) -> f64 {
+        let list = v.get("assembly").and_then(|a| a.get("readout")).and_then(|r| r.as_array()).expect("a readout");
+        list[0].get("value").and_then(|x| x.as_f64()).expect("a value")
+    }
+
+    /// Where the piston's hole should be from the pivot, by the formula for a crank and rod.
+    fn by_formula(crank: f64, rod: f64, degrees: f64) -> f64 {
+        let a = degrees.to_radians();
+        crank * a.cos() + (rod * rod - (crank * a.sin()).powi(2)).sqrt()
+    }
+
+    fn placed_at(out: &Output, name: &str) -> Frame {
+        let m = out.mechanisms.get(&crank_model()).expect("it's been built");
+        let mut project = m.project.clone();
+        project.placed(m.assembly).unwrap().iter().find(|q| q.name == name).expect("that part is there").at
+    }
+
+    fn stopped(v: &coreshape_document::json::Value) -> bool {
+        v.get("assembly").and_then(|a| a.get("stopped")).and_then(|x| x.as_bool()).expect("a stopped flag")
+    }
+
+    #[test]
+    fn the_slider_crank_follows_its_formula_over_two_turns_at_any_lengths() {
+        let def = &models::catalog()[crank_model()];
+        let mut m = def.mechanism().unwrap();
+        let mut worst = 0.0f64;
+        for (crank, rod) in [(30.0, 100.0), (15.0, 160.0), (80.0, 160.0), (50.0, 60.0), (30.0, 40.0)] {
+            for k in 0..=48 {
+                let angle = k as f64 * 15.0;
+                let (solved, asked) = def.move_mechanism(&mut m, &[crank, rod, angle]).unwrap();
+                assert_eq!(asked, angle);
+                assert!(solved.failing.is_empty() && solved.problems.is_empty(), "{crank} {rod} {angle}: {:?} {:?}", solved.failing, solved.problems);
+                assert_eq!(solved.freedom, 1);
+                let reached = solved.values.iter().find(|v| v.0 == m.drive && v.1 == coreshape_assembly::Dof::Angle).unwrap().2;
+                assert!((reached - angle).abs() < 1e-5, "{crank} {rod} {angle}: reached {reached}");
+                let at = |name: &str| solved.placed.iter().find(|q| q.name == name).unwrap().at;
+                worst = worst.max((at("Piston").origin.x - by_formula(crank, rod, angle)).abs());
+                // Its parts are where the layers and the guides say.
+                let piston = at("Piston");
+                assert!(piston.origin.y.abs() < 1e-6 && (piston.origin.z - 16.0).abs() < 1e-6, "{piston:?}");
+                assert!(piston.x.dist(Vec3::X) < 1e-6 && piston.z.dist(Vec3::Z) < 1e-6, "the piston turned: {piston:?}");
+                let tip = v3(crank * angle.to_radians().cos(), crank * angle.to_radians().sin(), 8.0);
+                assert!(at("Rod").origin.dist(tip) < 1e-6, "{crank} {rod} {angle}: {:?} isn't {tip:?}", at("Rod").origin);
+            }
+        }
+        assert!(worst < 1e-6, "the piston was off by {worst}");
+    }
+
+    #[test]
+    fn what_the_page_gets_is_what_the_mechanism_did() {
+        let mut out = Output::default();
+        for (crank, rod, angle) in [(30.0, 100.0, 0.0), (30.0, 100.0, 77.0), (45.0, 70.0, 300.0), (45.0, 70.0, 720.0)] {
+            let info = crank_at(&mut out, crank, rod, angle);
+            assert_eq!(info.get("ok").and_then(|x| x.as_bool()), Some(true), "{}", info.to_text());
+            assert_eq!(info.get("openEdges").and_then(|x| x.as_f64()), Some(0.0));
+            assert!(!stopped(&info), "{}", info.to_text());
+            assert_eq!(field(&info, "freedom"), 1.0);
+            assert!((field(&info, "reached") - angle).abs() < 1e-5, "{}", info.to_text());
+            assert!((piston(&info) - by_formula(crank, rod, angle)).abs() < 1e-6, "{}", info.to_text());
+        }
+    }
+
+    #[test]
+    fn changing_a_length_carries_the_mates_with_it_and_rebuilds_only_that_part() {
+        let mut out = Output::default();
+        crank_at(&mut out, 30.0, 100.0, 40.0);
+        let (crank_before, frame_before) = (placed_at(&out, "Crank"), placed_at(&out, "Frame"));
+        let info = crank_at(&mut out, 30.0, 137.5, 40.0);
+        assert!((piston(&info) - by_formula(30.0, 137.5, 40.0)).abs() < 1e-6);
+        // The rod is new, and so is the frame, whose guides reach past it. The crank isn't, and hasn't moved.
+        assert_eq!(placed_at(&out, "Crank"), crank_before);
+        assert_eq!(placed_at(&out, "Frame"), frame_before);
+        let list = info.get("features").and_then(|f| f.as_array()).expect("features");
+        let state = |name: &str| list.iter().find(|f| f.get("name").and_then(|n| n.as_str()) == Some(name)).and_then(|f| f.get("state")).and_then(|x| x.as_str()).map(str::to_string);
+        assert_eq!(state("Crank").as_deref(), Some("reused"), "{}", info.to_text());
+        assert_eq!(state("Rod").as_deref(), Some("rebuilt"), "{}", info.to_text());
+        // Moving only the angle rebuilds nothing at all.
+        let info = crank_at(&mut out, 30.0, 137.5, 200.0);
+        assert_eq!(info.get("rebuilt").and_then(|x| x.as_f64()), Some(0.0), "{}", info.to_text());
+        assert!((piston(&info) - by_formula(30.0, 137.5, 200.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_crank_longer_than_its_rod_stops_where_the_rod_runs_out_and_says_so() {
+        let mut out = Output::default();
+        // With a rod half its length, the crank can't get past 30 degrees from the X axis.
+        let info = crank_at(&mut out, 80.0, 40.0, 10.0);
+        assert!(!stopped(&info), "{}", info.to_text());
+        assert!((piston(&info) - by_formula(80.0, 40.0, 10.0)).abs() < 1e-6);
+        let info = crank_at(&mut out, 80.0, 40.0, 90.0);
+        assert_eq!(info.get("ok").and_then(|x| x.as_bool()), Some(true));
+        assert!(stopped(&info), "{}", info.to_text());
+        let reached = field(&info, "reached");
+        assert!((reached - 30.0).abs() < 0.01 && reached <= 30.0, "stopped at {reached}");
+        assert!(info.get("assembly").and_then(|a| a.get("failing")).and_then(|f| f.as_array()).expect("a list").is_empty());
+        // It really is there, with the mates all met: the rod spans from the crank's tip to the piston at its own length.
+        // Right at the stop the formula is no use, as a thousandth of a degree moves the piston by half a millimetre.
+        let a = reached.to_radians();
+        let tip = v3(80.0 * a.cos(), 80.0 * a.sin(), 0.0);
+        assert!((tip.dist(v3(piston(&info), 0.0, 0.0)) - 40.0).abs() < 1e-5, "{tip:?} to {}", piston(&info));
+        // Coming back works.
+        let info = crank_at(&mut out, 80.0, 40.0, 20.0);
+        assert!(!stopped(&info));
+        assert!((piston(&info) - by_formula(80.0, 40.0, 20.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lengths_that_rule_out_where_it_is_move_it_to_where_it_can_be() {
+        let mut out = Output::default();
+        // At 90 degrees with these, the rod reaches. Then the crank grows until it can't.
+        crank_at(&mut out, 30.0, 100.0, 90.0);
+        let info = crank_at(&mut out, 80.0, 40.0, 90.0);
+        assert_eq!(info.get("ok").and_then(|x| x.as_bool()), Some(true), "{}", info.to_text());
+        assert!(stopped(&info), "{}", info.to_text());
+        // Wherever it went, the rod spans from the crank's tip to the piston's hole, at the rod's own length.
+        let reached = field(&info, "reached").to_radians();
+        let tip = v3(80.0 * reached.cos(), 80.0 * reached.sin(), 0.0);
+        let hole = v3(piston(&info), 0.0, 0.0);
+        assert!((tip.dist(hole) - 40.0).abs() < 1e-5, "{tip:?} and {hole:?}");
+        // Back to lengths that can do it, it gets back to what's asked.
+        let info = crank_at(&mut out, 30.0, 100.0, 90.0);
+        assert!(!stopped(&info), "{}", info.to_text());
+        assert!((piston(&info) - by_formula(30.0, 100.0, 90.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_crank_as_long_as_its_rod_stays_on_its_mates_through_the_dead_point() {
+        let mut out = Output::default();
+        for k in 0..=24 {
+            let angle = k as f64 * 15.0;
+            let info = crank_at(&mut out, 40.0, 40.0, angle);
+            assert_eq!(info.get("ok").and_then(|x| x.as_bool()), Some(true), "{}", info.to_text());
+            let reached = field(&info, "reached").to_radians();
+            let tip = v3(40.0 * reached.cos(), 40.0 * reached.sin(), 0.0);
+            assert!((tip.dist(v3(piston(&info), 0.0, 0.0)) - 40.0).abs() < 1e-5, "at {angle}: {}", info.to_text());
+        }
+    }
+
+    #[test]
+    fn the_slider_crank_goes_out_as_an_assembly_and_comes_back() {
+        let model = crank_model();
+        let values = [30.0, 100.0, 60.0];
+        // Through the same calls the page makes.
+        unsafe { cs_build(model, values.as_ptr(), values.len(), -1, 0) };
+        let export = |p: *const u8| unsafe { String::from_utf8(std::slice::from_raw_parts(p, cs_export_len()).to_vec()).unwrap() };
+        let step = export(cs_export_step());
+        let structure = coreshape::import::step::read_step_structure(&step).unwrap();
+        assert_eq!(structure.names, vec!["Frame", "Crank", "Rod", "Piston", "Pin"]);
+        assert_eq!(structure.instances.len(), 7);
+        assert_eq!(step.matches("MANIFOLD_SOLID_BREP").count(), 5);
+        // The rod's where the formula says, in the file.
+        let (rod, at) = structure.instances[2];
+        assert_eq!(rod, 2);
+        assert!(at.origin.dist(v3(30.0 * 60f64.to_radians().cos(), 30.0 * 60f64.to_radians().sin(), 8.0)) < 1e-6, "{:?}", at.origin);
+        // Read back, every use is whole.
+        let bodies = coreshape::import::step::read_step(&step, 1).unwrap();
+        assert_eq!(bodies.len(), 7);
+        let text = export(cs_export_document());
+        assert!(text.contains("coreshape-project"));
+        let mut back = coreshape_assembly::Project::load_text(&text).unwrap();
+        let tab = back.tabs[1].id;
+        let solved = back.solve(tab).unwrap();
+        assert!(solved.failing.is_empty(), "{:?}", solved.failing);
+        assert_eq!(solved.freedom, 1);
+        let piston = solved.placed.iter().find(|q| q.name == "Piston").unwrap();
+        assert!((piston.at.origin.x - by_formula(30.0, 100.0, 60.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_slider_cranks_parts_dont_run_into_each_other_as_it_turns() {
+        let def = &models::catalog()[crank_model()];
+        let mut m = def.mechanism().unwrap();
+        for k in 0..4 {
+            let angle = 40.0 + k as f64 * 90.0;
+            let (solved, _) = def.move_mechanism(&mut m, &[30.0, 100.0, angle]).unwrap();
+            assert!(solved.failing.is_empty());
+            let (found, unknown) = m.project.interferences(m.assembly).unwrap();
+            assert!(found.is_empty(), "at {angle}: {found:?}");
+            assert!(unknown.is_empty(), "at {angle}: {unknown:?}");
+        }
+        let bom = m.project.bom(m.assembly).unwrap();
+        let counts: Vec<(&str, usize)> = bom.rows.iter().map(|r| (r.name.as_str(), r.count)).collect();
+        assert_eq!(counts, vec![("Frame", 1), ("Crank", 1), ("Rod", 1), ("Piston", 1), ("Pin", 3)]);
+    }
+
+    #[test]
+    fn rolled_back_a_mechanism_shows_its_parts_as_a_part_studio_has_them() {
+        let mut out = Output::default();
+        build_into(&mut out, crank_model(), &[30.0, 100.0, 45.0], 1, true);
+        let info = coreshape_document::json::parse(&out.info).unwrap();
+        assert!(info.get("assembly").is_none(), "{}", info.to_text());
+        assert_eq!(info.get("bodies").and_then(|x| x.as_f64()), Some(1.0));
+        // And rolled forward, it's the mechanism again.
+        let info = crank_at(&mut out, 30.0, 100.0, 45.0);
+        assert_eq!(info.get("bodies").and_then(|x| x.as_f64()), Some(7.0));
+        assert_eq!(field(&info, "parts"), 7.0);
+    }
+
+    #[test]
+    fn copies_of_a_part_share_a_tint_and_other_parts_dont() {
+        let mut out = Output::default();
+        crank_at(&mut out, 30.0, 100.0, 45.0);
+        let mut tints: Vec<u8> = out.kinds.iter().map(|k| k / KINDS).collect();
+        tints.sort_unstable();
+        tints.dedup();
+        // Frame, crank, rod, piston and pin, though there are seven instances. An instance each would have them wrap round.
+        assert_eq!(tints, vec![0, 1, 2, 3, 4], "{tints:?}");
+    }
+
+    // ----- The rest -----
 
     /// Every demo must build at its defaults.
     #[test]

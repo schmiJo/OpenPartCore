@@ -11,3 +11,4 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 coreshape = { path = "../kernel" }
 coreshape-document = { path = "../document" }
+coreshape-assembly = { path = "../assembly" }

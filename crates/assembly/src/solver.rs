@@ -926,7 +926,6 @@ pub fn drag(problem: &mut Problem, goal: &Goal) -> Dragged {
         let remaining = distance(&goal_rows(&rig, goal));
         return Dragged { remaining, report: solve(problem) };
     }
-    let columns = Columns::of(&rig, &members);
     let mut best = distance(&goal_rows(&rig, goal));
     // Getting nowhere: near a straight chain's reach, whole steps go on gaining a little, and it doesn't shrink. Closing on
     // the nearest it can get to something out of reach gains little too, but less each time, and that's nearly done.
@@ -935,58 +934,78 @@ pub fn drag(problem: &mut Problem, goal: &Goal) -> Dragged {
     if hard_rows(&rig, problem, &skip, &skip_couplings).is_empty() {
         rig.size = rig.size.max(best);
     }
-    let mut stuck = 0;
-    for _ in 0..400 {
-        let wishes = goal_rows(&rig, goal);
-        let now = distance(&wishes);
-        if now <= TOLERANCE {
-            break;
+    // Asked to prefer something, only that moves at first. A smaller weight on the others wouldn't do it: they'd still take
+    // whatever part of the wish the preferred ones can't meet straight away, though swinging round would get there. If it
+    // can't get there alone, the others have to move, so it goes on with all of them alike.
+    let prefers = !problem.prefer.is_empty();
+    let preferred: Vec<bool> = rig.clusters.iter().map(|c| c.weight >= 1.0).collect();
+    for c in &mut rig.clusters {
+        c.weight = 1.0;
+    }
+    for phase in 0..2 {
+        let moving: Vec<bool> = members.iter().zip(&preferred).map(|(m, p)| *m && (phase == 1 || !prefers || *p)).collect();
+        let columns = Columns::of(&rig, &moving);
+        if columns.count == 0 {
+            continue;
         }
-        // The mates count for far more than the wish does, so the step goes where they allow.
-        let hard = hard_rows(&rig, problem, &skip, &skip_couplings);
-        let mut rows: Vec<Vec<f64>> = hard.iter().map(|r| dense(r, &columns, &rig).iter().map(|x| x * 1e3).collect()).collect();
-        let mut want: Vec<f64> = hard.iter().map(|r| -r.value * 1e3).collect();
-        rows.extend(wishes.iter().map(|r| dense(r, &columns, &rig)));
-        want.extend(wishes.iter().map(|r| -r.value));
-        // With the rows as they are, a wish the mates rule out is what's left over, and not what's taken.
-        let step = least_squares_step(&rows, &want, 1e-6);
-        let before = rig.snapshot();
-        // Short steps, as a drag follows the mechanism along its motion.
-        let mut share = step_share(&rig, &columns, &step);
-        let whole_step = share >= 1.0;
-        let mut moved = false;
-        for _ in 0..6 {
-            apply_step(&mut rig, &columns, &step, share);
-            if settle(&mut rig, problem, &skip, &skip_couplings, &members) {
-                let after = distance(&goal_rows(&rig, goal));
-                if after < now {
-                    moved = true;
+        let mut stuck = 0;
+        for _ in 0..400 {
+            let wishes = goal_rows(&rig, goal);
+            let now = distance(&wishes);
+            if now <= TOLERANCE {
+                break;
+            }
+            // The mates count for far more than the wish does, so the step goes where they allow.
+            let hard = hard_rows(&rig, problem, &skip, &skip_couplings);
+            let mut rows: Vec<Vec<f64>> = hard.iter().map(|r| dense(r, &columns, &rig).iter().map(|x| x * 1e3).collect()).collect();
+            let mut want: Vec<f64> = hard.iter().map(|r| -r.value * 1e3).collect();
+            rows.extend(wishes.iter().map(|r| dense(r, &columns, &rig)));
+            want.extend(wishes.iter().map(|r| -r.value));
+            // With the rows as they are, a wish the mates rule out is what's left over, and not what's taken.
+            let step = least_squares_step(&rows, &want, 1e-6);
+            let before = rig.snapshot();
+            // Short steps, as a drag follows the mechanism along its motion.
+            let mut share = step_share(&rig, &columns, &step);
+            let whole_step = share >= 1.0;
+            let mut moved = false;
+            for _ in 0..6 {
+                apply_step(&mut rig, &columns, &step, share);
+                if settle(&mut rig, problem, &skip, &skip_couplings, &moving) {
+                    let after = distance(&goal_rows(&rig, goal));
+                    if after < now {
+                        moved = true;
+                        break;
+                    }
+                }
+                rig.restore(&before);
+                share *= 0.5;
+            }
+            if !moved {
+                break;
+            }
+            let after = distance(&goal_rows(&rig, goal));
+            if after > best - 1e-9 {
+                stuck += 1;
+                if stuck >= 3 {
+                    break;
+                }
+            } else {
+                stuck = 0;
+                // A step cut short is just a long way to go.
+                let gain = best - after;
+                slow = if whole_step && after > best * 0.7 && gain > 0.5 * last_gain { slow + 1 } else { 0 };
+                last_gain = gain;
+                best = after;
+                if slow >= 4 {
                     break;
                 }
             }
-            rig.restore(&before);
-            share *= 0.5;
         }
-        if !moved {
+        if !prefers || distance(&goal_rows(&rig, goal)) <= TOLERANCE {
             break;
         }
-        let after = distance(&goal_rows(&rig, goal));
-        if after > best - 1e-9 {
-            stuck += 1;
-            if stuck >= 3 {
-                break;
-            }
-        } else {
-            stuck = 0;
-            // A step cut short is just a long way to go.
-            let gain = best - after;
-            slow = if whole_step && after > best * 0.7 && gain > 0.5 * last_gain { slow + 1 } else { 0 };
-            last_gain = gain;
-            best = after;
-            if slow >= 4 {
-                break;
-            }
-        }
+        (slow, last_gain) = (0, f64::INFINITY);
+        best = distance(&goal_rows(&rig, goal));
     }
     let remaining = distance(&goal_rows(&rig, goal));
     rig.write_back(&mut problem.poses);

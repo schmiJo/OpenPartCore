@@ -146,6 +146,39 @@ driver = r"""
     await settle();
     check("the newest value wins", window.__lastBuild.info.volume < small, `${window.__lastBuild.info.volume} under ${small}`);
 
+    // A mechanism, moved by its slider and by its lengths, against the formula for a crank and rod.
+    const crankAt = catalog.findIndex((m) => m.id === "crank");
+    await selectModel(crankAt);
+    const crankModel = catalog[crankAt];
+    const crankSet = async (crank, rod, angle) => {
+      crankModel.params[0].value = crank;
+      crankModel.params[1].value = rod;
+      crankModel.params[2].value = angle;
+      await window.__viewer.rebuild(false);
+      return window.__lastBuild.info;
+    };
+    const formula = (c, r, a) => c * Math.cos(a * Math.PI / 180) + Math.sqrt(r * r - Math.pow(c * Math.sin(a * Math.PI / 180), 2));
+    let crankInfo = await crankSet(30, 100, 0);
+    check("a mechanism says how free it is", crankInfo.assembly && crankInfo.assembly.freedom === 1 && crankInfo.assembly.parts === 7 && crankInfo.bodies === 7, crankInfo.assembly && `${crankInfo.assembly.freedom} free, ${crankInfo.assembly.parts} instances`);
+    let crankWorst = 0;
+    for (const [c, r, a] of [[30, 100, 45], [30, 100, 200], [30, 100, 700], [60, 100, 700], [60, 140, 100]]) {
+      crankInfo = await crankSet(c, r, a);
+      crankWorst = Math.max(crankWorst, Math.abs(crankInfo.assembly.readout[0].value - formula(c, r, a)));
+    }
+    check("the mechanism follows its formula", crankWorst < 1e-5, `worst ${crankWorst.toExponential(1)} mm`);
+    check("its failure box stays away while it gets where it's asked", document.getElementById("failure").hidden);
+    check("a mechanism's readout is on the page", !document.getElementById("rMates").hidden && !document.getElementById("rReading").hidden, document.getElementById("rMates").textContent);
+    crankInfo = await crankSet(80, 40, 10);
+    crankInfo = await crankSet(80, 40, 90);
+    // It can't get across from one side of the circle to the other, so which stop that is depends on where it came from.
+    const crankStop = Math.abs(Math.sin(crankInfo.assembly.reached * Math.PI / 180));
+    check("a crank too long for its rod says where it stops", crankInfo.assembly.stopped && Math.abs(crankStop - 0.5) < 1e-3 && !document.getElementById("failure").hidden, document.getElementById("failure").textContent);
+    crankInfo = await crankSet(30, 100, 30);
+    const crankStep = new TextDecoder().decode(await window.__viewer.kernel.exportFile("step"));
+    check("a mechanism's STEP is an assembly", (crankStep.match(/NEXT_ASSEMBLY_USAGE_OCCURRENCE/g) || []).length === 7 && (crankStep.match(/MANIFOLD_SOLID_BREP/g) || []).length === 5, `${crankStep.length} bytes`);
+    const crankFile = JSON.parse(new TextDecoder().decode(await window.__viewer.kernel.exportFile("coreshape")));
+    check("a mechanism's file is a project", crankFile.format === "coreshape-project" && crankFile.tabs.length === 2, `${crankFile.tabs.length} tabs`);
+
     // A refused case shows why, and the rest of the page stays alive.
     await selectModel(catalog.findIndex((m) => m.id === "stress"));
     const caseSlider = document.getElementById("p-stress-case");
