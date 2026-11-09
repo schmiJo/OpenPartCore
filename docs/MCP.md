@@ -20,14 +20,19 @@ under the root, which is the current folder unless given. A path that leaves it,
 | `parameter_set`, `parameter_remove` | Named values and expressions |
 | `feature_add`, `feature_edit`, `feature_rename`, `feature_suppress`, `feature_delete`, `feature_move`, `features_list` | The history. Each change rebuilds and reports what happened. |
 | `rebuild` | Each feature's state, and the solid's volume, area, size and validity. `upto` shows an earlier state. |
-| `faces_list` | Stable names, surface type, area, center, normal and radius |
-| `edges_list` | Stable names, curve type, length and ends, and a selection ready to use in a fillet or chamfer |
-| `export` | STEP, STL or the native format |
+| `bodies_list` | With several bodies: each one's name, what made it, volume, area, faces and size |
+| `faces_list` | Stable names, surface type, area, center, normal and radius. With several bodies, whose each is, and `body` keeps to one |
+| `edges_list` | Stable names, curve type, length and ends, and a selection ready to use in a fillet or chamfer. `body` keeps to one |
+| `export` | STEP, STL or the native format. Every body, or the one `body` names |
 | `render` | A PNG: iso, front, back, left, right, top, bottom, four views at once, or any angle. Optional face labels, one tint per face, and highlighted faces and edges |
 | `sketch_solve`, `sketch_drag`, `sketch_regions`, `sketch_arrangement` | The sketch solver, without changing the document. `sketch_arrangement` lists every closed region with its id, and the curves that make none |
 
 Each face in `faces_list` has a `key` as well as a `name`, since a name can cover several faces, and `highlight_faces` and edge selections take either. An edge's `select` uses keys when names alone
 would fit several edges: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
+
+## Several bodies
+
+A feature with `"mode": "new_body"` makes a body of its own, and `import_step` with that mode makes one for each solid in the file, which is what an assembly wants. A feature acts on the last body made, unless it has `"body": "f3.2"`, and `bodies_list` gives the names. `render` tints each body differently unless told otherwise with `colors`, and takes `body` to show just one. See the format guide for the details.
 
 ## How a session goes
 

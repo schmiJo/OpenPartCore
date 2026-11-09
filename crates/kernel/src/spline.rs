@@ -805,7 +805,9 @@ impl Spline {
             let kink = wrap_pi(now.base + now.first - (before.base + before.last)).abs() > KINK;
             let shift = wrap_pi(now.base - base);
             let (next_low, next_high) = (low.min(shift + now.low), high.max(shift + now.high));
-            if kink || next_high - next_low > MAX_TURN || straight(now) != is_straight {
+            // A run of straight stretches is one straight piece only if they all go the same way.
+            let bent = is_straight && next_high - next_low >= 1e-10;
+            if kink || bent || next_high - next_low > MAX_TURN || straight(now) != is_straight {
                 pieces.push((start, now.t0, is_straight));
                 start = now.t0;
                 base = now.base;

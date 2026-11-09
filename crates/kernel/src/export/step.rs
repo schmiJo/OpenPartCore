@@ -528,6 +528,12 @@ fn connected_order(body: &Body, shell: &[usize], uses: &[Vec<(usize, usize, usiz
 
 /// Writes a body as a STEP file. Dimensions are in millimetres.
 pub fn write_step(body: &Body, name: &str) -> String {
+    write_step_bodies(&[body], name)
+}
+
+/// Writes several bodies as one STEP file, each as its own solids where it already is, whether they touch or not. There's
+/// no assembly in it: one product holding them all, which any reader comes back from with the same solids in the same places.
+pub fn write_step_bodies(bodies: &[&Body], name: &str) -> String {
     let mut w = Writer { out: String::new(), next: 1 };
     let product = quote(name);
 
@@ -555,6 +561,23 @@ pub fn write_step(body: &Body, name: &str) -> String {
     ));
 
     // Geometry and topology.
+    let mut solids = Vec::new();
+    for body in bodies {
+        solids.extend(write_solids(&mut w, body));
+    }
+
+    let origin = w.axis(&Frame::WORLD);
+    let rep = w.entity(&format!("ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{origin},{}),#{ctx})", solids.join(",")));
+    w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{def_shape},#{rep})"));
+
+    format!(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('CoreShape model'),'2;1');\nFILE_NAME({product},'2026-01-01T00:00:00',(''),(''),'CoreShape','CoreShape','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN {{ 1 0 10303 214 1 1 1 1 }}'));\nENDSEC;\nDATA;\n{}ENDSEC;\nEND-ISO-10303-21;\n",
+        w.out
+    )
+}
+
+/// A body's solids: each of its outer shells, with the voids inside it. Returns their references.
+fn write_solids(w: &mut Writer, body: &Body) -> Vec<String> {
     let vertex_ids: Vec<usize> = body
         .vertices
         .iter()
@@ -638,27 +661,19 @@ pub fn write_step(body: &Body, name: &str) -> String {
                     })
             })
             .collect();
-        let shell = write_shell(&mut w, outer, false);
+        let shell = write_shell(w, outer, false);
         if voids.is_empty() {
             solids.push(format!("#{}", w.entity(&format!("MANIFOLD_SOLID_BREP('',#{shell})"))));
         } else {
             let oriented: Vec<String> = voids
                 .iter()
                 .map(|&v| {
-                    let s = write_shell(&mut w, v, true);
+                    let s = write_shell(w, v, true);
                     format!("#{}", w.entity(&format!("ORIENTED_CLOSED_SHELL('',*,#{s},.F.)")))
                 })
                 .collect();
             solids.push(format!("#{}", w.entity(&format!("BREP_WITH_VOIDS('',#{shell},({}))", oriented.join(",")))));
         }
     }
-
-    let origin = w.axis(&Frame::WORLD);
-    let rep = w.entity(&format!("ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{origin},{}),#{ctx})", solids.join(",")));
-    w.entity(&format!("SHAPE_DEFINITION_REPRESENTATION(#{def_shape},#{rep})"));
-
-    format!(
-        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('CoreShape model'),'2;1');\nFILE_NAME({product},'2026-01-01T00:00:00',(''),(''),'CoreShape','CoreShape','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN {{ 1 0 10303 214 1 1 1 1 }}'));\nENDSEC;\nDATA;\n{}ENDSEC;\nEND-ISO-10303-21;\n",
-        w.out
-    )
+    solids
 }

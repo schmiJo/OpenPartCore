@@ -509,6 +509,122 @@ fn a_surface_of_implied_knots_can_end_in_a_tip_too() {
 }
 
 #[test]
+fn a_curve_in_an_upright_plane_extruded_isnt_read_as_a_plane() {
+    // Its direction in x and y alone never changes, as it only curves in x and z. The surface is still curved.
+    let points: Vec<Vec3> = [(0.0, 0.0), (10.0, 6.0), (20.0, 2.0), (30.0, 8.0)].iter().map(|p| v3(p.0, p.1, 0.0)).collect();
+    let wire = PathBuilder::new(v2(0.0, 0.0)).spline_to(Spline::through(&points).unwrap()).line_to(v2(30.0, -10.0)).line_to(v2(0.0, -10.0)).close();
+    // Sketch x along world x, sketch y along world z, extruded along world y.
+    let frame = Frame::new(Vec3::ZERO, -Vec3::Y, Vec3::X);
+    let b = extrude(&Profile::new(wire), &frame, 15.0, 1).unwrap();
+    let (v, a) = props(&b);
+    let got = reads_as(&write_step(&b, "upright"), v, a, "upright curve");
+    assert!(got.faces.iter().any(|f| matches!(f.surface, Surface::Extruded { .. })));
+}
+
+#[test]
+fn a_straight_section_extruded_is_a_plane_whichever_way_it_goes() {
+    // Sloping in every direction, so that nothing about it lines up with the axes.
+    let mut f = File::new();
+    let d = v3(0.3, 0.2, 1.0).normalized();
+    let (a, b, c) = (v3(0.0, 0.0, 0.0), v3(10.0, 1.0, -2.0), v3(3.0, 9.0, 1.0));
+    let h = 12.0;
+    let up = |p: Vec3| p + d * h;
+    let (va, vb, vc, ua, ub, uc) = (f.vertex(a), f.vertex(b), f.vertex(c), f.vertex(up(a)), f.vertex(up(b)), f.vertex(up(c)));
+    let (ab, bc, ca) = (f.line(a, b, va, vb), f.line(b, c, vb, vc), f.line(c, a, vc, va));
+    let (de, ef, fd) = (f.line(up(a), up(b), ua, ub), f.line(up(b), up(c), ub, uc), f.line(up(c), up(a), uc, ua));
+    let (l0, l1, l2) = (f.line(a, up(a), va, ua), f.line(b, up(b), vb, ub), f.line(c, up(c), vc, uc));
+    // Each side as a line swept along, given as the kind of curve that hides it.
+    let swept = |f: &mut File, p: Vec3, q: Vec3| {
+        let (x, y) = (f.point(p), f.point(q));
+        let curve = f.add(format!("QUASI_UNIFORM_CURVE('',1,(#{x},#{y}),.POLYLINE_FORM.,.F.,.U.)"));
+        let dir = f.direction(d);
+        let v = f.add(format!("VECTOR('',#{dir},1.)"));
+        f.add(format!("SURFACE_OF_LINEAR_EXTRUSION('',#{curve},#{v})"))
+    };
+    let (s0, s1, s2) = (swept(&mut f, a, b), swept(&mut f, b, c), swept(&mut f, c, a));
+    let normal = (b - a).cross(c - a).normalized();
+    let (under, over) = (f.plane(a, -normal, (b - a).normalized()), f.plane(up(a), normal, (b - a).normalized()));
+    // The prism's right-handed way round depends on its corners, so the shell's sense is left to its faces' area.
+    let faces = [
+        f.face(&[vec![(ab, true), (l1, true), (de, false), (l0, false)]], s0, true),
+        f.face(&[vec![(bc, true), (l2, true), (ef, false), (l1, false)]], s1, true),
+        f.face(&[vec![(ca, true), (l0, true), (fd, false), (l2, false)]], s2, true),
+        f.face(&[vec![(ca, false), (bc, false), (ab, false)]], under, true),
+        f.face(&[vec![(de, true), (ef, true), (fd, true)]], over, true),
+    ];
+    f.solid(&faces);
+    let height = h * d.dot(normal).abs();
+    let base = (b - a).cross(c - a).norm() / 2.0;
+    let sides = (a.dist(b) * (b - a).cross(d).norm() / a.dist(b) + b.dist(c) * (c - b).cross(d).norm() / b.dist(c) + c.dist(a) * (a - c).cross(d).norm() / c.dist(a)) * h;
+    let got = reads_as(&f.text(), base * height, 2.0 * base + sides, "sloping prism");
+    assert!(got.faces.iter().all(|x| matches!(x.surface, Surface::Plane(_))));
+}
+
+#[test]
+fn a_chain_of_straight_stretches_going_different_ways_is_no_straight_line() {
+    // Every span of this is straight, and they meet at far too small an angle to count as corners, but it still bends.
+    let points: Vec<Vec3> = (0..7).map(|k| v3(k as f64 * 10.0, if k % 2 == 1 { 1e-7 } else { 0.0 }, 0.0)).collect();
+    let chain = Spline::new(1, vec![0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0], points, vec![1.0; 7]).unwrap();
+    assert!(chain.face_pieces().unwrap().len() > 1);
+    // And a straight line through many control points is one piece.
+    let points: Vec<Vec3> = (0..7).map(|k| v3(k as f64 * 10.0, k as f64 * 5.0, 0.0)).collect();
+    let line = Spline::new(1, vec![0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0], points, vec![1.0; 7]).unwrap();
+    assert_eq!(line.face_pieces().unwrap().len(), 1);
+}
+
+#[test]
+fn an_edge_starting_a_hair_from_a_knot_leaves_a_file_that_can_be_read_again() {
+    // A file's edge on a spline with a knot where it starts, or as near as the file's digits say, and lying a little off
+    // the surfaces, so that it gets traced onto them. The stretch between the two is nothing, and samples along it used to
+    // pile up into knots that no text can tell apart, so this kernel couldn't read its own file back. That takes a hair
+    // this small and luck in the last digits to show, so what's checked is that the samples don't pile up.
+    let (r, h) = (10.0, 20.0);
+    let hair = 1e-12;
+    let mut f = File::new();
+    let (a, b) = (v3(r, 0.0, 0.0), v3(-r, 0.0, 0.0));
+    // Just before the knot at (r, 0, h), where the curve is heading in +y.
+    let (ta, tb) = (v3(r, -hair, h), v3(-r, hair, h));
+    let (va, vb, ua, ub) = (f.vertex(a), f.vertex(b), f.vertex(ta), f.vertex(tb));
+    let place = f.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
+    let lower = f.add(format!("CIRCLE('',#{place},{r:.3})"));
+    let arc_low = f.add(format!("EDGE_CURVE('',#{va},#{vb},#{lower},.T.)"));
+    // A whole circle as a spline a hair off the cylinder, with a knot at each quarter, of which the edge uses a half.
+    let w = std::f64::consts::FRAC_1_SQRT_2;
+    let l = r * (1.0 + 1e-6);
+    let corners = [v3(0.0, -l, h), v3(l, -l, h), v3(l, 0.0, h), v3(l, l, h), v3(0.0, l, h), v3(-l, l, h), v3(-l, 0.0, h), v3(-l, -l, h), v3(0.0, -l, h)];
+    let ids: Vec<String> = corners.iter().map(|p| format!("#{}", f.point(*p))).collect();
+    let spline = f.add(format!(
+        "(BOUNDED_CURVE()B_SPLINE_CURVE(2,({}),.UNSPECIFIED.,.F.,.F.)B_SPLINE_CURVE_WITH_KNOTS((3,2,2,2,3),(0.,1.,2.,3.,4.),.UNSPECIFIED.)CURVE()GEOMETRIC_REPRESENTATION_ITEM()RATIONAL_B_SPLINE_CURVE((1.,{w:.15},1.,{w:.15},1.,{w:.15},1.,{w:.15},1.))REPRESENTATION_ITEM(''))",
+        ids.join(",")
+    ));
+    let arc_high = f.add(format!("EDGE_CURVE('',#{ua},#{ub},#{spline},.T.)"));
+    let (ra, rb) = (f.line(a, ta, va, ua), f.line(b, tb, vb, ub));
+    let (across_low, across_high) = (f.line(a, b, va, vb), f.line(ta, tb, ua, ub));
+    let round = f.add(format!("CYLINDRICAL_SURFACE('',#{place},{r:.3})"));
+    let down = f.plane(Vec3::ZERO, -Vec3::Z, Vec3::X);
+    let up = f.plane(v3(0.0, 0.0, h), Vec3::Z, Vec3::X);
+    let back = f.plane(Vec3::ZERO, -Vec3::Y, Vec3::X);
+    let faces = [
+        f.face(&[vec![(arc_low, true), (rb, true), (arc_high, false), (ra, false)]], round, true),
+        f.face(&[vec![(across_low, true), (arc_low, false)]], down, true),
+        f.face(&[vec![(arc_high, true), (across_high, false)]], up, true),
+        f.face(&[vec![(across_low, false), (ra, true), (across_high, true), (rb, false)]], back, true),
+    ];
+    f.solid(&faces);
+    let first = read_step(&f.text(), 1).unwrap().remove(0);
+    validate(&first).unwrap();
+    let traced: Vec<_> = first.edges.iter().filter_map(|e| if let Curve::Sampled(t) = &e.curve { Some(t) } else { None }).collect();
+    assert!(!traced.is_empty(), "the edge wasn't traced, so this tests nothing");
+    for t in traced {
+        let closest = t.points.windows(2).map(|w| w[0].dist(w[1])).fold(f64::INFINITY, f64::min);
+        assert!(closest > 1e-6, "samples only {closest} apart");
+    }
+    let again = read_step(&write_step(&first, "again"), 1).unwrap_or_else(|e| panic!("its own file: {e}")).remove(0);
+    close(mass_properties(&again).volume, mass_properties(&first).volume, 1e-6, "volume");
+    close(mass_properties(&first).volume, PI * r * r / 2.0 * h, 1e-4, "formula");
+}
+
+#[test]
 fn a_cut_a_hair_from_a_knot_makes_no_cell_of_no_width() {
     let knots_u = vec![0.0, 0.0, 1.0, 1.0];
     let knots_v = vec![0.0, 0.0, 1.0, 2.0, 2.0];

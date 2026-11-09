@@ -356,6 +356,58 @@ fn pockets(doc: &mut Document, _: usize) {
     doc.with(Op::extrude(round, "10 - depth", "depth + 5", Mode::Remove));
 }
 
+/// Two flanges bolted together. Every part is a body of its own, so they stay separate parts though they touch all around,
+/// and a change to one part leaves the others alone.
+fn joint(doc: &mut Document, _: usize) {
+    for (name, value) in [("nut_h", "0.8 * bolt"), ("nut_r", "0.95 * bolt"), ("head_h", "0.6 * bolt"), ("head_r", "0.85 * bolt"), ("tail", "3")] {
+        doc.set_parameter(name, value).expect("valid derived parameters");
+    }
+    let of = |feature: FeatureId| Some(BodyId { feature, index: 0 });
+    // One outline for both flanges, and one ring of holes through each.
+    let disc = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle(0.0, 0.0, "outer / 2"))]));
+    let lower = doc.with(Op::extrude(disc, 0.0, "thick", Mode::NewBody));
+    let upper = doc.with(Op::extrude(disc, "thick", "thick", Mode::NewBody));
+    let ring = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::circle(0.0, 0.0, "bolt / 2")).repeated(Repeat::Circular { count: "bolts".into(), radius: "circle / 2".into(), start_degrees: 0.0.into() })],
+    ));
+    let lower_holes = doc.with(Op::extrude(ring, -1.0, "2 * thick + 2", Mode::Remove));
+    doc.set_body(lower_holes, of(lower)).expect("the flange comes before it");
+    let upper_holes = doc.with(Op::extrude(ring, -1.0, "2 * thick + 2", Mode::Remove));
+    doc.set_body(upper_holes, of(upper)).expect("the flange comes before it");
+    // The upper one's outer rim, and not the holes.
+    let rim = doc.with(Op::fillet(EdgeSelect::Both(vec![EdgeSelect::OnFace(upper.end_cap()), EdgeSelect::Radius("outer / 2".into())]), 3.0));
+    doc.set_body(rim, of(upper)).expect("the flange comes before it");
+    // A bolt through the first hole.
+    let screw = doc.with(Op::sketch(
+        Placement::at(point3("circle / 2", 0.0, "-(nut_h + tail)")),
+        vec![Region::new(Shape::polygon(vec![
+            point(0.0, 0.0),
+            point("bolt / 2", 0.0),
+            point("bolt / 2", "nut_h + tail + 2 * thick"),
+            point("head_r", "nut_h + tail + 2 * thick"),
+            point("head_r", "nut_h + tail + 2 * thick + head_h"),
+            point(0.0, "nut_h + tail + 2 * thick + head_h"),
+        ]))],
+    ));
+    let bolt = doc.with(Op::revolve(screw, 360.0, Mode::NewBody));
+    // And a nut under it.
+    let corner = |k: f64| {
+        let a = 60.0 * k;
+        point(format!("circle / 2 + nut_r * cos({a})").as_str(), format!("nut_r * sin({a})").as_str())
+    };
+    let hex = doc.with(Op::sketch(
+        Placement::xy("-nut_h"),
+        vec![Region::new(Shape::polygon(vec![corner(0.0), corner(1.0), corner(2.0), corner(3.0), corner(4.0), corner(5.0)])).hole(Shape::circle("circle / 2", 0.0, "bolt / 2"))],
+    ));
+    let nut = doc.with(Op::extrude(hex, 0.0, "nut_h", Mode::NewBody));
+    // The same in every other hole.
+    doc.with(Op::Pattern {
+        of: vec![bolt, nut],
+        along: PatternPath::Circular { center: point3(0.0, 0.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: "bolts".into(), degrees: 360.0.into() },
+    });
+}
+
 fn knob(doc: &mut Document, _: usize) {
     for (name, value) in [
         ("base", "8"),
@@ -471,6 +523,13 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("waist", "Waist radius", 10.0, 18.0, 14.0),
         mm("lip", "Lip radius", 14.0, 30.0, 22.0),
         mm("pin", "Cross hole", 4.0, 12.0, 8.0),
+    ];
+    static JOINT: [ParamDef; 5] = [
+        mm("outer", "Flange diameter", 110.0, 160.0, 130.0),
+        mm("circle", "Bolt circle", 60.0, 90.0, 80.0),
+        count("bolts", "Bolts", 3.0, 8.0, 6.0),
+        mm("bolt", "Bolt diameter", 6.0, 12.0, 10.0),
+        mm("thick", "Flange thickness", 6.0, 20.0, 12.0),
     ];
     static SPRING: [ParamDef; 4] = [
         mm("coil", "Coil radius", 6.0, 20.0, 12.0),
@@ -590,7 +649,7 @@ pub fn catalog() -> &'static [ModelDef] {
         default: 0.0,
         choices: &STRESS_NAMES,
     }];
-    static MODELS: [ModelDef; 18] = [
+    static MODELS: [ModelDef; 19] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -646,6 +705,13 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A sketched spline revolved, with a second spline cut out to hollow it. The curve stays an exact spline all the way to the STEP file.",
             params: &VASE,
             build: vase,
+        },
+        ModelDef {
+            id: "joint",
+            name: "Bolted joint",
+            blurb: "Two flanges, bolts and nuts, each a body of its own, so they stay separate parts though they touch all around. Changing a flange's size leaves every bolt as it is, without rebuilding it.",
+            params: &JOINT,
+            build: joint,
         },
         ModelDef {
             id: "spring",

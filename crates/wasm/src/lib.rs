@@ -23,6 +23,8 @@ struct Output {
     info: String,
     export: Vec<u8>,
     body: Option<Arc<Body>>,
+    /// Each of the document's bodies, for writing them out as what they are.
+    bodies: Vec<Arc<Body>>,
     /// One document per model and variant, each keeping its own cached results.
     documents: HashMap<(usize, usize), Document>,
     /// The document shown by the last build.
@@ -163,7 +165,10 @@ fn clear_mesh(out: &mut Output) {
     out.lines.clear();
 }
 
-fn fill_mesh(out: &mut Output, body: &Body, draft: bool) -> Result<coreshape::Mesh> {
+/// How many tints there are for telling bodies apart. A vertex's kind says both: its surface's kind, and its body's tint.
+const KINDS: u8 = 6;
+
+fn fill_mesh(out: &mut Output, outcome: &Outcome, body: &Body, draft: bool) -> Result<coreshape::Mesh> {
     let size = body.aabb().diagonal();
     let params = if draft { TessParams::draft_for_size(size) } else { TessParams::display_for_size(size) };
     let mesh = tessellate(body, &params)?;
@@ -176,7 +181,8 @@ fn fill_mesh(out: &mut Output, body: &Body, draft: bool) -> Result<coreshape::Me
     }
     out.kinds.resize(mesh.positions.len(), 0);
     for (t, &f) in mesh.triangles.iter().zip(&mesh.face_of_triangle) {
-        let k = surface_kind(&body.faces[f as usize].surface);
+        let tint = outcome.bodies.partition_point(|b| b.first_face <= f as usize).saturating_sub(1) % KINDS as usize;
+        let k = surface_kind(&body.faces[f as usize].surface) + KINDS * tint as u8;
         for &v in t {
             out.kinds[v as usize] = k;
             out.indices.push(v);
@@ -206,13 +212,14 @@ fn fill(out: &mut Output, outcome: &Outcome, draft: bool) {
     let rebuilt = outcome.steps.iter().filter(|s| s.state == StepState::Rebuilt).count();
     let head = format!("\"features\":{features},\"failed\":{failed},\"rebuilt\":{rebuilt}");
 
+    out.bodies = outcome.bodies.iter().map(|b| b.body.clone()).collect();
     let Some(body) = outcome.body.clone() else {
         clear_mesh(out);
         out.body = None;
         out.info = format!("{{\"ok\":true,\"empty\":true,{head}}}");
         return;
     };
-    let mesh = match fill_mesh(out, &body, draft) {
+    let mesh = match fill_mesh(out, outcome, &body, draft) {
         Ok(m) => m,
         Err(e) => {
             out.info = format!("{{\"ok\":false,\"error\":{},{head}}}", json_str(&e.to_string()));
@@ -238,8 +245,9 @@ fn fill(out: &mut Output, outcome: &Outcome, draft: bool) {
     }
     let genus: Vec<String> = report.genus.iter().map(|g| g.to_string()).collect();
     let bounds = mesh.bounds();
+    let bodies = outcome.bodies.len();
     out.info = format!(
-        "{{\"ok\":true,\"draft\":{draft},{head},\"volume\":{},\"area\":{},\"vertices\":{},\"edges\":{},\"faces\":{},\"shells\":{},\"genus\":[{}],\"kinds\":[{},{},{},{},{}],\"triangles\":{},\"openEdges\":{},\"contacts\":{},\"bounds\":[{},{},{},{},{},{}]}}",
+        "{{\"ok\":true,\"draft\":{draft},{head},\"bodies\":{bodies},\"volume\":{},\"area\":{},\"vertices\":{},\"edges\":{},\"faces\":{},\"shells\":{},\"genus\":[{}],\"kinds\":[{},{},{},{},{}],\"triangles\":{},\"openEdges\":{},\"contacts\":{},\"bounds\":[{},{},{},{},{},{}]}}",
         volume,
         area,
         report.vertices,
@@ -334,10 +342,11 @@ pub extern "C" fn cs_export_step() -> *const u8 {
     STATE.with(|s| {
         let mut out = s.borrow_mut();
         let out = &mut *out;
-        let Some(body) = &out.body else {
+        if out.bodies.is_empty() {
             return std::ptr::null();
-        };
-        out.export = coreshape::export::step::write_step(body, "model").into_bytes();
+        }
+        let list: Vec<&Body> = out.bodies.iter().map(Arc::as_ref).collect();
+        out.export = coreshape::export::step::write_step_bodies(&list, "model").into_bytes();
         out.export.as_ptr()
     })
 }
@@ -420,6 +429,47 @@ mod tests {
 
     /// Out and back in again must give the same solid, on real parts, whenever it's allowed at all.
     /// Refusing is fine. A wrong volume isn't.
+    #[test]
+    fn bolted_joint_demo() {
+        use std::f64::consts::PI;
+        let def = models::catalog().iter().find(|m| m.id == "joint").unwrap();
+        let mut doc = def.document(0);
+        let o = doc.rebuild(None);
+        assert_eq!(o.failed, None, "{:?}", o.steps);
+        let n = 6.0;
+        // Two flanges, and a bolt and a nut in each hole, all of them separate.
+        assert_eq!(o.bodies.len(), 2 + 2 * 6);
+        let at = |key: &str| def.params.iter().find(|p| p.key == key).unwrap().default;
+        let (outer, thick, bolt) = (at("outer") / 2.0, at("thick"), at("bolt") / 2.0);
+        let hole = PI * bolt * bolt;
+        let lower = (PI * outer * outer - n * hole) * thick;
+        let v = |i: usize| coreshape::mass_properties(&o.bodies[i].body).volume;
+        assert!((v(0) - lower).abs() < 1e-6, "{} against {lower}", v(0));
+        // The upper one's rim is rounded, and nothing else is.
+        assert!(v(1) < lower && v(1) > 0.99 * lower);
+        let (nut_r, nut_h) = (0.95 * at("bolt"), 0.8 * at("bolt"));
+        let nut = (3.0 * 3f64.sqrt() / 2.0 * nut_r * nut_r - hole) * nut_h;
+        let (head_r, head_h, tail) = (0.85 * at("bolt"), 0.6 * at("bolt"), 3.0);
+        let length = nut_h + tail + 2.0 * thick;
+        let screw = hole * length + PI * head_r * head_r * head_h;
+        for b in &o.bodies[2..] {
+            let got = coreshape::mass_properties(&b.body).volume;
+            assert!((got - screw).abs() < 1e-6 || (got - nut).abs() < 1e-6, "{} is {got}, not {screw} or {nut}", b.id.text());
+        }
+        // They touch all around, and each of them is whole.
+        let whole = o.body.as_ref().unwrap();
+        validate(whole).unwrap();
+        let mesh = tessellate(whole, &TessParams::for_size(whole.aabb().diagonal())).unwrap();
+        assert_eq!(mesh.open_edge_count(), 0);
+        // A flange's size changes the flanges, and nothing that's bolted through them.
+        doc.set_parameter("outer", at("outer") + 10.0).unwrap();
+        let o = doc.rebuild(None);
+        assert_eq!(o.failed, None);
+        let rebuilt: Vec<&str> = o.steps.iter().filter(|s| s.state == StepState::Rebuilt).map(|s| s.kind).collect();
+        assert!(!rebuilt.contains(&"pattern") && !rebuilt.contains(&"revolve"), "{rebuilt:?}");
+        assert!(rebuilt.contains(&"extrude"));
+    }
+
     #[test]
     fn offsetting_the_demos_out_and_back_returns_their_volume() {
         let (mut tried, mut refused) = (0, 0);

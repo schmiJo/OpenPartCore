@@ -212,6 +212,7 @@ dd { margin: 0; text-align: right; font: 400 13.5px/1.6 var(--num); font-variant
             <dt>Volume</dt><dd id="rVolume"></dd>
             <dt>Surface area</dt><dd id="rArea"></dd>
             <dt>Faces, edges, vertices</dt><dd id="rTopo"></dd>
+            <dt>Bodies</dt><dd id="rBodies"></dd>
             <dt>Shells, genus</dt><dd id="rShells"></dd>
             <dt>Touches itself at</dt><dd id="rContacts"></dd>
             <dt>Triangles</dt><dd id="rTris"></dd>
@@ -276,13 +277,14 @@ const MESH_FS = `#version 300 es
 precision highp float;
 in vec3 vNormal; in vec3 vPos; flat in int vKind;
 uniform vec3 uEye; uniform vec3 uRight; uniform vec3 uUp;
-uniform vec3 uKinds[6]; uniform bool uByKind; uniform vec3 uSteel;
+uniform vec3 uKinds[6]; uniform bool uByKind; uniform bool uByBody; uniform vec3 uSteel;
 out vec4 color;
 void main() {
   vec3 n = normalize(vNormal);
   vec3 v = normalize(uEye - vPos);
   if (dot(n, v) < 0.0) n = -n;
-  vec3 base = uByKind ? uKinds[vKind] : uSteel;
+  // A vertex's kind says its surface's kind, and which tint its body gets when there are several.
+  vec3 base = uByKind ? uKinds[vKind % 6] : (uByBody ? uKinds[vKind / 6] : uSteel);
   vec3 key = normalize(v + uRight * 0.5 + uUp * 0.7);
   float diff = max(dot(n, key), 0.0);
   float sky = 0.5 + 0.5 * n.z;
@@ -362,7 +364,7 @@ class Viewer {
     this.indexCount = 0;
     this.segmentCount = 0;
     this.az = -0.95; this.el = 0.45; this.dist = 200; this.target = [0, 0, 0];
-    this.showEdges = true; this.byKind = false;
+    this.showEdges = true; this.byKind = false; this.byBody = false;
     this.pending = false;
     this.theme();
   }
@@ -432,6 +434,7 @@ class Viewer {
       gl.uniform3fv(u("uEye"), eye); gl.uniform3fv(u("uRight"), right); gl.uniform3fv(u("uUp"), up);
       gl.uniform3fv(u("uKinds"), this.kinds.flat());
       gl.uniform1i(u("uByKind"), this.byKind ? 1 : 0);
+      gl.uniform1i(u("uByBody"), this.byBody ? 1 : 0);
       gl.uniform3fv(u("uSteel"), this.steel);
       gl.bindVertexArray(this.meshVao);
       gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_INT, 0);
@@ -791,7 +794,7 @@ async function start() {
     $("rTime").textContent = ms.toFixed(1) + " ms";
     if (info.empty) {
       $("rValid").innerHTML = '<span class="chip">No solid yet</span>';
-      for (const id of ["rVolume", "rArea", "rTopo", "rShells", "rContacts", "rTris", "rOpen"]) $(id).textContent = "\u2013";
+      for (const id of ["rVolume", "rArea", "rTopo", "rBodies", "rShells", "rContacts", "rTris", "rOpen"]) $(id).textContent = "\u2013";
       $("legend").textContent = "";
       delete $("legend").dataset.key;
       return;
@@ -814,6 +817,7 @@ async function start() {
       $("rArea").textContent = fmtSig(info.area) + " mm\u00b2";
     }
     $("rTopo").textContent = `${info.faces}, ${info.edges}, ${info.vertices}`;
+    $("rBodies").textContent = String(info.bodies);
     $("rShells").textContent = `${info.shells}, ${info.genus.join(" ")}`;
     $("rContacts").textContent = info.contacts ? `${info.contacts} ${info.contacts === 1 ? "point" : "points"}` : "nowhere";
     $("rTris").textContent = fmt0.format(info.triangles);
@@ -853,6 +857,7 @@ async function start() {
     // A model chosen since this was asked for has its own build coming.
     if (req.model === current) {
       if (r.info.ok) {
+        view.byBody = r.info.bodies > 1;
         view.setMesh(r.positions, r.normals, r.kinds, r.indices, r.segments);
         if (r.info.bounds) lastBounds = r.info.bounds;
       }

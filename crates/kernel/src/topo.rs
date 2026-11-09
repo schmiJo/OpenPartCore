@@ -222,6 +222,27 @@ impl Body {
     }
 
     /// Groups faces into shells by edge connectivity.
+    /// Several bodies held as one, each keeping its own shells, with nothing done about where they touch or overlap. It's
+    /// for showing, measuring and exporting them together. Faces and edges keep their order, body by body.
+    pub fn side_by_side(parts: &[&Body]) -> Body {
+        let mut out = Body::default();
+        for part in parts {
+            let (vertices, edges, faces) = (out.vertices.len(), out.edges.len(), out.faces.len());
+            out.vertices.extend_from_slice(&part.vertices);
+            out.edges.extend(part.edges.iter().map(|e| Edge { curve: e.curve.clone(), t0: e.t0, t1: e.t1, v0: e.v0 + vertices, v1: e.v1 + vertices }));
+            out.faces.extend(part.faces.iter().map(|f| {
+                let mut face = f.clone();
+                for c in face.loops.iter_mut().flatten() {
+                    c.edge += edges;
+                }
+                face
+            }));
+            out.shells.extend(part.shells.iter().map(|s| s.iter().map(|f| f + faces).collect::<Vec<usize>>()));
+            out.tolerance = out.tolerance.max(part.tolerance);
+        }
+        out
+    }
+
     pub fn compute_shells(&mut self) {
         let uses = self.edge_uses();
         let mut seen = vec![false; self.faces.len()];

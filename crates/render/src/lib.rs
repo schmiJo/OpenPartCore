@@ -59,6 +59,8 @@ pub enum Colors {
     Plain,
     /// A different tint for each named face, which shows how the body is divided.
     ByFace,
+    /// A different tint for each group of `face_groups`, which tells a document's bodies apart.
+    ByGroup,
 }
 
 /// A label to draw at a place on the picture.
@@ -81,6 +83,8 @@ pub struct Options {
     pub highlight_edges: Vec<usize>,
     /// A name for each face, to label those that can be seen. Empty for no labels.
     pub face_names: Vec<String>,
+    /// The group of each face, for `Colors::ByGroup`.
+    pub face_groups: Vec<u32>,
 }
 
 impl Default for Options {
@@ -93,6 +97,7 @@ impl Default for Options {
             highlight_faces: Vec::new(),
             highlight_edges: Vec::new(),
             face_names: Vec::new(),
+            face_groups: Vec::new(),
         }
     }
 }
@@ -459,6 +464,7 @@ fn render_mesh(body: &Body, mesh: &Mesh, bounds: &Aabb, options: &Options) -> Im
                 match options.colors {
                     Colors::Plain => BODY,
                     Colors::ByFace => tint(f),
+                    Colors::ByGroup => tint(options.face_groups.get(f).map_or(0, |g| *g as usize)),
                 }
             }
         })

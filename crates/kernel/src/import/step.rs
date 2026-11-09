@@ -1876,16 +1876,6 @@ impl Reader<'_> {
 /// A spline in a plane square to `dir`, as a swept surface whose coordinates are in that plane.
 fn swept_along(spline: &Spline, dir: Vec3) -> Result<Surface> {
     let origin = spline.start();
-    // A straight line swept along makes a plane, with the normal the sweep would have given it.
-    if let Ok(pieces) = spline.face_pieces() {
-        if let [crate::spline::FacePiece::Line(a, b)] = pieces.as_slice() {
-            let along = *b - *a;
-            let normal = along.cross(dir);
-            if normal.norm() > 1e-9 * along.norm().max(TOL) {
-                return Ok(Surface::Plane(Frame::new(*a, normal.normalized(), along.normalized())));
-            }
-        }
-    }
     let x = dir.any_perpendicular();
     let frame = Frame::new(origin, dir, x);
     // The surface's section square to its direction, which an affine map gives exactly.
@@ -1893,6 +1883,18 @@ fn swept_along(spline: &Spline, dir: Vec3) -> Result<Surface> {
         let l = frame.to_local(p);
         v3(l.x, l.y, 0.0)
     });
+    // A straight section swept along makes a plane, with the normal the sweep would have given it. It's the section that
+    // has to be straight, as only that is in the plane the check looks in.
+    if let Ok(pieces) = flat.face_pieces() {
+        if let [crate::spline::FacePiece::Line(a, b)] = pieces.as_slice() {
+            let (a, b) = (frame.point(a.x, a.y, 0.0), frame.point(b.x, b.y, 0.0));
+            let along = b - a;
+            let normal = along.cross(dir);
+            if normal.norm() > 1e-9 * along.norm().max(TOL) {
+                return Ok(Surface::Plane(Frame::new(a, normal.normalized(), along.normalized())));
+            }
+        }
+    }
     // Too long a curve for one face is cut into pieces later, along with the faces on it.
     flat.face_ranges().map_err(|e| Error::Unsupported(format!("SURFACE_OF_LINEAR_EXTRUSION of a curve that can't be used: {e}")))?;
     Ok(Surface::Extruded { frame, curve: Arc::new(PlaneCurve::new(flat)) })
@@ -2109,9 +2111,13 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
                 let mut breaks = vec![t0];
                 breaks.extend(s.breaks_between(t0, t1));
                 breaks.push(t1);
-                let mut points = Vec::new();
+                let mut points: Vec<Vec3> = Vec::new();
                 let mut crossing = true;
                 'walk: for w in breaks.windows(2) {
+                    // A knot a hair from an end is no stretch of curve, and samples on top of each other are no use.
+                    if w[1] - w[0] <= 1e-9 * (t1 - t0) {
+                        continue;
+                    }
                     for i in 0..12 {
                         let on_curve = s.eval(w[0] + (w[1] - w[0]) * i as f64 / 12.0);
                         // Where the surfaces are close to tangent the place they cross can be a long way along from

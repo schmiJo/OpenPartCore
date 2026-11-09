@@ -17,7 +17,8 @@ It runs natively and in the browser through WebAssembly.
   Delete face, which closes the gap by letting the neighbours grow, and thicken.
 - **Documents:** parameters and features as plain data, saved as readable JSON. Features can
   be edited, suppressed, deleted and reordered. References go by name, and a rebuild reuses
-  every step whose inputs didn't change.
+  every step whose inputs didn't change. A document can hold several bodies, so an imported
+  assembly's parts stay parts, and a change to one leaves the others alone.
 - **Sketches:** a 2D constraint solver in its own crate. It reports remaining freedom, names
   redundant and conflicting constraints, supports dragging, and is fast enough for every mouse
   move. Checked against FreeCAD's PlaneGCS: see [docs/SKETCH_SOLVER.md](docs/SKETCH_SOLVER.md).

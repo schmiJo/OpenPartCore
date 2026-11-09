@@ -360,3 +360,81 @@ fn sketches_solve_drag_and_become_solids_through_the_tools() {
     assert!((volume(&text) - 300.0).abs() < 1e-6, "{text}");
     assert!(c.ok("faces_list", "{}").contains("f2:side.3"));
 }
+
+#[test]
+fn several_bodies_can_be_made_chosen_listed_and_exported() {
+    let dir = folder("bodies");
+    let mut c = Client::start(&dir);
+    let block = |x: f64, extra: &str| format!(r#"{{"feature":{{"type":"solid","shape":"box","dx":10,"dy":10,"dz":10,"at":{{"origin":[{x},0,0]}},"mode":"new_body"{extra}}}}}"#);
+    c.ok("feature_add", &block(0.0, ""));
+    c.ok("feature_add", &block(50.0, ""));
+
+    let bodies = json::parse(&c.ok("bodies_list", "{}")).unwrap();
+    let list = bodies.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].get("body").unwrap().as_str(), Some("f1"));
+    assert_eq!(list[1].get("body").unwrap().as_str(), Some("f2"));
+    assert_eq!(list[1].get("volume").unwrap().as_f64(), Some(1000.0));
+
+    // By default a feature acts on the last one made, and it can say otherwise.
+    let cut = |x: f64, extra: &str| format!(r#"{{"feature":{{"type":"solid","shape":"cylinder","radius":1,"height":20,"at":{{"origin":[{x},5,-5]}},"mode":"remove"{extra}}}}}"#);
+    c.ok("feature_add", &cut(55.0, ""));
+    c.ok("feature_add", &cut(5.0, r#","body":"f1""#));
+    let bodies = json::parse(&c.ok("bodies_list", "{}")).unwrap();
+    let hole = 10.0 * std::f64::consts::PI;
+    for b in bodies.as_array().unwrap() {
+        assert!((b.get("volume").unwrap().as_f64().unwrap() - (1000.0 - hole)).abs() < 1e-6);
+    }
+    // A body it can't have leaves nothing behind.
+    let before = c.ok("features_list", "{}");
+    assert!(c.refused("feature_add", &cut(5.0, r#","body":"f9""#)).contains("f9"));
+    assert!(c.refused("feature_add", &cut(5.0, r#","body":"nine""#)).contains("nine"));
+    assert_eq!(c.ok("features_list", "{}"), before);
+    // Editing keeps the choice unless it says otherwise.
+    c.ok("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.5, "")[1..]));
+    assert!(c.ok("document_show", "{}").contains(r#""body": "f1""#));
+    c.ok("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","body":null"#)[1..]));
+    assert!(!c.ok("document_show", "{}").contains(r#""body": "f1""#));
+    assert!(c.refused("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","body":"f9""#)[1..])).contains("f9"));
+    c.ok("feature_edit", &format!(r#"{{"id":4,{}"#, &cut(5.0, r#","body":"f1""#)[1..]));
+
+    // The lists say whose each thing is, and can stick to one.
+    let faces = json::parse(&c.ok("faces_list", "{}")).unwrap();
+    let all = faces.as_array().unwrap();
+    assert!(all.iter().any(|f| f.get("body").and_then(Value::as_str) == Some("f1")));
+    assert!(all.iter().any(|f| f.get("body").and_then(Value::as_str) == Some("f2")));
+    let one = json::parse(&c.ok("faces_list", r#"{"body":"f2"}"#)).unwrap();
+    assert!(!one.as_array().unwrap().is_empty() && one.as_array().unwrap().len() < all.len());
+    assert!(one.as_array().unwrap().iter().all(|f| f.get("body").and_then(Value::as_str) == Some("f2")));
+    let edges = json::parse(&c.ok("edges_list", r#"{"body":"f1"}"#)).unwrap();
+    assert!(edges.as_array().unwrap().iter().all(|e| e.get("body").and_then(Value::as_str) == Some("f1")));
+    assert!(c.refused("faces_list", r#"{"body":"f7"}"#).contains("f1, f2"));
+
+    // A rebuild's summary tells them apart.
+    let summary = json::parse(&c.ok("rebuild", "{}")).unwrap();
+    assert_eq!(summary.get("bodies").unwrap().as_array().unwrap().len(), 2);
+
+    // A STEP file has both, or the one asked for, and pictures show them.
+    let both = c.ok("export", r#"{"format":"step"}"#);
+    assert_eq!(both.matches("MANIFOLD_SOLID_BREP").count(), 2);
+    let single = c.ok("export", r#"{"format":"step","body":"f2"}"#);
+    assert_eq!(single.matches("MANIFOLD_SOLID_BREP").count(), 1);
+    for args in [r#"{}"#, r#"{"body":"f2"}"#, r#"{"colors":"bodies"}"#, r#"{"colors":"plain"}"#] {
+        let (_, failed) = c.call("render", args);
+        assert!(!failed, "{args}");
+    }
+    assert!(c.refused("render", r#"{"colors":"tartan"}"#).contains("bodies"));
+}
+
+#[test]
+fn a_document_with_one_body_lists_as_it_did() {
+    let dir = folder("one_body");
+    let mut c = Client::start(&dir);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":10,"dy":10,"dz":10}}"#);
+    let faces = c.ok("faces_list", "{}");
+    assert!(!faces.contains("\"body\""), "{faces}");
+    let summary = json::parse(&c.ok("rebuild", "{}")).unwrap();
+    assert!(summary.get("bodies").is_none());
+    let bodies = json::parse(&c.ok("bodies_list", "{}")).unwrap();
+    assert_eq!(bodies.as_array().unwrap().len(), 1);
+}

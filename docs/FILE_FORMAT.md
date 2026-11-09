@@ -66,7 +66,7 @@ copies are ambiguous unless something else says which one is meant.
 
 ## Features
 
-Common fields: `id`, `name`, and `suppressed` (default false).
+Common fields: `id`, `name`, `suppressed` (default false), and `body`: see [Bodies](#bodies).
 
 | `type` | Fields |
 |---|---|
@@ -81,7 +81,7 @@ Common fields: `id`, `name`, and `suppressed` (default false).
 | `mirror` | `of` (as above), `point` (default origin), `normal` |
 | `fillet` | `edges`, `radius`, `propagate` (default true: follow tangent neighbours) |
 | `chamfer` | `edges`, `distance`, `propagate` (default true: follow tangent neighbours) |
-| `import_step` | `text`: a whole STEP file, kept in the document, and `mode`. Its faces are named by their place in the file: `f3:side.0` is the first. A wide face cut into pieces on the way in keeps one name for them all. An assembly's parts are placed where it puts them, and then merged by Boolean, as a feature has one body: that fails on parts touching along tangent faces, so use `read_step` for those. A file it can't represent fails the feature, and says what's in the way. |
+| `import_step` | `text`: a whole STEP file, kept in the document, and `mode`. Its faces are named by their place in the file: `f3:side.0` is the first. A wide face cut into pieces on the way in keeps one name for them all. An assembly's parts are placed where it puts them. With `mode` `new_body`, which is what an assembly wants, each solid is a body of its own. With any other, they're merged by Boolean, which can fail where they touch, and says to use `new_body`. A file it can't represent fails the feature, and says what's in the way. |
 | `delete_face` | `faces` (names or keys): those faces go, and their neighbours grow to close the gap. It takes holes, pockets, bosses, fillets, chamfers, rabbets, slots and corner notches, and refuses by name what it can't close |
 | `thicken` | `faces` (names or keys), `thickness` (outward, or inward if negative), `mode` (default `add`). A solid between the faces and a copy moved along their normals. Near faces are this feature's `start`, far ones its `end`, and walls its `side.N`. Each keeps the face it came from in its key |
 | `offset` | `distance`: every face moves out, or in if negative. Sharp edges stay sharp. |
@@ -158,9 +158,18 @@ Repeats make copies, each of which counts as its own region:
 | `{"radius": r}` | Circular edges of a radius |
 | `{"any": [...]}`, `{"both": [...]}` | Union and intersection of selections |
 
+## Bodies
+
+Most documents have one body, and never need this section. A document can have several: parts that stay separate, and can touch or overlap.
+
+- **`mode` can be `new_body`** on anything with a `mode`. The feature combines with nothing, and what it makes is a new body. A sketch's several regions make one body between them, and each solid of an `import_step` makes one. A body made by a pattern or mirror of a `new_body` feature's solids is new too. Writing `add`, `remove` or `intersect` means what it always has.
+- **A body's name** is the feature that made it, and which of that feature's bodies it is, counting from 0: `f3` for the first or only one, and `f3.2` for the third. For an imported file, that's the same number as in the face keys of that solid's copies, so `f3:side.0@f3.2` is on `f3.2`. Whatever is done to a body later, it keeps that name.
+- **A feature's `body`** says which one it acts on: `{"id": 8, "type": "fillet", "body": "f3.2", ...}`. Leave it out for the last body made, which is the only one in a document with one. Pattern and mirror of listed features default to the body those features acted on. Sketches don't act on a body, and may not have this. Naming a body whose feature doesn't come first is refused when reading, and a body that isn't there at that point, such as the second of a feature that made one, fails that feature with a message.
+- **A change to one body leaves the others alone.** A rebuild reuses a feature unless what it acts on changed, so features on other bodies come back as reused, even if they come later in the list.
+
 ## Rules a reader enforces
 
-- A feature may only refer to features before it, and `sketch` must name a sketch.
+- A feature may only refer to features before it, including by `body`, and `sketch` must name a sketch.
 - Parameters may refer to each other but not in a cycle.
 - A version other than this reader's is refused with a message saying so.
 

@@ -21,18 +21,19 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("document_show", "The whole document as JSON, in the file format.", "{}", "[]"),
     ("parameter_set", "Creates or changes a named parameter, then rebuilds. The value is a number or an expression over other parameters.", r#"{"name": {"type": "string"}, "value": {"type": ["number", "string"]}}"#, r#"["name", "value"]"#),
     ("parameter_remove", "Removes a parameter nothing uses.", r#"{"name": {"type": "string"}}"#, r#"["name"]"#),
-    ("feature_add", "Adds a feature, then rebuilds. Gives its permanent id and what the rebuild did. See format_guide for the fields.", r#"{"feature": {"type": "object", "description": "A feature, without id: {\"type\": \"extrude\", \"sketch\": 1, \"length\": 10}."}, "name": {"type": "string"}, "position": {"type": "integer", "description": "Where in the history. The end, if left out."}}"#, r#"["feature"]"#),
-    ("feature_edit", "Replaces what a feature does, keeping its id, name and position, then rebuilds.", r#"{"id": {"type": "integer"}, "feature": {"type": "object"}}"#, r#"["id", "feature"]"#),
+    ("feature_add", "Adds a feature, then rebuilds. Gives its permanent id and what the rebuild did. See format_guide for the fields. With several bodies it acts on the last one made, unless the feature has a \"body\", like \"f3.2\". The mode new_body makes a body of its own, so that parts can touch or overlap.", r#"{"feature": {"type": "object", "description": "A feature, without id: {\"type\": \"extrude\", \"sketch\": 1, \"length\": 10}."}, "name": {"type": "string"}, "position": {"type": "integer", "description": "Where in the history. The end, if left out."}}"#, r#"["feature"]"#),
+    ("feature_edit", "Replaces what a feature does, keeping its id, name and position, then rebuilds. It keeps the body it acts on unless the feature gives a \"body\", or null for the last one made.", r#"{"id": {"type": "integer"}, "feature": {"type": "object"}}"#, r#"["id", "feature"]"#),
     ("feature_rename", "Renames a feature.", r#"{"id": {"type": "integer"}, "name": {"type": "string"}}"#, r#"["id", "name"]"#),
     ("feature_suppress", "Turns a feature off or on, then rebuilds.", r#"{"id": {"type": "integer"}, "suppressed": {"type": "boolean"}}"#, r#"["id", "suppressed"]"#),
     ("feature_delete", "Deletes a feature nothing refers to, then rebuilds.", r#"{"id": {"type": "integer"}}"#, r#"["id"]"#),
     ("feature_move", "Moves a feature in the history, if that keeps every reference pointing backward, then rebuilds.", r#"{"id": {"type": "integer"}, "position": {"type": "integer"}}"#, r#"["id", "position"]"#),
     ("features_list", "The history: each feature's id, name, type, state and any error.", "{}", "[]"),
     ("rebuild", "Rebuilds, reusing whatever didn't change. Gives each feature's state and the solid's volume, area, size and validity.", r#"{"upto": {"type": "integer", "description": "Stop after the feature at this position, to see an earlier state."}}"#, "[]"),
-    ("faces_list", "The solid's faces with their stable names, surface type, area, center and outward normal. One name can cover several faces, such as a pattern's copies. Each face's key is its own, and an edge selection takes a key wherever it takes a face name.", "{}", "[]"),
-    ("edges_list", "The solid's edges with their stable names, curve type, length and ends, and a selection for each, ready to use in a fillet or chamfer.", "{}", "[]"),
-    ("export", "Exports the solid. STEP and the native format can come back as text; STL needs a path. Paths are under the server's root folder.", r#"{"format": {"type": "string", "enum": ["step", "stl", "coreshape"]}, "path": {"type": "string"}}"#, r#"["format"]"#),
-    ("render", "Draws the solid and returns a PNG. Views: iso, front, back, left, right, top, bottom or four (top, iso, front and right together), or an azimuth and elevation in degrees.", r#"{"view": {"type": "string"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "labels": {"type": "boolean", "description": "Write each visible face's name on it."}, "colors": {"type": "string", "enum": ["plain", "faces"], "description": "faces gives each face its own tint."}, "highlight_faces": {"type": "array", "items": {"type": "string"}, "description": "Face names to pick out."}, "highlight_edges": {"description": "An edge selection to pick out, as in a fillet."}, "path": {"type": "string", "description": "Also save the PNG here, under the server's root folder."}}"#, "[]"),
+    ("bodies_list", "The document's bodies: each one's name, the feature that made it, volume, area, faces and size. Separate bodies can touch or overlap, as an assembly's parts do.", "{}", "[]"),
+    ("faces_list", "The solid's faces with their stable names, surface type, area, center and outward normal. One name can cover several faces, such as a pattern's copies. Each face's key is its own, and an edge selection takes a key wherever it takes a face name.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
+    ("edges_list", "The solid's edges with their stable names, curve type, length and ends, and a selection for each, ready to use in a fillet or chamfer.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
+    ("export", "Exports the solid. STEP and the native format can come back as text; STL needs a path. Paths are under the server's root folder.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}, "format": {"type": "string", "enum": ["step", "stl", "coreshape"]}, "path": {"type": "string"}}"#, r#"["format"]"#),
+    ("render", "Draws the solid and returns a PNG. Views: iso, front, back, left, right, top, bottom or four (top, iso, front and right together), or an azimuth and elevation in degrees.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}, "view": {"type": "string"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "labels": {"type": "boolean", "description": "Write each visible face's name on it."}, "colors": {"type": "string", "enum": ["plain", "faces"], "description": "faces gives each face its own tint."}, "highlight_faces": {"type": "array", "items": {"type": "string"}, "description": "Face names to pick out."}, "highlight_edges": {"description": "An edge selection to pick out, as in a fillet."}, "path": {"type": "string", "description": "Also save the PNG here, under the server's root folder."}}"#, "[]"),
     ("sketch_solve", "Solves a sketch without changing the document. Gives the solved sketch, remaining freedom, what's still free and what's redundant, or the constraints that can't all hold.", r#"{"sketch": {"type": "object", "description": "A sketch in the format in format_guide."}, "parameters": {"type": "object", "description": "Values for names used in its dimensions."}}"#, r#"["sketch"]"#),
     ("sketch_drag", "Moves a point or edge of a sketch toward a target, disturbing the rest as little as possible, and gives the new sketch.", r#"{"sketch": {"type": "object"}, "grab": {"description": "A point, such as \"7.end\", or an edge and where it was grabbed: {\"edge\": 7, \"at\": [x, y]}."}, "to": {"type": "array", "items": {"type": "number"}}, "parameters": {"type": "object"}}"#, r#"["sketch", "grab", "to"]"#),
     ("sketch_regions", "The closed regions a sketch would use: those picked, or by default every other level of nesting, so a loop in a loop is a hole. Says which entity leaves a gap if there aren't any.", r#"{"sketch": {"type": "object"}}"#, r#"["sketch"]"#),
@@ -187,17 +188,38 @@ impl Session {
             }
             "feature_add" => {
                 let spec = args.get("feature").ok_or("\"feature\" is needed")?;
-                let op = read_op(spec, &[]).map_err(e)?;
+                let op = read_op(spec, &["body"]).map_err(e)?;
+                let body = read_body(spec)?;
                 let at = position_arg(args, "position")?.unwrap_or(self.doc.features().len());
                 let name = args.get("name").and_then(Value::as_str).map(str::to_string);
                 let id = self.doc.insert(op, name, at).map_err(e)?;
+                if let Some(body) = body {
+                    // It's no use with a body it can't have.
+                    if let Err(why) = self.doc.set_body(id, body) {
+                        self.doc.delete(id).map_err(e)?;
+                        return Err(why.to_string());
+                    }
+                }
                 let mut out = vec![text(format!("Added feature f{} (id {}).", id.0, id.0))];
                 out.extend(self.rebuilt(None)?);
                 Ok(out)
             }
             "feature_edit" => {
-                let op = read_op(args.get("feature").ok_or("\"feature\" is needed")?, &[]).map_err(e)?;
-                self.doc.edit(id_arg(args)?, op).map_err(e)?;
+                let spec = args.get("feature").ok_or("\"feature\" is needed")?;
+                let op = read_op(spec, &["body"]).map_err(e)?;
+                let body = read_body(spec)?;
+                let id = id_arg(args)?;
+                let before = self.doc.feature(id).cloned();
+                self.doc.edit(id, op).map_err(e)?;
+                if let Some(body) = body {
+                    if let Err(why) = self.doc.set_body(id, body) {
+                        // All of it or none of it.
+                        if let Some(old) = before {
+                            self.doc.edit(id, old.op).map_err(e)?;
+                        }
+                        return Err(why.to_string());
+                    }
+                }
                 self.rebuilt(None)
             }
             "feature_rename" => {
@@ -226,8 +248,18 @@ impl Session {
                 Ok(vec![text(self.steps_value().to_pretty())])
             }
             "rebuild" => self.rebuilt(position_arg(args, "upto")?),
-            "faces_list" => Ok(vec![text(faces_value(self.body()?.as_ref())?.to_pretty())]),
-            "edges_list" => Ok(vec![text(edges_value(self.body()?.as_ref())?.to_pretty())]),
+            "bodies_list" => {
+                self.body()?;
+                Ok(vec![text(self.bodies_value().to_pretty())])
+            }
+            "faces_list" => {
+                let scope = self.scope(args)?;
+                Ok(vec![text(faces_value(&scope.body, &scope.of_face)?.to_pretty())])
+            }
+            "edges_list" => {
+                let scope = self.scope(args)?;
+                Ok(vec![text(edges_value(&scope.body, &scope.of_edge)?.to_pretty())])
+            }
             "export" => self.export(args),
             "render" => self.render(args),
             "sketch_solve" => {
@@ -270,6 +302,56 @@ impl Session {
             self.outcome = Some(self.doc.rebuild(None));
         }
         self.outcome.as_ref().and_then(|o| o.body.clone()).ok_or_else(|| "there is no solid yet: add a feature that makes one".to_string())
+    }
+
+    /// What a tool that looks at the solid is looking at: everything, or the one body it asked for. With several bodies,
+    /// whose each face and edge is.
+    fn scope(&mut self, args: &Value) -> R<Scope> {
+        let whole = self.body()?;
+        let o = self.outcome.as_ref().ok_or("nothing has been built")?;
+        if let Some(asked) = args.get("body") {
+            let name = asked.as_str().ok_or("\"body\" must be the name of a body, like f3 or f3.2")?;
+            let id = BodyId::parse(name).map_err(|x| x.to_string())?;
+            let Some(part) = o.find_body(id) else {
+                let there: Vec<String> = o.bodies.iter().map(|b| b.id.text()).collect();
+                return Err(format!("there is no body {name}: there's {}", there.join(", ")));
+            };
+            return Ok(Scope { body: part.body.clone(), of_face: vec![name.to_string(); part.body.faces.len()], of_edge: vec![name.to_string(); part.body.edges.len()] });
+        }
+        if o.bodies.len() < 2 {
+            return Ok(Scope { body: whole, of_face: Vec::new(), of_edge: Vec::new() });
+        }
+        let (mut of_face, mut of_edge) = (Vec::with_capacity(whole.faces.len()), Vec::with_capacity(whole.edges.len()));
+        for b in &o.bodies {
+            let name = b.id.text();
+            of_face.extend(std::iter::repeat_n(name.clone(), b.body.faces.len()));
+            of_edge.extend(std::iter::repeat_n(name, b.body.edges.len()));
+        }
+        Ok(Scope { body: whole, of_face, of_edge })
+    }
+
+    /// Each body: its name, what made it, and how big it is.
+    fn bodies_value(&self) -> Value {
+        let Some(o) = &self.outcome else { return Value::Arr(Vec::new()) };
+        Value::Arr(
+            o.bodies
+                .iter()
+                .map(|b| {
+                    let props = mass_properties(&b.body);
+                    let bounds = b.body.aabb();
+                    let maker = self.doc.feature(b.id.feature).map_or(String::new(), |f| f.name.clone());
+                    Value::obj(vec![
+                        ("body", Value::str(b.id.text())),
+                        ("made_by", Value::str(maker)),
+                        ("volume", num(props.volume)),
+                        ("area", num(props.area)),
+                        ("faces", Value::Num(b.body.faces.len() as f64)),
+                        ("box_min", vec3(bounds.min)),
+                        ("box_max", vec3(bounds.max)),
+                    ])
+                })
+                .collect(),
+        )
     }
 
     fn rebuilt(&mut self, upto: Option<usize>) -> R<Vec<Value>> {
@@ -364,6 +446,10 @@ impl Session {
                 if touching > 0 {
                     solid.push(("touching_points", Value::Num(touching as f64)));
                 }
+                if o.bodies.len() > 1 {
+                    solid.push(("volume_note", Value::str("the bodies are separate, so this counts twice wherever they overlap")));
+                    items.push(("bodies", self.bodies_value()));
+                }
                 items.push(("solid", Value::obj(solid)));
             }
             None => items.push(("solid", Value::Null)),
@@ -404,11 +490,14 @@ impl Session {
         let (bytes, kinds): (Vec<u8>, &[&str]) = match format {
             "coreshape" => (self.doc.save_text().into_bytes(), &["coreshape", "json"]),
             "step" => {
-                let body = self.body()?;
-                (coreshape::export::step::write_step(&body, "model").into_bytes(), &["step", "stp"])
+                let scope = self.scope(args)?;
+                // Each body as its own solids, unless one was asked for.
+                let all = self.outcome.as_ref().filter(|_| args.get("body").is_none()).and_then(|o| o.step_text("model"));
+                let text = all.unwrap_or_else(|| coreshape::export::step::write_step(&scope.body, "model"));
+                (text.into_bytes(), &["step", "stp"])
             }
             "stl" => {
-                let body = self.body()?;
+                let body = self.scope(args)?.body;
                 let mesh = tessellate(&body, &TessParams::for_size(body.aabb().diagonal())).map_err(|x| x.to_string())?;
                 (coreshape::export::stl::write_binary(&mesh, "model"), &["stl"])
             }
@@ -426,7 +515,8 @@ impl Session {
     }
 
     fn render(&mut self, args: &Value) -> R<Vec<Value>> {
-        let body = self.body()?;
+        let scope = self.scope(args)?;
+        let body = scope.body.clone();
         let size = |key: &str, default: u32| -> R<u32> {
             match args.get(key).and_then(Value::as_f64) {
                 None => Ok(default),
@@ -467,10 +557,28 @@ impl Session {
             highlight_edges = select_edges(&query, &body, &env).map_err(|x| x.to_string())?;
         }
         let labelled = args.get("labels").and_then(Value::as_bool).unwrap_or(false);
+        // Separate bodies are hard to tell apart in one colour, so that's how they're shown unless asked otherwise.
+        let groups: Vec<u32> = {
+            let mut seen: Vec<&String> = Vec::new();
+            scope
+                .of_face
+                .iter()
+                .map(|name| match seen.iter().position(|n| *n == name) {
+                    Some(g) => g as u32,
+                    None => {
+                        seen.push(name);
+                        seen.len() as u32 - 1
+                    }
+                })
+                .collect()
+        };
+        let several = groups.iter().any(|g| *g > 0);
         let colors = match args.get("colors").and_then(Value::as_str) {
+            None if several => Colors::ByGroup,
             None | Some("plain") => Colors::Plain,
             Some("faces") => Colors::ByFace,
-            Some(other) => return Err(format!("unknown colors \"{other}\"; expected plain or faces")),
+            Some("bodies") => Colors::ByGroup,
+            Some(other) => return Err(format!("unknown colors \"{other}\"; expected plain, faces or bodies")),
         };
         let options = Options {
             width,
@@ -480,6 +588,7 @@ impl Session {
             highlight_faces,
             highlight_edges,
             face_names: if labelled { names.clone() } else { Vec::new() },
+            face_groups: groups,
         };
         let image = if four { render_four(&body, &options) } else { render(&body, &options) }.map_err(|x| x.to_string())?;
         let png = image.to_png();
@@ -524,7 +633,26 @@ fn surface_name(s: &Surface) -> &'static str {
     }
 }
 
-fn faces_value(body: &Body) -> R<Value> {
+/// What a tool is looking at. The names of the bodies are empty when there's only one to speak of.
+struct Scope {
+    body: Arc<Body>,
+    of_face: Vec<String>,
+    of_edge: Vec<String>,
+}
+
+/// A feature's choice of body. `None` if it doesn't say, and a null for going back to the last one made.
+fn read_body(spec: &Value) -> R<Option<Option<BodyId>>> {
+    match spec.get("body") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(v) => {
+            let name = v.as_str().ok_or("\"body\" must be the name of a body, like f3 or f3.2")?;
+            Ok(Some(Some(BodyId::parse(name).map_err(|x| x.to_string())?)))
+        }
+    }
+}
+
+fn faces_value(body: &Body, of_face: &[String]) -> R<Value> {
     let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal())).map_err(|x| x.to_string())?;
     let n = body.faces.len();
     let mut area = vec![0.0; n];
@@ -550,6 +678,9 @@ fn faces_value(body: &Body) -> R<Value> {
             ("center", vec3(on)),
             ("normal", vec3(normal)),
         ];
+        if let Some(owner) = of_face.get(i) {
+            items.push(("body", Value::str(owner)));
+        }
         match face.surface {
             Surface::Cylinder { radius, .. } | Surface::Sphere { radius, .. } | Surface::Cone { radius, .. } => items.push(("radius", num(radius))),
             Surface::Torus { major, minor, .. } => {
@@ -563,7 +694,7 @@ fn faces_value(body: &Body) -> R<Value> {
     Ok(Value::Arr(out))
 }
 
-fn edges_value(body: &Body) -> R<Value> {
+fn edges_value(body: &Body, of_edge: &[String]) -> R<Value> {
     let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal())).map_err(|x| x.to_string())?;
     let uses = body.edge_uses();
     let mut out = Vec::with_capacity(body.edges.len());
@@ -602,6 +733,9 @@ fn edges_value(body: &Body) -> R<Value> {
             ("start", vec3(body.vertices[edge.v0])),
             ("end", vec3(body.vertices[edge.v1])),
         ];
+        if let Some(owner) = of_edge.get(e) {
+            items.push(("body", Value::str(owner)));
+        }
         match &edge.curve {
             Curve::Line { dir, .. } => {
                 items.push(("curve", Value::str("line")));
