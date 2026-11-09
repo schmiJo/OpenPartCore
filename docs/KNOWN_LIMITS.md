@@ -341,6 +341,20 @@ A solid between faces of a body and a copy of them moved along their normals, wi
 - **Oracles, all met to 1e-9 or better:** a flat face's area times the thickness, tube walls, spherical and toroidal shells, and a free-form cylinder against a true one. A thin layer on a free-form vase settles to its area. Steiner's formula checks a cone, and a 1D integral gives 623.19315 for the vase at 0.5, which is what comes out.
 - **Fuzz:** 300 random faces (`--example fuzz_features -- 300 thicken`): 296 fine, 4 refused and 0 wrong, the refusals being an edge whose radius would go to nothing inward. Those are checked for validity and against their own mesh, since no closed form exists for most.
 
+## Extrude ends and regions
+
+An extrude can pick regions from any constrained sketches, and end through all, up to the next surface, or up to a face, a part or a vertex: see [FILE_FORMAT.md](FILE_FORMAT.md#extrude-regions-and-ends). Each result in `crates/document/tests/extrude_ends.rs` is held against a closed formula, or an integral done in the test. OpenCASCADE read 13 of them with every solid valid, and 12 matched in volume to 2.5e-7 and area to 1.2e-6. The other, a boss merged into a sphere's underside, came to 35,887.86 in OpenCASCADE, and 35,891.32 here and by formula. OpenCASCADE's own mesh of the same file goes past its figure as it gets finer, reaching 35,889.93, so it's its integrator on a sphere's face with a hole.
+
+- **An end follows one surface,** the nearest it meets, for each closed region. So a boss going up to a stepped ceiling stops at the lowest step and leaves a gap under the others. If that surface, extended, would take the tool up into something else, which it finds by a Boolean on what's nearest in the sample of rays, it's refused saying so. Regions in one sketch each find their own.
+- **Up to next and up to a part look along rays,** a few for each triangle of a sketch's region. A feature too small for any of them to hit isn't seen as the nearest, though for a new solid the check above still catches it being run into. A cut has no such check, and could go on past a narrow gap in the material.
+- **An end has to be on a plane, cylinder, cone, sphere or torus.** A spline or free-form face is refused, as nothing extends one.
+- **An end on a cone can't take in its tip,** which is refused. Coming down from above the tip always does, as the check is on the tool's whole extent along the axis.
+- **A surface that the sketch sits across is refused,** as is one that some of the sketch would go past, even extended, such as a sphere narrower than the sketch.
+- **Through all, for a new solid, ends at the furthest part.** On a curved part, where the furthest point isn't on a vertex, this is only as close as the part's mesh gets. A cut always goes clear, so it leaves no sliver, which a test checks on a rod turned so that its top is on no vertex.
+- **Not built, of what Onshape offers around these:** an offset from the surface, a second end in the other direction, symmetric, a draft along the way, and an extrude from a solid's flat face rather than a sketch region.
+- **Regions from a plain `sketch` feature can't be picked,** as only constrained sketches have stable region ids. A sketch with no closed region at all still fails as a feature, whatever is picked from it, as it always has.
+- **Every part is looked at to decide where it ends,** so a change to any part reruns an extrude that ends anywhere but at a length. It's still only done when something changed.
+
 ## Sweeps
 
 - **The path is lines and arcs,** and each step carries on from the last one's direction, so there are no corners or free curves. A helix is its own feature: see [above](#helix).

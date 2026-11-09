@@ -22,6 +22,15 @@ pub enum BodyLoc {
 }
 
 /// A body with its bounding boxes cached.
+/// Where a ray crosses a body's surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayHit {
+    pub t: f64,
+    pub face: usize,
+    /// Going from outside to inside.
+    pub entering: bool,
+}
+
 pub struct Index<'a> {
     pub body: &'a Body,
     pub edge_boxes: Vec<Aabb>,
@@ -253,6 +262,55 @@ impl<'a> Index<'a> {
         BodyLoc::Outside
     }
 
+    /// Where a ray crosses a face's surface, whether or not that's on the face itself. `None` if that can't be told from here.
+    fn surface_crossings(&self, f: usize, p: Vec3, d: Vec3, reach: f64) -> Option<Vec<f64>> {
+        let surface = &self.body.faces[f].surface;
+        // A free-form face that stays on its patch has its crossings solved for. If they can't be told from here, as when
+        // a ray runs along it, a different ray will do. A moved one is traced, only where its cells' boxes say.
+        Some(match surface {
+            Surface::Free { frame, patch } if self.on_patch[f] => {
+                let local = v3(d.dot(frame.x), d.dot(frame.y), d.dot(frame.z));
+                if patch.offset() == 0.0 {
+                    patch.ray_crossings(frame.to_local(p), local, reach)?
+                } else {
+                    let mut found = Vec::new();
+                    for (a, b) in patch.ray_spans(frame.to_local(p), local, TOL * 4.0) {
+                        let (a, b) = (a.max(0.0), b.min(reach));
+                        if a <= b {
+                            found.extend(ray_surface_between(surface, p, d, (a, b)));
+                        }
+                    }
+                    found
+                }
+            }
+            _ => ray_surface(surface, p, d, reach),
+        })
+    }
+
+    /// Where a ray from `p` along `d` crosses the body, nearest first, with which face and which way. A ray that only grazes
+    /// a face doesn't cross it. `None` if a crossing can't be told from here, as when it runs along a free-form face.
+    pub fn ray_hits(&self, p: Vec3, d: Vec3, reach: f64) -> Option<Vec<RayHit>> {
+        let mut out = Vec::new();
+        for f in 0..self.body.faces.len() {
+            if !ray_hits_box(p, d, &self.face_boxes[f].inflated(TOL * 2.0)) {
+                continue;
+            }
+            let face = &self.body.faces[f];
+            for t in self.surface_crossings(f, p, d, reach)? {
+                let q = p + d * t;
+                if t <= 0.0 || self.locate_on_face(f, q, TOL * 2.0) == FaceLoc::Outside {
+                    continue;
+                }
+                let along = face.surface.normal(q).dot(d) * if face.flipped { -1.0 } else { 1.0 };
+                if along.abs() >= 1e-4 {
+                    out.push(RayHit { t, face: f, entering: along < 0.0 });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.t.total_cmp(&b.t));
+        Some(out)
+    }
+
     fn cast_ray(&self, p: Vec3, d: Vec3, reach: f64) -> Option<bool> {
         let mut inside = false;
         for f in 0..self.body.faces.len() {
@@ -260,26 +318,7 @@ impl<'a> Index<'a> {
                 continue;
             }
             let surface = &self.body.faces[f].surface;
-            // A free-form face that stays on its patch has its crossings solved for. If they can't be told from here, as when
-            // a ray runs along it, a different ray will do. A moved one is traced, only where its cells' boxes say.
-            let hits: Vec<f64> = match surface {
-                Surface::Free { frame, patch } if self.on_patch[f] => {
-                    let local = v3(d.dot(frame.x), d.dot(frame.y), d.dot(frame.z));
-                    if patch.offset() == 0.0 {
-                        patch.ray_crossings(frame.to_local(p), local, reach)?
-                    } else {
-                        let mut found = Vec::new();
-                        for (a, b) in patch.ray_spans(frame.to_local(p), local, TOL * 4.0) {
-                            let (a, b) = (a.max(0.0), b.min(reach));
-                            if a <= b {
-                                found.extend(ray_surface_between(surface, p, d, (a, b)));
-                            }
-                        }
-                        found
-                    }
-                }
-                _ => ray_surface(surface, p, d, reach),
-            };
+            let hits = self.surface_crossings(f, p, d, reach)?;
             for t in hits {
                 if t <= 0.0 {
                     continue;
@@ -333,7 +372,7 @@ fn ray_surface_between(s: &Surface, p: Vec3, d: Vec3, span: (f64, f64)) -> Vec<f
     }
 }
 
-fn ray_surface(s: &Surface, p: Vec3, d: Vec3, reach: f64) -> Vec<f64> {
+pub fn ray_surface(s: &Surface, p: Vec3, d: Vec3, reach: f64) -> Vec<f64> {
     let quadratic = |a: f64, b: f64, c: f64| -> Vec<f64> {
         if a.abs() < 1e-300 {
             return Vec::new();

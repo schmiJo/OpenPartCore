@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod keys;
+mod up_to;
 use keys::Keys;
 pub use keys::{face_keys, find_faces, FaceKey};
 
@@ -603,7 +604,9 @@ pub enum Op {
     /// came from, `f3:side.7` for entity 7, so the name doesn't depend on drawing order.
     ConstrainedSketch { plane: Placement, sketch: coreshape_sketch::Sketch },
     /// Extrudes a sketch along its normal, from `start` for `length`.
-    Extrude { sketch: FeatureId, start: Expr, length: Expr, mode: Mode },
+    /// With `regions` it takes those, from any sketches, and otherwise whatever `sketch` gives. With an `end` other than
+    /// `Blind`, `length` isn't used, and is only kept for going back to it. `opposite` goes the other way.
+    Extrude { sketch: FeatureId, start: Expr, length: Expr, mode: Mode, regions: Vec<RegionPick>, end: ExtrudeEnd, opposite: bool },
     /// Revolves a sketch. With an `axis`, about that line in the sketch's plane, as drawn, turning right-handed around its
     /// direction. Without one, about the sketch's Z axis, with profile x the distance from the axis and y the height along it.
     Revolve { sketch: FeatureId, degrees: Expr, mode: Mode, axis: Option<RevolveAxis> },
@@ -662,6 +665,38 @@ pub struct RevolveAxis {
 
 /// How a `Transform` moves things.
 #[derive(Clone, Debug, PartialEq)]
+pub enum ExtrudeEnd {
+    /// At its length.
+    Blind,
+    /// As far as the parts it acts on go.
+    ThroughAll,
+    /// At the next surface in the way: what it would run into, or for a cut, the far side of the material.
+    UpToNext,
+    /// At a face's surface, extended as far as it needs to be.
+    UpToFace(FaceKey),
+    /// At the first surface of this part in the way.
+    UpToPart(BodyId),
+    /// At a plane through a vertex, square to the direction.
+    UpToVertex(VertexRef),
+}
+
+/// A vertex, as the end of an extrude.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VertexRef {
+    /// The vertex these faces share, so that it follows them. `near` says which, if they share several.
+    Faces { faces: Vec<FaceKey>, near: Option<Point3> },
+    /// A place.
+    Point(Point3),
+}
+
+/// A region of a constrained sketch, by its id from `sketch_arrangement`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionPick {
+    pub sketch: FeatureId,
+    pub region: coreshape_sketch::RegionId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Motion {
     Translate { by: Point3 },
     Rotate { point: Point3, axis: Point3, degrees: Expr },
@@ -701,7 +736,7 @@ impl Op {
     }
 
     pub fn extrude(sketch: FeatureId, start: impl Into<Expr>, length: impl Into<Expr>, mode: Mode) -> Op {
-        Op::Extrude { sketch, start: start.into(), length: length.into(), mode }
+        Op::Extrude { sketch, start: start.into(), length: length.into(), mode, regions: Vec::new(), end: ExtrudeEnd::Blind, opposite: false }
     }
 
     pub fn revolve(sketch: FeatureId, degrees: impl Into<Expr>, mode: Mode) -> Op {
@@ -800,7 +835,21 @@ impl Op {
     pub fn references(&self) -> Vec<FeatureId> {
         let mut out = Vec::new();
         match self {
-            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => out.push(*sketch),
+            Op::Extrude { sketch, regions, end, .. } => {
+                out.push(*sketch);
+                out.extend(regions.iter().map(|r| r.sketch));
+                match end {
+                    ExtrudeEnd::UpToFace(key) => key.references(&mut out),
+                    ExtrudeEnd::UpToPart(part) => out.push(part.feature),
+                    ExtrudeEnd::UpToVertex(VertexRef::Faces { faces, .. }) => {
+                        for key in faces {
+                            key.references(&mut out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => out.push(*sketch),
             Op::Loft { sections, .. } => out.extend_from_slice(sections),
             Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
             Op::DeleteFace { faces } | Op::Thicken { faces, .. } => {
@@ -867,7 +916,13 @@ impl Op {
                 place(plane, &mut out);
                 out.extend(sketch.constraints.iter().filter_map(|c| c.rule.value()));
             }
-            Op::Extrude { start, length, .. } => out.extend([start, length]),
+            Op::Extrude { start, length, end, .. } => {
+                out.extend([start, length]);
+                match end {
+                    ExtrudeEnd::UpToVertex(VertexRef::Point(p)) | ExtrudeEnd::UpToVertex(VertexRef::Faces { near: Some(p), .. }) => out.extend(p.iter()),
+                    _ => {}
+                }
+            }
             Op::Revolve { degrees, axis, .. } => {
                 out.push(degrees);
                 if let Some(axis) = axis {
@@ -1366,6 +1421,8 @@ struct SketchOutput {
     profiles: Arc<Vec<Profile>>,
     /// Faces are named by entity, which is unique across the sketch, so regions need no offset.
     by_entity: bool,
+    /// The solved sketch, if it's a constrained one, for picking any of its regions.
+    solved: Option<Arc<coreshape_sketch::Sketch>>,
 }
 
 // ----- The document -----
@@ -1572,12 +1629,13 @@ impl Document {
     }
 
     fn check_sketch_refs(op: &Op, before: &[Feature]) -> Result<()> {
-        let list: &[FeatureId] = match op {
-            Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => std::slice::from_ref(sketch),
-            Op::Loft { sections, .. } => sections,
-            _ => &[],
+        let list: Vec<FeatureId> = match op {
+            Op::Extrude { sketch, regions, .. } => std::iter::once(*sketch).chain(regions.iter().map(|r| r.sketch)).collect(),
+            Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => vec![*sketch],
+            Op::Loft { sections, .. } => sections.clone(),
+            _ => Vec::new(),
         };
-        for sketch in list {
+        for sketch in &list {
             if let Some(f) = before.iter().find(|f| f.id == *sketch) {
                 if !f.op.is_sketch() {
                     return Err(Error::InvalidInput(format!("f{} is a {}, not a sketch", sketch.0, f.op.kind())));
@@ -1742,16 +1800,25 @@ impl Document {
             // sketch or what it copies when it has them. A new body needs nothing from the others, unless it's made
             // from their faces.
             let makes_its_own = |f: &FeatureId| self.feature(*f).is_some_and(|g| g.op.mode() == Some(Mode::NewBody));
+            let looks_around = matches!(&feature.op, Op::Extrude { end, .. } if *end != ExtrudeEnd::Blind);
             let independent = match &feature.op {
                 Op::Thicken { .. } => false,
+                _ if looks_around => false,
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => !of.is_empty() && of.iter().all(makes_its_own),
                 op => op.mode() == Some(Mode::NewBody),
             };
             let key_of = |id: &BodyId| held.iter().find(|h| h.id == *id).map_or(0, |h| h.key);
             let mut body_key = 0u64;
             if !independent {
-                for (id, _) in &scope {
-                    body_key ^= key_of(id);
+                // Where it ends can be on any part, in the scope or not.
+                if looks_around {
+                    for h in &held {
+                        body_key ^= h.key;
+                    }
+                } else {
+                    for (id, _) in &scope {
+                        body_key ^= key_of(id);
+                    }
                 }
                 if let Op::BooleanBodies { tools, .. } = &feature.op {
                     for id in tools {
@@ -1762,7 +1829,11 @@ impl Document {
             let mixed = |list: &[FeatureId]| list.iter().enumerate().fold(0u64, |sum, (k, id)| sum ^ keys.get(id).copied().unwrap_or(0).rotate_left(17 + k as u32));
             let key = match &feature.op {
                 Op::Sketch { .. } | Op::ConstrainedSketch { .. } => hash_text(1, &own),
-                Op::Extrude { sketch, .. } | Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
+                Op::Extrude { sketch, regions, .. } => {
+                    let sketches: Vec<FeatureId> = std::iter::once(*sketch).chain(regions.iter().map(|r| r.sketch)).collect();
+                    hash_text(body_key ^ mixed(&sketches), &own)
+                }
+                Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
                 Op::Loft { sections, .. } => hash_text(body_key ^ mixed(sections), &own),
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
                 _ => hash_text(body_key, &own),
@@ -1845,7 +1916,7 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: false }))
+                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: false, solved: None }))
             }
             Op::ConstrainedSketch { plane, sketch } => {
                 let solved = sketch.solve_with(env).map_err(|e| Error::InvalidProfile(e.message))?;
@@ -1854,21 +1925,43 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: true }))
+                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: true, solved: Some(Arc::new(solved.sketch)) }))
             }
-            Op::Extrude { sketch, start, length, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
-                let shifted = Frame { origin: frame.origin + frame.z * num(start, env)?, ..frame };
-                let h = num(length, env)?;
-                let tools = list
-                    .iter()
-                    .enumerate()
-                    .map(|(k, p)| Ok(with_region(extrude(p, &shifted, h, tag)?, if by_entity { 0 } else { k as u32 })))
-                    .collect::<Result<Vec<Body>>>()?;
+            Op::Extrude { sketch, start, length, mode, regions, end, opposite } => {
+                // Each sketch it takes from, in the order they first come up.
+                let mut sketches: Vec<FeatureId> = Vec::new();
+                for id in regions.iter().map(|r| r.sketch) {
+                    if !sketches.contains(&id) {
+                        sketches.push(id);
+                    }
+                }
+                if sketches.is_empty() {
+                    sketches.push(*sketch);
+                }
+                let reach = up_to::Reach { all, scope, mode: *mode, env, tag };
+                let offset = num(start, env)?;
+                let mut tools = Vec::new();
+                for (order, id) in sketches.iter().enumerate() {
+                    let out = sketch_output(id)?;
+                    let list = if regions.is_empty() { out.profiles.clone() } else { Arc::new(picked_profiles(*id, &out, regions)?) };
+                    let shifted = Frame { origin: out.frame.origin + out.frame.z * offset, ..out.frame };
+                    for (k, p) in list.iter().enumerate() {
+                        // Entities are unique within a sketch, so another sketch's faces need telling apart from these.
+                        let region = if out.by_entity { order as u32 } else { k as u32 };
+                        let made = match end {
+                            ExtrudeEnd::Blind => {
+                                let h = num(length, env)?;
+                                vec![extrude(p, &shifted, if *opposite { -h } else { h }, tag)?]
+                            }
+                            other => up_to::tools_to(p, &shifted, *opposite, other, &reach)?,
+                        };
+                        tools.extend(made.into_iter().map(|b| with_region(b, region)));
+                    }
+                }
                 applied(tools, *mode)
             }
             Op::Revolve { sketch, degrees, mode, axis } => {
-                let SketchOutput { frame, profiles, by_entity } = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles, by_entity, .. } = sketch_output(sketch)?;
                 let a = num(degrees, env)?.to_radians();
                 let (frame, list): (Frame, Vec<Profile>) = match axis {
                     Some(axis) => revolve_frame(axis, &frame, &profiles, a, env)?,
@@ -1893,7 +1986,7 @@ impl Document {
                 applied(vec![coreshape::loft::loft(&list, tag)?], *mode)
             }
             Op::Sweep { sketch, path, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles: list, by_entity, .. } = sketch_output(sketch)?;
                 let steps = path
                     .iter()
                     .map(|step| {
@@ -1915,7 +2008,7 @@ impl Document {
                 applied(tools, *mode)
             }
             Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity } = sketch_output(sketch)?;
+                let SketchOutput { frame, profiles: list, by_entity, .. } = sketch_output(sketch)?;
                 let motion = Helix { origin: at_point(point)?, axis: at_point(axis)?, pitch: num(pitch, env)?, turns: num(turns, env)?, left_handed: *left_handed };
                 let tools = list
                     .iter()
@@ -2402,6 +2495,28 @@ fn wire_from_loop(l: &coreshape_sketch::Loop) -> Wire {
     Wire { segs }
 }
 
+/// The profiles of the regions picked from one sketch. One that has gone is refused, saying what's there.
+fn picked_profiles(id: FeatureId, out: &SketchOutput, regions: &[RegionPick]) -> Result<Vec<Profile>> {
+    let solved = out.solved.as_ref().ok_or_else(|| Error::InvalidInput(format!("regions can only be picked from a constrained sketch, and f{} isn't one", id.0)))?;
+    let found = solved.arrangement();
+    let mut list = Vec::new();
+    for pick in regions.iter().filter(|r| r.sketch == id) {
+        match found.region(pick.region) {
+            Some(region) => list.push(region.clone()),
+            None => {
+                let there: Vec<String> = found.regions.iter().map(|r| r.id.name()).collect();
+                let names = if there.is_empty() { "none".to_string() } else { there.join(", ") };
+                return Err(Error::InvalidProfile(format!("picked region {} isn't in sketch f{} any more. It has: {names}", pick.region.name(), id.0)));
+            }
+        }
+    }
+    let list = profiles_from_regions(&list);
+    for p in &list {
+        p.validate()?;
+    }
+    Ok(list)
+}
+
 fn with_region(mut body: Body, region: u32) -> Body {
     if region > 0 {
         for f in &mut body.faces {
@@ -2532,6 +2647,71 @@ fn read_expr(v: &Value) -> Result<Expr> {
 
 fn field<'a>(v: &'a Value, key: &str, what: &str) -> Result<&'a Value> {
     v.get(key).ok_or_else(|| Error::InvalidInput(format!("{what} needs a \"{key}\"")))
+}
+
+fn extrude_end_value(end: &ExtrudeEnd) -> Value {
+    match end {
+        ExtrudeEnd::Blind => Value::str("blind"),
+        ExtrudeEnd::ThroughAll => Value::str("through_all"),
+        ExtrudeEnd::UpToNext => Value::str("up_to_next"),
+        ExtrudeEnd::UpToFace(key) => Value::obj(vec![("type", Value::str("up_to_face")), ("face", Value::str(key.text()))]),
+        ExtrudeEnd::UpToPart(part) => Value::obj(vec![("type", Value::str("up_to_part")), ("part", Value::str(part.text()))]),
+        ExtrudeEnd::UpToVertex(vertex) => {
+            let on = match vertex {
+                VertexRef::Point(p) => Value::obj(vec![("point", point3_value(p))]),
+                VertexRef::Faces { faces, near } => {
+                    let mut items = vec![("faces", Value::Arr(faces.iter().map(|k| Value::str(k.text())).collect()))];
+                    if let Some(p) = near {
+                        items.push(("near", point3_value(p)));
+                    }
+                    Value::obj(items)
+                }
+            };
+            Value::obj(vec![("type", Value::str("up_to_vertex")), ("vertex", on)])
+        }
+    }
+}
+
+fn read_extrude_end(v: &Value) -> Result<ExtrudeEnd> {
+    let Some(end) = v.get("end") else { return Ok(ExtrudeEnd::Blind) };
+    let kind = end.as_str().or_else(|| end.get("type").and_then(Value::as_str)).unwrap_or("");
+    let text = |key: &str| -> Result<&str> { end.get(key).and_then(Value::as_str).ok_or_else(|| Error::InvalidInput(format!("an extrude's {kind} end needs \"{key}\""))) };
+    Ok(match kind {
+        "blind" => ExtrudeEnd::Blind,
+        "through_all" => ExtrudeEnd::ThroughAll,
+        "up_to_next" => ExtrudeEnd::UpToNext,
+        "up_to_face" => ExtrudeEnd::UpToFace(FaceKey::parse(text("face")?)?),
+        "up_to_part" => ExtrudeEnd::UpToPart(BodyId::parse(text("part")?)?),
+        "up_to_vertex" => {
+            let on = end.get("vertex").ok_or_else(|| Error::InvalidInput("an extrude's up_to_vertex end needs \"vertex\"".into()))?;
+            if let Some(point) = on.get("point") {
+                ExtrudeEnd::UpToVertex(VertexRef::Point(read_point3(point)?))
+            } else {
+                let list = on.get("faces").and_then(Value::as_array).filter(|l| !l.is_empty()).ok_or_else(|| Error::InvalidInput("a vertex is {\"faces\": [...]} with the faces it's on, or {\"point\": [x, y, z]}".into()))?;
+                let faces = list.iter().map(|k| FaceKey::parse(k.as_str().ok_or_else(|| Error::InvalidInput("a vertex's \"faces\" are the names of faces".into()))?)).collect::<Result<Vec<_>>>()?;
+                ExtrudeEnd::UpToVertex(VertexRef::Faces { faces, near: on.get("near").map(read_point3).transpose()? })
+            }
+        }
+        other => return Err(Error::InvalidInput(format!("unknown extrude end \"{other}\"; expected blind, through_all, up_to_next, up_to_face, up_to_part or up_to_vertex"))),
+    })
+}
+
+/// An extrude's picks: each a region's id, from `sketch`, or `{"sketch": 4, "region": "r..."}`.
+fn read_region_picks(v: &Value, sketch: Option<FeatureId>) -> Result<Vec<RegionPick>> {
+    let Some(list) = v.get("regions") else { return Ok(Vec::new()) };
+    let list = list.as_array().ok_or_else(|| Error::InvalidInput("an extrude's \"regions\" must be a list of region ids".into()))?;
+    let parse = |t: &str| coreshape_sketch::RegionId::parse(t).map_err(Error::InvalidInput);
+    let mut out = Vec::with_capacity(list.len());
+    for item in list {
+        out.push(if let Some(id) = item.as_str() {
+            let sketch = sketch.ok_or_else(|| Error::InvalidInput("a region named by its id alone needs the extrude's \"sketch\". From several sketches, each is {\"sketch\": 4, \"region\": \"r...\"}".into()))?;
+            RegionPick { sketch, region: parse(id)? }
+        } else {
+            let id = item.get("region").and_then(Value::as_str).ok_or_else(|| Error::InvalidInput("a picked region is an id, or {\"sketch\": 4, \"region\": \"r...\"}".into()))?;
+            RegionPick { sketch: read_sketch_id(item)?, region: parse(id)? }
+        });
+    }
+    Ok(out)
 }
 
 fn expr_field(v: &Value, key: &str, what: &str) -> Result<Expr> {
@@ -2931,13 +3111,30 @@ pub fn op_value(op: &Op) -> Value {
             ("plane", placement_value(plane)),
             ("sketch", sketch.to_json()),
         ]),
-        Op::Extrude { sketch, start, length, mode } => Value::obj(vec![
-            ("type", Value::str("extrude")),
-            ("sketch", Value::Num(sketch.0 as f64)),
-            ("start", expr_value(start)),
-            ("length", expr_value(length)),
-            ("mode", mode_value(*mode)),
-        ]),
+        Op::Extrude { sketch, start, length, mode, regions, end, opposite } => {
+            let mut items = vec![("type", Value::str("extrude")), ("sketch", Value::Num(sketch.0 as f64)), ("start", expr_value(start))];
+            if *end == ExtrudeEnd::Blind || *length != Expr::number(0.0) {
+                items.push(("length", expr_value(length)));
+            }
+            items.push(("mode", mode_value(*mode)));
+            if !regions.is_empty() {
+                let picks = regions.iter().map(|r| {
+                    if r.sketch == *sketch {
+                        Value::str(r.region.name())
+                    } else {
+                        Value::obj(vec![("sketch", Value::Num(r.sketch.0 as f64)), ("region", Value::str(r.region.name()))])
+                    }
+                });
+                items.push(("regions", Value::Arr(picks.collect())));
+            }
+            if *end != ExtrudeEnd::Blind {
+                items.push(("end", extrude_end_value(end)));
+            }
+            if *opposite {
+                items.push(("opposite", Value::Bool(true)));
+            }
+            Value::obj(items)
+        }
         Op::Revolve { sketch, degrees, mode, axis } => {
             let mut items = vec![("type", Value::str("revolve")), ("sketch", Value::Num(sketch.0 as f64)), ("degrees", expr_value(degrees)), ("mode", mode_value(*mode))];
             if let Some(axis) = axis {
@@ -3190,13 +3387,25 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::ConstrainedSketch { plane, sketch })
         }
         "extrude" => {
-            with(&["type", "sketch", "start", "length", "mode"])?;
-            Ok(Op::Extrude {
-                sketch: read_sketch_id(v)?,
-                start: v.get("start").map(read_expr).transpose()?.unwrap_or(Expr::number(0.0)),
-                length: expr_field(v, "length", "an extrude")?,
-                mode: read_mode(v)?,
-            })
+            with(&["type", "sketch", "start", "length", "mode", "regions", "end", "opposite"])?;
+            let named = v.get("sketch").map(|_| read_sketch_id(v)).transpose()?;
+            let regions = read_region_picks(v, named)?;
+            let sketch = match (named, regions.first()) {
+                (Some(id), _) => id,
+                (None, Some(first)) => first.sketch,
+                (None, None) => read_sketch_id(v)?,
+            };
+            let end = read_extrude_end(v)?;
+            let length = match (&end, v.get("length")) {
+                (ExtrudeEnd::Blind, _) => expr_field(v, "length", "an extrude")?,
+                (_, Some(length)) => read_expr(length)?,
+                (_, None) => Expr::number(0.0),
+            };
+            let opposite = match v.get("opposite") {
+                None => false,
+                Some(b) => b.as_bool().ok_or_else(|| Error::InvalidInput("an extrude's \"opposite\" must be true or false".into()))?,
+            };
+            Ok(Op::Extrude { sketch, start: v.get("start").map(read_expr).transpose()?.unwrap_or(Expr::number(0.0)), length, mode: read_mode(v)?, regions, end, opposite })
         }
         "revolve" => {
             with(&["type", "sketch", "degrees", "mode", "axis"])?;

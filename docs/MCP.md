@@ -21,8 +21,8 @@ under the root, which is the current folder unless given. A path that leaves it,
 | `feature_add`, `feature_edit`, `feature_rename`, `feature_suppress`, `feature_delete`, `feature_move`, `features_list` | The history. Each change rebuilds and reports what happened. |
 | `rebuild` | Each feature's state, and the solid's volume, area, size and validity. `upto` shows an earlier state. |
 | `bodies_list` | With several bodies: each one's name, what made it, volume, area, faces and size |
-| `faces_list` | Stable names, surface type, area, center, normal and radius. With several bodies, whose each is, and `body` keeps to one |
-| `edges_list` | Stable names, curve type, length and ends, and a selection ready to use in a fillet or chamfer. `body` keeps to one |
+| `faces_list` | Stable names, surface type, area, center, normal, radius, and a round face's axis. With several bodies, whose each is, and `body` keeps to one |
+| `edges_list` | Stable names, curve type, length and ends, a selection ready to use in a fillet or chamfer, and each end named as `up_to_vertex` takes it. `body` keeps to one |
 | `export` | STEP, STL or the native format. Every body, or the one `body` names |
 | `render` | A PNG: iso, front, back, left, right, top, bottom, four views at once, or any angle. Optional face labels, one tint per face, and highlighted faces and edges |
 | `sketch_solve`, `sketch_drag`, `sketch_regions`, `sketch_arrangement` | The sketch solver, without changing the document. `sketch_arrangement` lists every closed region with its id, and the curves that make none |
@@ -41,6 +41,19 @@ would fit several edges: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
 ## Several bodies
 
 A body is a part, as in Onshape: one connected solid. A feature acts on all of them unless it lists `"bodies": ["f3.2"]`, and leaves alone any it doesn't reach. `"mode": "new_body"` makes parts that stay separate, and `import_step` with that mode makes one for each solid in the file. `transform`, `delete_bodies` and `boolean` are features too. `bodies_list` gives the names, and `render` tints each body differently unless told otherwise with `colors`, and takes `body` to show just one. `app_set` keeps data for an app with a feature or the document, without touching the model. See the format guide for the details.
+
+## Extrude ends
+
+`feature_add` takes an extrude's `regions` from `sketch_arrangement`, its `end` and `opposite`: see [FILE_FORMAT.md](FILE_FORMAT.md#extrude-regions-and-ends). `edges_list` names each edge's ends as `start_vertex` and `end_vertex`, ready for `up_to_vertex`, and `faces_list` gives a cylinder, cone or torus its `axis`, with a `point` and a `direction`, and a cone its `half_angle` in degrees.
+
+## Meshes for an app
+
+An app that uses `Session` directly gets what to draw as flat arrays, in the same layout as a graphics card takes them: positions, normals, a face for each vertex, triangle indices, edge segments and an edge for each. They aren't tools, as JSON would be the wrong way to pass them.
+
+- `Session::part_mesh(part, tab, draft)` gives one part's `FlatMesh`, in its own coordinates. Face and edge numbers are the ones `faces_list` and `edges_list` give with that `body`.
+- `Session::instance_meshes(draft)` gives the selected assembly, solved, with an `InstanceMesh` for each instance: its path, name, part, `at`, `matrix` by columns for WebGL, and `mesh`.
+
+Every instance of a part shares one mesh, and a mesh is only worked out again when its part changes, so a drag costs a solve and no meshing. `FlatMesh::placed(&at)` gives a copy in the assembly's coordinates, for an app that would rather have it all in one space.
 
 ## Assemblies
 

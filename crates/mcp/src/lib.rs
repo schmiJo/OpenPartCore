@@ -10,7 +10,8 @@ mod tools;
 use coreshape_document::json::{self, Value};
 use std::path::PathBuf;
 
-pub use tools::Session;
+pub use coreshape_assembly::{Placed, Solved, TabId};
+pub use tools::{FlatMesh, InstanceMesh, Session};
 
 /// Newest first. This server only uses tools, which didn't change across these.
 const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];

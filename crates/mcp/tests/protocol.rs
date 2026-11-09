@@ -733,3 +733,79 @@ fn a_sub_assembly_can_be_added_locked_and_reached_into_through_the_tools() {
     assert!(c.refused("connector_add", &format!(r#"{{"instance":{sub},"on":{{"face":"f1:end"}}}}"#)).contains("go all the way down"));
     c.ok("connector_add", &format!(r#"{{"instance":[{sub},{pin}],"on":{{"face":"f2:end"}}}}"#));
 }
+
+// ----- Extrude ends, and what an app shows -----
+
+#[test]
+fn an_extrude_takes_regions_and_ends_through_the_tools() {
+    let dir = folder("extrude_ends");
+    let mut c = Client::start(&dir);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":100,"dy":100,"dz":2,"at":{"origin":[0,0,30]},"mode":"new_body"}}"#);
+    let sketch = r#"{"format":"coreshape-sketch","version":1,"next_entity":3,"next_constraint":1,"entities":[{"id":1,"type":"circle","center":[20,20],"radius":5},{"id":2,"type":"circle","center":[60,20],"radius":3}],"constraints":[]}"#;
+    let regions = parsed(&c.ok("sketch_arrangement", &format!(r#"{{"sketch":{sketch}}}"#)));
+    let regions = regions.get("regions").unwrap().as_array().unwrap().to_vec();
+    assert_eq!(regions.len(), 2);
+    let id = |r: &Value| r.get("id").and_then(Value::as_str).unwrap().to_string();
+    let area = |r: &Value| r.get("area").and_then(Value::as_f64).unwrap();
+    let big = regions.iter().find(|r| area(r) > 50.0).map(id).unwrap();
+    c.ok("feature_add", &format!(r#"{{"feature":{{"type":"constrained_sketch","plane":{{"origin":[0,0,0]}},"sketch":{sketch}}}}}"#));
+    // One region, to the plate above, without a copy of the sketch.
+    c.ok("feature_add", &format!(r#"{{"feature":{{"type":"extrude","sketch":2,"regions":["{big}"],"end":{{"type":"up_to_face","face":"f1:start"}},"mode":"new_body"}}}}"#));
+    let bodies = parsed(&c.ok("bodies_list", "{}"));
+    let want = std::f64::consts::PI * 25.0 * 30.0;
+    assert!((bodies.as_array().unwrap()[1].get("volume").and_then(Value::as_f64).unwrap() - want).abs() < 1e-5, "{}", bodies.to_text());
+    // A region that isn't there comes back as that feature failing, saying what is.
+    let added = c.ok("feature_add", r#"{"feature":{"type":"extrude","sketch":2,"regions":["r0000000000ab"],"length":1,"mode":"new_body"}}"#);
+    assert!(added.contains("r0000000000ab") && added.contains(&big), "{added}");
+    // A bad end is refused outright, as it's not something a rebuild would ever get past.
+    assert!(c.refused("feature_add", r#"{"feature":{"type":"extrude","sketch":2,"end":"sideways","mode":"new_body"}}"#).contains("sideways"));
+}
+
+#[test]
+fn faces_and_edges_say_what_a_tool_needs_to_pick_them() {
+    let dir = folder("axis");
+    let mut c = Client::start(&dir);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"cylinder","radius":5,"height":20,"at":{"origin":[1,2,3],"z":[0,0,1]},"mode":"new_body"}}"#);
+    let faces = parsed(&c.ok("faces_list", "{}"));
+    let list = faces.as_array().unwrap();
+    let round = list.iter().find(|f| f.get("surface").and_then(Value::as_str) == Some("cylinder")).unwrap();
+    let axis = round.get("axis").unwrap_or_else(|| panic!("{}", round.to_text()));
+    near(numbers(axis.get("direction").unwrap()), [0.0, 0.0, 1.0]);
+    near(numbers(axis.get("point").unwrap()), [1.0, 2.0, 3.0]);
+    assert!(list.iter().find(|f| f.get("surface").and_then(Value::as_str) == Some("plane")).unwrap().get("axis").is_none());
+
+    c.ok("document_new", "{}");
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"cone","r0":10,"r1":5,"height":10,"mode":"new_body"}}"#);
+    let faces = parsed(&c.ok("faces_list", "{}"));
+    let cone = faces.as_array().unwrap().iter().find(|f| f.get("surface").and_then(Value::as_str) == Some("cone")).unwrap().clone();
+    let axis = cone.get("axis").unwrap();
+    assert!((numbers(axis.get("direction").unwrap())[2].abs() - 1.0).abs() < 1e-9);
+    assert!((cone.get("half_angle").and_then(Value::as_f64).unwrap() - 26.565051).abs() < 1e-5, "{}", cone.to_text());
+
+    // A cylinder's rim has two vertices on the same faces, so naming one of them takes a place too, and that place works.
+    c.ok("document_new", "{}");
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"cylinder","radius":5,"height":20,"mode":"new_body"}}"#);
+    let edges = parsed(&c.ok("edges_list", "{}"));
+    let on_rim = edges.as_array().unwrap().iter().find(|e| numbers(e.get("start").unwrap())[2] == 20.0 && numbers(e.get("end").unwrap())[2] == 20.0).unwrap().clone();
+    let vertex = on_rim.get("end_vertex").unwrap().clone();
+    assert!(vertex.get("near").is_some(), "{}", vertex.to_text());
+    let sketch = r#"{"format":"coreshape-sketch","version":1,"next_entity":2,"next_constraint":1,"entities":[{"id":1,"type":"circle","center":[100,0],"radius":5}],"constraints":[]}"#;
+    c.ok("feature_add", &format!(r#"{{"feature":{{"type":"constrained_sketch","plane":{{"origin":[0,0,0]}},"sketch":{sketch}}}}}"#));
+    let answer = c.ok("feature_add", &format!(r#"{{"feature":{{"type":"extrude","sketch":2,"end":{{"type":"up_to_vertex","vertex":{}}},"mode":"new_body"}}}}"#, vertex.to_text()));
+    assert!(!answer.contains("failed"), "{answer}");
+
+    // An edge's ends are named so that an extrude can go up to them.
+    c.ok("document_new", "{}");
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":10,"dy":20,"dz":30,"mode":"new_body"}}"#);
+    let edges = parsed(&c.ok("edges_list", "{}"));
+    let edge = edges.as_array().unwrap().iter().find(|e| numbers(e.get("end").unwrap())[2] == 30.0 && numbers(e.get("start").unwrap())[2] == 30.0).unwrap().clone();
+    let vertex = edge.get("end_vertex").unwrap().to_text();
+    let height = numbers(edge.get("end").unwrap())[2];
+    assert_eq!(edge.get("end_vertex").unwrap().get("faces").unwrap().as_array().unwrap().len(), 3);
+    let sketch = r#"{"format":"coreshape-sketch","version":1,"next_entity":2,"next_constraint":1,"entities":[{"id":1,"type":"circle","center":[100,0],"radius":5}],"constraints":[]}"#;
+    c.ok("feature_add", &format!(r#"{{"feature":{{"type":"constrained_sketch","plane":{{"origin":[0,0,0]}},"sketch":{sketch}}}}}"#));
+    c.ok("feature_add", &format!(r#"{{"feature":{{"type":"extrude","sketch":2,"end":{{"type":"up_to_vertex","vertex":{vertex}}},"mode":"new_body"}}}}"#));
+    let bodies = parsed(&c.ok("bodies_list", "{}"));
+    let want = std::f64::consts::PI * 25.0 * height;
+    assert!((bodies.as_array().unwrap()[1].get("volume").and_then(Value::as_f64).unwrap() - want).abs() < 1e-5, "{}", bodies.to_text());
+}

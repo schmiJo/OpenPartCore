@@ -1,6 +1,9 @@
 //! The tools themselves, and the state they work on.
 
 mod assembly;
+mod mesh;
+
+pub use mesh::{FlatMesh, InstanceMesh};
 
 use coreshape::{mass_properties, tessellate, validate, Body, Curve, Surface, TessParams};
 use coreshape_assembly::{Project, TabId};
@@ -34,8 +37,8 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("rebuild", "Rebuilds, reusing whatever didn't change. Gives each feature's state and the solid's volume, area, size and validity.", r#"{"upto": {"type": "integer", "description": "Stop after the feature at this position, to see an earlier state."}}"#, "[]"),
     ("bodies_list", "The document's bodies: each one's name, the feature that made it, volume, area, faces and size. Separate bodies can touch or overlap, as an assembly's parts do.", "{}", "[]"),
     ("app_set", "Keeps data for an app with a feature, or with the document if no id is given. It's stored as it is and changes nothing in the model, so it's for things like where a dimension's label sits.", r#"{"id": {"type": "integer"}, "app": {"description": "Anything. Leave it out to clear what's there."}}"#, "[]"),
-    ("faces_list", "The solid's faces with their stable names, surface type, area, center and outward normal. One name can cover several faces, such as a pattern's copies. Each face's key is its own, and an edge selection takes a key wherever it takes a face name.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
-    ("edges_list", "The solid's edges with their stable names, curve type, length and ends, and a selection for each, ready to use in a fillet or chamfer.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
+    ("faces_list", "The solid's faces with their stable names, surface type, area, center and outward normal, and the axis of a round one. One name can cover several faces, such as a pattern's copies. Each face's key is its own, and an edge selection takes a key wherever it takes a face name.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
+    ("edges_list", "The solid's edges with their stable names, curve type, length and ends, a selection for each, ready to use in a fillet or chamfer, and each end named as an extrude's up_to_vertex takes it.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
     ("export", "Exports the solid. STEP and the native format can come back as text; STL needs a path. Paths are under the server's root folder.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}, "format": {"type": "string", "enum": ["step", "stl", "coreshape"]}, "path": {"type": "string"}}"#, r#"["format"]"#),
     ("render", "Draws the solid and returns a PNG. Views: iso, front, back, left, right, top, bottom or four (top, iso, front and right together), or an azimuth and elevation in degrees.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}, "view": {"type": "string"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "labels": {"type": "boolean", "description": "Write each visible face's name on it."}, "colors": {"type": "string", "enum": ["plain", "faces"], "description": "faces gives each face its own tint."}, "highlight_faces": {"type": "array", "items": {"type": "string"}, "description": "Face names to pick out."}, "highlight_edges": {"description": "An edge selection to pick out, as in a fillet."}, "path": {"type": "string", "description": "Also save the PNG here, under the server's root folder."}}"#, "[]"),
     ("sketch_solve", "Solves a sketch without changing the document. Gives the solved sketch, remaining freedom, what's still free and what's redundant, or the constraints that can't all hold.", r#"{"sketch": {"type": "object", "description": "A sketch in the format in format_guide."}, "parameters": {"type": "object", "description": "Values for names used in its dimensions."}}"#, r#"["sketch"]"#),
@@ -133,13 +136,15 @@ pub struct Session {
     studio: TabId,
     /// The tab that's selected, which can be an assembly.
     active: TabId,
+    /// Meshes worked out already, by body and whether they're draft.
+    meshes: Vec<(Arc<Body>, bool, Arc<FlatMesh>)>,
 }
 
 impl Session {
     pub fn new(root: PathBuf) -> Session {
         let project = Project::new();
         let studio = project.tabs[0].id;
-        Session { doc: Document::new(), outcome: None, root, project, studio, active: studio }
+        Session { doc: Document::new(), outcome: None, root, project, studio, active: studio, meshes: Vec::new() }
     }
 
     /// The document being worked on.
@@ -700,6 +705,38 @@ struct Scope {
     of_edge: Vec<String>,
 }
 
+/// A round face's axis: a point on it, which is where its radius is measured, and which way it goes.
+fn axis_value(frame: &coreshape::Frame) -> Value {
+    Value::obj(vec![("point", vec3(frame.origin)), ("direction", vec3(frame.z))])
+}
+
+/// Each vertex as an extrude's end names it: by the keys of the faces it's on, with a place if those fit several vertices.
+fn vertices_value(body: &Body, keys: &[FaceKey]) -> Vec<Value> {
+    let mut on: Vec<Vec<String>> = vec![Vec::new(); body.vertices.len()];
+    for (f, face) in body.faces.iter().enumerate() {
+        for c in face.loops.iter().flatten() {
+            let list = &mut on[body.start_vertex(*c)];
+            let key = keys[f].text();
+            if !list.contains(&key) {
+                list.push(key);
+            }
+        }
+    }
+    for list in &mut on {
+        list.sort();
+    }
+    (0..body.vertices.len())
+        .map(|v| {
+            let mut items = vec![("faces", Value::Arr(on[v].iter().map(Value::str).collect()))];
+            let fits = (0..on.len()).filter(|w| on[*w].iter().all(|k| on[v].contains(k)) && on[v].iter().all(|k| on[*w].contains(k))).count();
+            if fits > 1 {
+                items.push(("near", vec3(body.vertices[v])));
+            }
+            Value::obj(items)
+        })
+        .collect()
+}
+
 fn faces_value(body: &Body, of_face: &[String]) -> R<Value> {
     let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal())).map_err(|x| x.to_string())?;
     let n = body.faces.len();
@@ -730,10 +767,20 @@ fn faces_value(body: &Body, of_face: &[String]) -> R<Value> {
             items.push(("body", Value::str(owner)));
         }
         match face.surface {
-            Surface::Cylinder { radius, .. } | Surface::Sphere { radius, .. } | Surface::Cone { radius, .. } => items.push(("radius", num(radius))),
-            Surface::Torus { major, minor, .. } => {
+            Surface::Cylinder { radius, frame } => {
+                items.push(("radius", num(radius)));
+                items.push(("axis", axis_value(&frame)));
+            }
+            Surface::Sphere { radius, .. } => items.push(("radius", num(radius))),
+            Surface::Cone { radius, frame, half_angle } => {
+                items.push(("radius", num(radius)));
+                items.push(("half_angle", num(half_angle.to_degrees())));
+                items.push(("axis", axis_value(&frame)));
+            }
+            Surface::Torus { major, minor, frame } => {
                 items.push(("major", num(major)));
                 items.push(("minor", num(minor)));
+                items.push(("axis", axis_value(&frame)));
             }
             Surface::Plane(_) | Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. } => {}
         }
@@ -748,6 +795,7 @@ fn edges_value(body: &Body, of_edge: &[String]) -> R<Value> {
     let mut out = Vec::with_capacity(body.edges.len());
     let names: Vec<String> = (0..body.edges.len()).map(|e| edge_name(body, e, &uses)).collect();
     let keys = face_keys(body);
+    let vertices = vertices_value(body, &keys);
     let key_pairs: Vec<Vec<String>> = (0..body.edges.len())
         .map(|e| {
             let mut pair: Vec<String> = uses[e].iter().map(|u| keys[u.0].text()).collect();
@@ -780,6 +828,8 @@ fn edges_value(body: &Body, of_edge: &[String]) -> R<Value> {
             ("midpoint", vec3(midpoint)),
             ("start", vec3(body.vertices[edge.v0])),
             ("end", vec3(body.vertices[edge.v1])),
+            ("start_vertex", vertices[edge.v0].clone()),
+            ("end_vertex", vertices[edge.v1].clone()),
         ];
         if let Some(owner) = of_edge.get(e) {
             items.push(("body", Value::str(owner)));

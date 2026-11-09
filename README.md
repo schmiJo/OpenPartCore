@@ -23,6 +23,7 @@ It runs natively and in the browser through WebAssembly.
   redundant and conflicting constraints, supports dragging, and is fast enough for every mouse
   move. Checked against FreeCAD's PlaneGCS: see [docs/SKETCH_SOLVER.md](docs/SKETCH_SOLVER.md).
 - **Output:** exact volume and area, a watertight mesh, STL and STEP, and offscreen PNG images.
+- **Extrudes as in Onshape:** any regions from any constrained sketches, ending at a length, through all, up to the next surface, or up to a face, a part or a vertex, on planes and on curved surfaces extended as far as they need to go.
 - **Assemblies, as in Onshape:** tabs of Part Studios and assemblies, instances that follow their parts, mate connectors found from faces and edges, eight kinds of mate with limits, gears, racks and screws, sub-assemblies, dragging, interference and a parts list, and STEP assemblies in and out.
 - **Input:** STEP files with analytic surfaces, swept curves, free-form surfaces, faceted solids and assemblies, healing what real files get wrong, and tested against OpenCASCADE on 108 files from other systems: 100 read. Anything else is refused by name.
 - **For agents:** an MCP server for building, editing and inspecting parts by stable names. See

@@ -71,7 +71,7 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `type` | Fields |
 |---|---|
 | `sketch` | `plane` (default XY, and with `"on_face": "f2:end"` it follows that flat face), `regions` |
-| `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`) |
+| `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
 | `loft` | `sections`: a list of sketch ids, in order, each holding one outline, and `mode`. Straight between two, and a smooth cubic through three or more |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. |
 | `sweep` | `sketch`, `path`, `mode`: see below |
@@ -171,6 +171,32 @@ A body is a part: one connected solid, with any voids inside it. This works as O
 - **A part's name** is the feature that made it, and which of that feature's parts it is, counting from 0: `f3` for the first or only one, and `f3.2` for the third. Whatever is done to it later, it keeps that name.
 - **A cut that splits a part** leaves the name on the piece with the most faces from before, or the larger of those, and the others are named for the feature that split it. So after a change that swaps which piece that is, the names swap too.
 - **A change to one part leaves the others alone,** when what comes after names which parts it acts on. A feature with no list depends on all of them.
+
+## Extrude regions and ends
+
+An extrude can choose what it takes and where it stops, as Onshape's can. These are all optional, and an extrude without them is written as it always was.
+
+**`regions`** takes these regions rather than whatever its sketch gives, so that one sketch can feed many extrudes without changing it. Ids are from the `sketch_arrangement` tool, and last through changes to the sketch's dimensions.
+
+```json
+{ "id": 5, "type": "extrude", "sketch": 2, "regions": ["r0123456789ab", {"sketch": 3, "region": "r00000000abcd"}], "length": 10, "mode": "new_body" }
+```
+
+A plain id is from `sketch`, and `{"sketch", "region"}` is from any constrained sketch before it, in which case `sketch` can be left out. Each goes along its own sketch's normal, and regions that touch become one part. A region that has gone fails the feature, saying what's there, and so does a sketch that's suppressed.
+
+**`end`** says where it stops, in place of `length`. If there's a `length` as well, it's kept, unused, for going back to it.
+
+| `end` | Stops |
+|---|---|
+| `"blind"` | At `length`. This is the default |
+| `"through_all"` | Past every part it acts on. A new solid stops flush with the furthest |
+| `"up_to_next"` | At the nearest surface in the way among the parts it acts on. A cut goes on through the material to its far side |
+| `{"type": "up_to_face", "face": "f1:end"}` | At that face's surface, extended as far as it needs to be. A plane, cylinder, cone, sphere or torus |
+| `{"type": "up_to_part", "part": "f3"}` | At that part's nearest surface, going on past anything else |
+| `{"type": "up_to_vertex", "vertex": {"faces": [...], "near": [x, y, z]}}` | At a plane through the vertex those faces share, square to the direction. `near` says which if they share several. `edges_list` gives these for each edge's ends as `start_vertex` and `end_vertex` |
+| `{"type": "up_to_vertex", "vertex": {"point": [x, y, z]}}` | The same, through a place |
+
+**`"opposite": true`** goes the other way. An end behind the sketch is refused, and the message says so. The far end is named as a blind extrude's is, however it's shaped: `f5:end` going forward, and `f5:start` in the opposite direction, as the kernel names caps by where they are.
 
 ## Projects and assemblies
 
