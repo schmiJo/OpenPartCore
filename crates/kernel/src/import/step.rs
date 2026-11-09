@@ -2415,7 +2415,7 @@ fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Re
     let mut turned = false;
     for s in 0..body.shells.len() {
         let is_outer = body.shells[s].iter().any(|&f| faces[f].tag.slot < 2 + first_void_slot(file, outer));
-        let v = crate::mass::shell_volume(&body, s);
+        let v = crate::mass::shell_facing(&body, s);
         if (is_outer && v < 0.0) || (!is_outer && v > 0.0) {
             let list = body.shells[s].clone();
             for f in list {
