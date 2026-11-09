@@ -350,6 +350,15 @@ fn cases() -> Vec<Case> {
         out.push(case(name, body, vec![step(&[on(4.0), on(-4.0)].concat(), 2.0)], None));
     }
 
+    // A moulded cup: drafted walls, rounded corners, and a rounded bottom going around them.
+    let drafted = {
+        let block = bx(-40.0, -30.0, 0.0, 80.0, 60.0, 40.0, TAG);
+        let sides: Vec<usize> = (0..block.faces.len()).filter(|&f| matches!(block.faces[f].surface, Surface::Plane(p) if p.z.z.abs() < 1e-9)).collect();
+        draft(&block, &sides, Vec3::Z, Vec3::ZERO, -3f64.to_radians()).unwrap()
+    };
+    let corners: Vec<Vec3> = (0..drafted.edges.len()).filter(|&e| drafted.edges[e].curve.derivative(drafted.edges[e].t0).normalized().z.abs() > 0.5).map(|e| drafted.edge_midpoint(e)).collect();
+    out.push(case("drafted cup, corners r8 then bottom r5", drafted.clone(), vec![step(&corners, 8.0), step(&[v3(0.0, -30.0, 0.0)], 5.0)], None));
+
     // Ribs meeting walls, as on a moulded part.
     let walled = union(&union(&bx(0.0, 0.0, 0.0, 60.0, 40.0, 5.0, TAG), &bx(0.0, 0.0, 5.0, 60.0, 5.0, 20.0, 2)).unwrap(), &bx(28.0, 5.0, 5.0, 4.0, 35.0, 15.0, 3)).unwrap();
     out.push(case("rib against a wall, its base", walled.clone(), vec![step(&[v3(28.0, 20.0, 5.0), v3(32.0, 20.0, 5.0)], 1.0)], None));

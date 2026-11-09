@@ -107,7 +107,7 @@ pub fn fillet_with(body: &Body, edges: &[usize], radius: f64, options: BlendOpti
 }
 
 /// An exact surface where there is one. Where there isn't, a fitted one, held to a stated tolerance.
-fn fillet_route(body: &Body, selected: &[usize], asked: &[usize], radius: f64, feature: u32) -> Result<Body> {
+pub(crate) fn fillet_route(body: &Body, selected: &[usize], asked: &[usize], radius: f64, feature: u32) -> Result<Body> {
     match blend(body, selected, Kind::Fillet(radius), feature) {
         Err(Error::Unsupported(_)) => crate::rolling::blend(body, asked, Kind::Fillet(radius), feature),
         other => other,
@@ -133,7 +133,7 @@ fn edge_is_convex(body: &Body, uses: &[Vec<(usize, usize, usize, bool)>], e: usi
 
 /// At each vertex where three selected edges meet that aren't all convex or all concave, the one that's different. The same
 /// goes for one too short to be a wall for the others, as on a thin plate: rounded first, the others run around it.
-fn odd_ones_at_corners(body: &Body, selected: &[usize], radius: f64) -> Vec<usize> {
+pub(crate) fn odd_ones_at_corners(body: &Body, selected: &[usize], radius: f64) -> Vec<usize> {
     let uses = body.edge_uses();
     let mut at_vertex: Vec<Vec<usize>> = vec![Vec::new(); body.vertices.len()];
     for &e in selected {
@@ -174,7 +174,7 @@ fn odd_ones_at_corners(body: &Body, selected: &[usize], radius: f64) -> Vec<usiz
 }
 
 /// Where edges of one body have got to in another made from it: whatever lies along them, between the same faces.
-fn same_edges_in(old: &Body, edges: &[usize], new: &Body) -> Vec<usize> {
+pub(crate) fn same_edges_in(old: &Body, edges: &[usize], new: &Body) -> Vec<usize> {
     let (old_uses, new_uses) = (old.edge_uses(), new.edge_uses());
     let tags = |b: &Body, list: &[(usize, usize, usize, bool)]| -> Vec<FaceTag> {
         let mut out: Vec<FaceTag> = list.iter().map(|u| b.faces[u.0].tag).collect();
@@ -198,7 +198,7 @@ fn same_edges_in(old: &Body, edges: &[usize], new: &Body) -> Vec<usize> {
 
 /// Adds every edge reachable from the selection through tangent continuation. An edge
 /// that is itself smooth, or that can't be blended, ends the chain.
-fn propagate_tangents(body: &Body, selected: &[usize]) -> Result<Vec<usize>> {
+pub(crate) fn propagate_tangents(body: &Body, selected: &[usize]) -> Result<Vec<usize>> {
     let uses = body.edge_uses();
     let mut at_vertex: Vec<Vec<usize>> = vec![Vec::new(); body.vertices.len()];
     for (i, e) in body.edges.iter().enumerate() {
@@ -207,9 +207,6 @@ fn propagate_tangents(body: &Body, selected: &[usize]) -> Result<Vec<usize>> {
     }
     let is_corner = |e: usize| -> bool {
         let edge = &body.edges[e];
-        if !matches!(edge.curve, Curve::Line { .. } | Curve::Circle { .. }) {
-            return false;
-        }
         let [a, b] = uses[e].as_slice() else {
             return false;
         };
@@ -1035,6 +1032,9 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
     let mut corners: Vec<(usize, Vec<Vec2>, Corner, Section)> = Vec::new();
     // What each run's tool was made from, to make it again running further.
     let mut made: Vec<(Profile, [End; 2], f64)> = Vec::new();
+    // For each run, at each of its stations, whether the ball has its faces to stand on there, so that the edge certainly
+    // has to go. Where it runs off a face it may not, near the ends.
+    let mut certain: Vec<Vec<bool>> = Vec::new();
     let name = match kind {
         Kind::Fillet(_) => "fillet",
         Kind::Chamfer(_) => "chamfer",
@@ -1124,6 +1124,7 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
             Some(section_of(&short, size).and_then(|place| sweep(&profile, &short, &place, [End::Flush, End::Flush], feature)))
         };
         let swept = sweep(&profile, run, &section, ends, feature);
+        let mut short = false;
         let mut tool = match swept {
             Ok(tool) => tool,
             Err(why) => {
@@ -1132,7 +1133,10 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
                     return Err(why);
                 }
                 match stopped_short(&off) {
-                    Some(Ok(tool)) => tool,
+                    Some(Ok(tool)) => {
+                        short = true;
+                        tool
+                    }
                     _ => return Err(why),
                 }
             }
@@ -1143,7 +1147,10 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
             tool = match kept {
                 Ok(kept) => kept,
                 Err(why) => match stopped_short(&[s]) {
-                    Some(Ok(short)) => short,
+                    Some(Ok(stopped)) => {
+                        short = true;
+                        stopped
+                    }
                     _ => return Err(Error::InvalidInput(format!("a {name} of this size runs off the neighbouring {}, part of the way along, and can't be kept to it: {why}", body.faces[corner.sides[s].face].surface.name()))),
                 },
             };
@@ -1154,6 +1161,7 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
         } else {
             adds.push(tool);
         }
+        certain.push(stations.iter().map(|st| !short && (0..2).all(|s| far[s].is_some() || landed(s, points[s + 1], *st))).collect());
         made.push((profile, ends, reach_section));
         corners.push((i, points, corner, section));
     }
@@ -1226,18 +1234,81 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
         let cut = boolean_many_with(body, &cuts, BoolOp::Subtract, then)?;
         boolean_many_with(&cut, &adds, BoolOp::Union, Checks::Full)
     })();
-    if let Ok(out) = at_once {
-        return Ok(out);
+    let out = match at_once {
+        Ok(out) => out,
+        Err(_) => {
+            // Only the last step needs the full checks, and they apply to the final result.
+            let total = cuts.len() + adds.len();
+            let mut out = body.clone();
+            let steps = cuts.iter().map(|t| (t, BoolOp::Subtract)).chain(adds.iter().map(|t| (t, BoolOp::Union)));
+            for (i, (tool, op)) in steps.enumerate() {
+                let checks = if i + 1 == total { Checks::Full } else { Checks::Interim };
+                out = boolean_with(&out, tool, op, checks)?;
+            }
+            out
+        }
+    };
+    let mut along = Vec::new();
+    for ((run, (_, _, corner, section)), sure) in runs.iter().zip(&corners).zip(&certain) {
+        for (st, sure) in stations_of(run, section).into_iter().zip(sure) {
+            let t = if section.circular { st } else { run.t0 + st };
+            along.push((run.curve.eval(t), corner.convex, *sure));
+        }
     }
-    // Only the last step needs the full checks, and they apply to the final result.
-    let total = cuts.len() + adds.len();
-    let mut out = body.clone();
-    let steps = cuts.iter().map(|t| (t, BoolOp::Subtract)).chain(adds.iter().map(|t| (t, BoolOp::Union)));
-    for (i, (tool, op)) in steps.enumerate() {
-        let checks = if i + 1 == total { Checks::Full } else { Checks::Interim };
-        out = boolean_with(&out, tool, op, checks)?;
-    }
+    check_blend(body, &out, &along, name)?;
     Ok(out)
+}
+
+/// Checks a blend's result in ways that don't depend on how it was made. A fillet or chamfer only ever lies between points
+/// on the part's own faces, so it can't reach past the part's bounds. And where it was asked for, the edge has to go:
+/// taken off a convex edge, and filled in on a concave one. `along` is points along the edges asked for, each with
+/// whether its edge is convex, and whether the ball certainly has its faces to stand on there. Where it does, the edge has
+/// to go. A blend that runs off a face can leave a little of an edge sharp near its ends, so elsewhere it's most of them
+/// that have to go. None can go the wrong way.
+pub(crate) fn check_blend(original: &Body, result: &Body, along: &[(Vec3, bool, bool)], name: &str) -> Result<()> {
+    let bounds = original.aabb();
+    let slack = 10.0 * TOL + 1e-9 * bounds.diagonal();
+    let inside = |p: Vec3| {
+        p.x >= bounds.min.x - slack && p.y >= bounds.min.y - slack && p.z >= bounds.min.z - slack && p.x <= bounds.max.x + slack && p.y <= bounds.max.y + slack && p.z <= bounds.max.z + slack
+    };
+    for e in &result.edges {
+        for k in 0..=8 {
+            let p = e.curve.eval(e.t0 + (e.t1 - e.t0) * k as f64 / 8.0);
+            if !inside(p) {
+                return Err(Error::NearDegenerate(format!(
+                    "a {name} came out reaching past the part itself, to ({:.4}, {:.4}, {:.4}), which a blend can't do",
+                    p.x, p.y, p.z
+                )));
+            }
+        }
+    }
+    if along.is_empty() {
+        return Ok(());
+    }
+    let index = Index::new(result);
+    let mut gone = 0;
+    for &(p, convex, sure) in along {
+        match (index.locate_in_body(p), convex) {
+            (BodyLoc::Outside, true) | (BodyLoc::Inside, false) => gone += 1,
+            (BodyLoc::Inside, true) | (BodyLoc::Outside, false) => {
+                return Err(Error::NearDegenerate(format!(
+                    "a {name} came out with material on the wrong side of its edge, at ({:.4}, {:.4}, {:.4})",
+                    p.x, p.y, p.z
+                )))
+            }
+            (BodyLoc::OnFace(_), _) if sure => {
+                return Err(Error::NearDegenerate(format!(
+                    "a {name} left its edge as it was at ({:.4}, {:.4}, {:.4}), where it had room",
+                    p.x, p.y, p.z
+                )))
+            }
+            (BodyLoc::OnFace(_), _) => {}
+        }
+    }
+    if 2 * gone < along.len() {
+        return Err(Error::NearDegenerate(format!("a {name} left most of its edges as they were, which means it didn't happen")));
+    }
+    Ok(())
 }
 
 /// The piece of corner outside the rolling ball, where three blended straight edges between planes meet at a vertex, all
@@ -1360,5 +1431,76 @@ impl Body {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::boolean::union;
+
+    fn block() -> Body {
+        box_solid(&Frame::WORLD, 20.0, 10.0, 6.0, 1).unwrap()
+    }
+
+    /// Points along the top edge at y = 0, which is convex.
+    fn along_top(certain: bool) -> Vec<(Vec3, bool, bool)> {
+        (1..10).map(|k| (v3(2.0 * k as f64, 0.0, 6.0), true, certain)).collect()
+    }
+
+    fn rounded() -> (Body, Body) {
+        let b = block();
+        let e = b.edges_where(|i, _| b.edge_midpoint(i).dist(v3(10.0, 0.0, 6.0)) < 1e-9)[0];
+        let f = fillet(&b, &[e], 2.0, 9).unwrap();
+        (b, f)
+    }
+
+    #[test]
+    fn a_blend_that_did_nothing_is_refused() {
+        let b = block();
+        // Its edge is just where it was: where it certainly had room, and even where it might have run off.
+        let why = check_blend(&b, &b, &along_top(true), "fillet").unwrap_err().to_string();
+        assert!(why.contains("left its edge as it was"), "{why}");
+        let why = check_blend(&b, &b, &along_top(false), "fillet").unwrap_err().to_string();
+        assert!(why.contains("didn't happen"), "{why}");
+        // Done, it passes.
+        let (b, f) = rounded();
+        check_blend(&b, &f, &along_top(true), "fillet").unwrap();
+    }
+
+    #[test]
+    fn a_blend_stopped_short_where_it_had_room_is_refused() {
+        // Rounded for only the first 15 of its 20.
+        let b = block();
+        let short = Run { t0: 0.0, t1: 15.0, ..build_runs(&b, &b.edges_where(|i, _| b.edge_midpoint(i).dist(v3(10.0, 0.0, 6.0)) < 1e-9)).unwrap().remove(0) };
+        let section = section_of(&short, 20.0).unwrap();
+        let corner = corner_of(&b, &short, &section, 20.0).unwrap();
+        let (profile, _) = profile_of(&corner, Kind::Fillet(2.0), false, [None, None]).unwrap();
+        let tool = sweep(&profile, &short, &section, [End::Flush, End::Flush], 9).unwrap();
+        let stopped = boolean_with(&b, &tool, BoolOp::Subtract, Checks::Full).unwrap();
+        let why = check_blend(&b, &stopped, &along_top(true), "fillet").unwrap_err().to_string();
+        assert!(why.contains("left its edge as it was"), "{why}");
+        // Where it might have run off, that's let through.
+        check_blend(&b, &stopped, &along_top(false), "fillet").unwrap();
+    }
+
+    #[test]
+    fn a_blend_that_reaches_past_the_part_is_refused() {
+        let (b, f) = rounded();
+        // A strip sticking out past the end, as once came out of a rib's fillet.
+        let strip = box_solid(&Frame::translation(v3(19.0, 3.0, 3.0)), 3.0, 1.0, 1.0, 2).unwrap();
+        let wrong = union(&f, &strip).unwrap();
+        let why = check_blend(&b, &wrong, &along_top(true), "fillet").unwrap_err().to_string();
+        assert!(why.contains("reaching past the part"), "{why}");
+    }
+
+    #[test]
+    fn material_on_the_wrong_side_of_an_edge_is_refused() {
+        let b = block();
+        let lump = box_solid(&Frame::translation(v3(-1.0, -1.0, 5.0)), 22.0, 2.0, 2.0, 2).unwrap();
+        let wrong = union(&b, &lump).unwrap();
+        let bigger = box_solid(&Frame::translation(v3(-2.0, -2.0, -2.0)), 30.0, 20.0, 20.0, 3).unwrap();
+        let why = check_blend(&bigger, &wrong, &along_top(false), "fillet").unwrap_err().to_string();
+        assert!(why.contains("wrong side"), "{why}");
     }
 }

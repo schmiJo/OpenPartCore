@@ -585,6 +585,22 @@ impl BodyId {
     }
 }
 
+/// Some edges and their radius, in a fillet with more than one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RadiusSet {
+    pub edges: EdgeSelect,
+    pub radius: RadiusLaw,
+}
+
+/// What radius a set of edges has.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RadiusLaw {
+    Constant(Expr),
+    /// By how far along the chain of edges, from 0 to 1, in straight lines between these. It's measured from the end nearest
+    /// `start`, or without one, from the end with the lowest x, then y, then z.
+    Along { stations: Vec<(Expr, Expr)>, start: Option<Point3> },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Primitive {
     Box { dx: Expr, dy: Expr, dz: Expr },
@@ -614,6 +630,8 @@ pub enum Op {
     /// Each distinct solid in a STEP file once, as a new body in its own coordinates, for an assembly to use.
     ImportStepParts { text: String },
     Fillet { edges: EdgeSelect, radius: Expr, propagate: bool },
+    /// A fillet with more than one radius: on different edges, which can meet at a corner, or varying along a chain.
+    FilletRadii { sets: Vec<RadiusSet> },
     Chamfer { edges: EdgeSelect, distance: Expr, propagate: bool },
     /// A solid through sketches in order, each holding one outline, with free-form sides. Straight between
     /// two sections, and a smooth cubic through three or more. Sides are named from the first section.
@@ -732,6 +750,7 @@ impl Op {
             Op::ImportStep { .. } => "import_step",
             Op::ImportStepParts { .. } => "import_step_parts",
             Op::Fillet { .. } => "fillet",
+            Op::FilletRadii { .. } => "fillet_radii",
             Op::Chamfer { .. } => "chamfer",
             Op::Sweep { .. } => "sweep",
             Op::Helix { .. } => "helix",
@@ -778,7 +797,7 @@ impl Op {
             Op::Solid { .. } => "Solid",
             Op::ImportStep { .. } => "Imported STEP",
             Op::ImportStepParts { .. } => "Imported STEP parts",
-            Op::Fillet { .. } => "Fillet",
+            Op::Fillet { .. } | Op::FilletRadii { .. } => "Fillet",
             Op::Chamfer { .. } => "Chamfer",
             Op::Sweep { .. } => "Sweep",
             Op::Helix { .. } => "Helix",
@@ -809,6 +828,11 @@ impl Op {
                 }
             }
             Op::Fillet { edges, .. } | Op::Chamfer { edges, .. } => edges.references(&mut out),
+            Op::FilletRadii { sets } => {
+                for set in sets {
+                    set.edges.references(&mut out);
+                }
+            }
             Op::Pattern { of, .. } | Op::Mirror { of, .. } => out.extend_from_slice(of),
             Op::Shell { open: faces, .. } | Op::Draft { faces, .. } => out.extend(faces.iter().map(|f| f.feature)),
             _ => {}
@@ -938,6 +962,23 @@ impl Op {
             Op::Fillet { edges, radius, .. } => {
                 edges.collect_exprs(&mut out);
                 out.push(radius);
+            }
+            Op::FilletRadii { sets } => {
+                for set in sets {
+                    set.edges.collect_exprs(&mut out);
+                    match &set.radius {
+                        RadiusLaw::Constant(r) => out.push(r),
+                        RadiusLaw::Along { stations, start } => {
+                            for (at, r) in stations {
+                                out.push(at);
+                                out.push(r);
+                            }
+                            if let Some(p) = start {
+                                out.extend(p.iter());
+                            }
+                        }
+                    }
+                }
             }
             Op::Chamfer { edges, distance, .. } => {
                 edges.collect_exprs(&mut out);
@@ -2037,6 +2078,42 @@ impl Document {
                 }
                 Ok(out.done(None))
             }
+            Op::FilletRadii { sets } => {
+                let everything = whole().ok_or_else(|| Error::InvalidInput("a fillet needs a body to work on".into()))?;
+                // Each body's edges from each set, with the set's radius.
+                let mut for_body: Vec<(usize, Vec<(Vec<usize>, coreshape::Radius)>)> = Vec::new();
+                for set in sets {
+                    let picked = select_edges(&set.edges, &everything, env)?;
+                    if picked.is_empty() {
+                        return Err(Error::InvalidInput("one of this fillet's sets of edges has nothing in it".into()));
+                    }
+                    let radius = match &set.radius {
+                        RadiusLaw::Constant(r) => coreshape::Radius::Constant(num(r, env)?),
+                        RadiusLaw::Along { stations, start } => {
+                            let mut list = Vec::with_capacity(stations.len());
+                            for (at, r) in stations {
+                                list.push((num(at, env)?, num(r, env)?));
+                            }
+                            let start = match start {
+                                Some(p) => Some(at_point(p)?),
+                                None => None,
+                            };
+                            coreshape::Radius::Along { stations: list, start }
+                        }
+                    };
+                    for (at, list) in by_body(all, scope, &picked, |b| b.edges.len()) {
+                        match for_body.iter_mut().find(|x| x.0 == at) {
+                            Some(entry) => entry.1.push((list, radius.clone())),
+                            None => for_body.push((at, vec![(list, radius.clone())])),
+                        }
+                    }
+                }
+                let mut out = Changes::default();
+                for (at, list) in for_body {
+                    out.settle(scope[at].0, coreshape::fillet_radii(&scope[at].1, &list, tag).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
+                }
+                Ok(out.done(None))
+            }
             Op::Chamfer { edges, distance, propagate } => {
                 let everything = whole().ok_or_else(|| Error::InvalidInput("a chamfer needs a body to work on".into()))?;
                 let picked = select_edges(edges, &everything, env)?;
@@ -3087,6 +3164,30 @@ pub fn op_value(op: &Op) -> Value {
             ("radius", expr_value(radius)),
             ("propagate", Value::Bool(*propagate)),
         ]),
+        Op::FilletRadii { sets } => Value::obj(vec![
+            ("type", Value::str("fillet_radii")),
+            (
+                "sets",
+                Value::Arr(
+                    sets.iter()
+                        .map(|set| {
+                            let mut items = vec![("edges", edge_select_value(&set.edges))];
+                            match &set.radius {
+                                RadiusLaw::Constant(r) => items.push(("radius", expr_value(r))),
+                                RadiusLaw::Along { stations, start } => {
+                                    let list = stations.iter().map(|(at, r)| Value::obj(vec![("at", expr_value(at)), ("radius", expr_value(r))])).collect();
+                                    items.push(("along", Value::Arr(list)));
+                                    if let Some(p) = start {
+                                        items.push(("start", point3_value(p)));
+                                    }
+                                }
+                            }
+                            Value::obj(items)
+                        })
+                        .collect(),
+                ),
+            ),
+        ]),
         Op::Chamfer { edges, distance, propagate } => Value::obj(vec![
             ("type", Value::str("chamfer")),
             ("edges", edge_select_value(edges)),
@@ -3418,6 +3519,33 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                     Some(p) => p.as_bool().ok_or_else(|| Error::InvalidInput("\"propagate\" must be true or false".into()))?,
                 },
             })
+        }
+        "fillet_radii" => {
+            with(&["type", "sets"])?;
+            let list = field(v, "sets", "a fillet with several radii")?.as_array().ok_or_else(|| Error::InvalidInput("\"sets\" must be a list of edges and their radii".into()))?;
+            if list.is_empty() {
+                return Err(Error::InvalidInput("a fillet with several radii needs at least one set of edges".into()));
+            }
+            let mut sets = Vec::with_capacity(list.len());
+            for set in list {
+                let edges = read_edge_select(field(set, "edges", "a set of edges")?)?;
+                let radius = match (set.get("radius"), set.get("along")) {
+                    (Some(_), Some(_)) => return Err(Error::InvalidInput("a set of edges has a \"radius\" or an \"along\", not both".into())),
+                    (Some(r), None) => RadiusLaw::Constant(read_expr(r)?),
+                    (None, Some(along)) => {
+                        let items = along.as_array().ok_or_else(|| Error::InvalidInput("\"along\" must be a list of places and radii".into()))?;
+                        let mut stations = Vec::with_capacity(items.len());
+                        for item in items {
+                            stations.push((expr_field(item, "at", "a place along some edges")?, expr_field(item, "radius", "a place along some edges")?));
+                        }
+                        let start = set.get("start").map(read_point3).transpose()?;
+                        RadiusLaw::Along { stations, start }
+                    }
+                    (None, None) => return Err(Error::InvalidInput("a set of edges needs a \"radius\" or an \"along\"".into())),
+                };
+                sets.push(RadiusSet { edges, radius });
+            }
+            Ok(Op::FilletRadii { sets })
         }
         "chamfer" => {
             with(&["type", "edges", "distance", "propagate"])?;

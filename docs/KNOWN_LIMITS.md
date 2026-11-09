@@ -237,6 +237,11 @@ Supported:
 - **A wall too short for the ball.** If a face beside the edge ends before the ball can touch it, all along the edge, the fillet stays tangent to the other face and runs through that face's far edge, which stays where it was. That takes straight and round edges, convex and concave: thin plates, the rims of holes in them, low bosses and ribs, steps and shaft shoulders. Each is checked against a formula, as OpenCASCADE refuses every one of them. A chamfer does the same.
 - **A face that ends part of the way along the edge.** A hole across the contact line just cuts the fillet. Where the blend would otherwise cut into what's beyond a wall or hang out over nothing, it's kept to what's under or over that face, so a boss's fillet near the plate's edge stops at the plate's side, which rises to meet it.
 
+- **Different radii on edges that meet at a corner** (`fillet_radii`). The largest goes first, and the others then run smoothly around it as one chain, with the radius going from one to the other around the piece between them, so nothing at the corner is left sharp. An edge that's the odd one out at a corner, convex among concave or the other way round, always goes first.
+- **A radius varying along a chain of edges,** in straight lines between places along it, on any edge the fitted route takes, an open chain only. On a straight edge between square faces, and around half a rim, the volume matches the integral of each section's area to 1e-8, as the sections there are exactly what a ball would make.
+
+Every fillet and chamfer is checked afterwards in two ways that don't depend on how it was made. Its result can't reach past the part's own bounds, as a blend only lies between points on the part's faces. And along each edge it was asked for, the edge has to have gone: taken off a convex edge and filled in on a concave one. Where the ball has its faces to stand on, all of it has to go, and where a face runs off, most of it. These would have turned both wrong results the real parts found into refusals: a rib's fillet that ran on past its tip, and a chamfer down a shelf bracket's sloped back that did nothing.
+
 Supported, but fitted and not exact, which makes them the only results in this kernel that are neither exact nor refused:
 
 - Traced intersection curves, ellipses, and any edge on a spline or free-form face, such as the rim of a hole through a cylinder or a tee's saddle.
@@ -244,8 +249,9 @@ Supported, but fitted and not exact, which makes them the only results in this k
 
 Not supported, returning an error:
 
-- Variable radius.
 - A radius too big for both of the faces beside the edge.
+- A radius that varies around a closed chain, as there's no end for it to start from, or that varies and runs smoothly into edges with another radius.
+- Two edges running smoothly into each other with different radii and nothing between them for the radius to go from one to the other.
 - A fitted blend passing a vertex where a sharp edge meets it, or that ends where more than one face lies beyond it. Those need corner blends.
 - A fitted blend's end at a reflex corner, where its side would end past the neighbouring edge, which takes reshaping that neighbour.
 - A surface so kinked that the fit doesn't reach its tolerance within 1,024 stations.
@@ -266,6 +272,7 @@ Works, but differs from commercial CAD:
 
 - Two filleted edges meeting at a corner with a third edge left sharp end in a plain mitre, with
   no vertex blend.
+- **OpenCASCADE's volume of a fitted blend can be wrong.** Its integrator gets B-spline faces with many knots wrong: on a rounded box whose bottom rim is fitted, this kernel's volume matches the formula to 1e-11, OpenCASCADE's reading of the same file comes out 0.26% short, and OpenCASCADE's own fine mesh of that file matches the formula again to 2e-6. So `scripts/check_fillets.sh` also measures its mesh wherever there are B-spline faces, and goes by that where the two disagree.
 - **A web running exactly tangent into a boss.** The fillet where they meet would run off the web near each tangent point, and the web's side can't be cut there, as a plane touches the fillet's surface at a single point. So the fillet stops just before it runs off, and what's left of that edge stays sharp. OpenCASCADE refuses this one. Real kernels can blend it all the way.
 - **A wall that's too short for only part of the way along** keeps the usual arc, cut off by the wall's far edge or kept to the face, so there's a crease where the two meet. Real kernels can roll along that edge for a smoother result. On a boss 2 mm from a plate's edge with a fillet of 5, this kernel adds 367.1 and OpenCASCADE, which rolls over the plate's edge, 348.1. This one's is checked against a formula for what it does.
 

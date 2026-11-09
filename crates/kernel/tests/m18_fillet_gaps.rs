@@ -484,3 +484,202 @@ fn a_fillet_that_ends_on_a_slanted_face_goes_all_the_way_along() {
     let want = 24000.0 - 4.5 * 40.0 - (k(r) * 30.0 - k(r) * (3.0 - off_wall));
     close(sound(&f, "ends on a chamfer"), want, 1e-9, "ends on a chamfer");
 }
+
+// ----- A radius that varies, and different radii at a corner -----
+
+fn along(stations: &[(f64, f64)]) -> Radius {
+    Radius::Along { stations: stations.to_vec(), start: None }
+}
+
+/// What a fillet whose radius goes in a straight line takes from a right-angle edge of this length.
+fn tapered(length: f64, a: f64, b: f64) -> f64 {
+    (1.0 - PI / 4.0) * length * (a * a + a * b + b * b) / 3.0
+}
+
+#[test]
+fn a_radius_that_goes_from_one_to_another_along_a_straight_edge() {
+    let b = bx(0.0, 0.0, 0.0, 40.0, 30.0, 20.0, 1);
+    let e = edge_at(&b, v3(20.0, 0.0, 20.0));
+    let f = fillet_radii(&b, &[(vec![e], along(&[(0.0, 2.0), (1.0, 5.0)]))], 2).unwrap();
+    close(sound(&f, "tapered"), 24000.0 - tapered(40.0, 2.0, 5.0), 1e-6, "tapered");
+    // By default, it starts from the end with the lowest x: there the end face's arc is 2 back, and at the other it's 5.
+    let index = coreshape::boolean::classify::Index::new(&f);
+    use coreshape::boolean::classify::BodyLoc;
+    let at = |x: f64, r: f64, inside: bool| {
+        // On the diagonal across the section, just inside or outside the arc.
+        let d = r * (1.0 - std::f64::consts::FRAC_1_SQRT_2) + if inside { 0.01 } else { -0.01 };
+        let want = if inside { BodyLoc::Inside } else { BodyLoc::Outside };
+        assert_eq!(index.locate_in_body(v3(x, d, 20.0 - d)), want, "at x = {x}, radius {r}");
+    };
+    for (x, r) in [(0.5, 2.0375), (20.0, 3.5), (39.5, 4.9625)] {
+        at(x, r, true);
+        at(x, r, false);
+    }
+    // From the other end, if asked.
+    let g = fillet_radii(&b, &[(vec![e], Radius::Along { stations: vec![(0.0, 2.0), (1.0, 5.0)], start: Some(v3(40.0, 0.0, 20.0)) })], 2).unwrap();
+    close(sound(&g, "tapered back"), 24000.0 - tapered(40.0, 2.0, 5.0), 1e-6, "tapered back");
+    let index = coreshape::boolean::classify::Index::new(&g);
+    let d = 4.9625 * (1.0 - std::f64::consts::FRAC_1_SQRT_2);
+    assert_eq!(index.locate_in_body(v3(0.5, d + 0.01, 20.0 - d - 0.01)), BodyLoc::Inside);
+    assert_eq!(index.locate_in_body(v3(0.5, d - 0.01, 20.0 - d + 0.01)), BodyLoc::Outside);
+}
+
+#[test]
+fn a_radius_with_a_stop_on_the_way() {
+    let b = bx(0.0, 0.0, 0.0, 40.0, 30.0, 20.0, 1);
+    let e = edge_at(&b, v3(20.0, 0.0, 20.0));
+    let f = fillet_radii(&b, &[(vec![e], along(&[(0.0, 2.0), (0.25, 5.0), (1.0, 1.0)]))], 2).unwrap();
+    close(sound(&f, "kinked"), 24000.0 - tapered(10.0, 2.0, 5.0) - tapered(30.0, 5.0, 1.0), 1e-6, "kinked");
+    // One station is the same radius all along, and as a fit it's the same as the exact one.
+    let g = fillet_radii(&b, &[(vec![e], along(&[(0.5, 3.0)]))], 2).unwrap();
+    close(sound(&g, "one station"), vol(&fillet(&b, &[e], 3.0, 2).unwrap()), 1e-7, "one station");
+}
+
+#[test]
+fn a_radius_varying_around_a_curved_chain() {
+    // A rim, cut open by a slot so that it has ends: half of it, between two planes, by Pappus at each place.
+    let body = subtract(&cyl(0.0, 0.0, 0.0, 20.0, 20.0, 1), &bx(-30.0, -30.0, -1.0, 60.0, 30.0, 22.0, 2)).unwrap();
+    let e = edge_at(&body, v3(0.0, 20.0, 20.0));
+    let (a, z) = (2.0, 4.0);
+    let f = fillet_radii(&body, &[(vec![e], along(&[(0.0, a), (1.0, z)]))], 3).unwrap();
+    let v = sound(&f, "half a rim");
+    // Each slice at an angle takes the corner's area at that radius, carried around at where its middle is.
+    let taken = simpson(0.0, PI, |t| {
+        let r = a + (z - a) * t / PI;
+        let off = r * (10.0 - 3.0 * PI) / (12.0 - 3.0 * PI);
+        k(r) * (20.0 - off)
+    });
+    close(v, vol(&body) - taken, 1e-8, "half a rim");
+}
+
+#[test]
+fn two_radii_meeting_smoothly_with_nothing_between_are_refused_by_name() {
+    // A box with one upright rounded: its top's rim then runs smoothly from one edge into the arc and on into the next.
+    // The two straight edges with different radii, and the arc between them given one as well, leave nothing to go between.
+    let block = bx(0.0, 0.0, 0.0, 40.0, 30.0, 20.0, 1);
+    let rounded = fillet(&block, &[edge_at(&block, v3(40.0, 30.0, 10.0))], 5.0, 2).unwrap();
+    let (x, arc, y) = (edge_at(&rounded, v3(20.0, 30.0, 20.0)), edge_at(&rounded, v3(35.0 + 5.0 * 0.5f64.sqrt(), 25.0 + 5.0 * 0.5f64.sqrt(), 20.0)), edge_at(&rounded, v3(40.0, 10.0, 20.0)));
+    let sets = [(vec![x], Radius::Constant(3.0)), (vec![arc], Radius::Constant(3.0)), (vec![y], Radius::Constant(2.0))];
+    let why = fillet_radii(&rounded, &sets, 3).unwrap_err().to_string();
+    assert!(why.contains("need an edge between them"), "{why}");
+    // Leave the arc to go between them, and it's fine.
+    let sets = [(vec![x], Radius::Constant(3.0)), (vec![y], Radius::Constant(2.0))];
+    sound(&fillet_radii(&rounded, &sets, 3).unwrap(), "between");
+}
+
+#[test]
+fn a_varying_radius_says_what_it_cant_do() {
+    let b = bx(0.0, 0.0, 0.0, 40.0, 30.0, 20.0, 1);
+    let e = edge_at(&b, v3(20.0, 0.0, 20.0));
+    let refused = |list: &[(f64, f64)], says: &str| {
+        let why = fillet_radii(&b, &[(vec![e], along(list))], 2).unwrap_err().to_string();
+        assert!(why.contains(says), "{why}");
+    };
+    refused(&[], "at least one");
+    refused(&[(0.0, 2.0), (0.0, 3.0)], "in order");
+    refused(&[(0.5, 2.0), (0.2, 3.0)], "in order");
+    refused(&[(-0.5, 2.0)], "from 0 to 1");
+    refused(&[(1.5, 2.0)], "from 0 to 1");
+    refused(&[(0.0, 0.0), (1.0, 3.0)], "too small");
+    let why = fillet_radii(&b, &[(vec![e], Radius::Constant(2.0)), (vec![e], Radius::Constant(3.0))], 2).unwrap_err().to_string();
+    assert!(why.contains("two radii"), "{why}");
+    let why = fillet_radii(&b, &[(vec![9999], Radius::Constant(2.0))], 2).unwrap_err().to_string();
+    assert!(why.contains("no edge"), "{why}");
+    // A closed chain has no end to start from.
+    let c = cyl(0.0, 0.0, 0.0, 20.0, 20.0, 1);
+    let why = fillet_radii(&c, &[(vec![edge_at(&c, v3(0.0, 20.0, 20.0))], along(&[(0.0, 1.0), (1.0, 2.0)]))], 2).unwrap_err().to_string();
+    assert!(why.contains("closed chain"), "{why}");
+}
+
+/// Across every edge within this distance of a point, whether the faces on both sides are tangent.
+fn nothing_sharp_near(b: &Body, around: Vec3, within: f64, what: &str) {
+    let uses = b.edge_uses();
+    let mut looked = 0;
+    for (i, e) in b.edges.iter().enumerate() {
+        for k in 1..8 {
+            let p = e.curve.eval(e.t0 + (e.t1 - e.t0) * k as f64 / 8.0);
+            if p.dist(around) > within {
+                continue;
+            }
+            let [x, y] = uses[i].as_slice() else { panic!("{what}: an edge with {} faces", uses[i].len()) };
+            let (nx, ny) = (b.faces[x.0].outward_normal(p), b.faces[y.0].outward_normal(p));
+            assert!(nx.cross(ny).norm() < 2e-3, "{what}: a sharp edge at {p:?}, with {} and {}", b.faces[x.0].surface.name(), b.faces[y.0].surface.name());
+            looked += 1;
+        }
+    }
+    assert!(looked > 0, "{what}: no edges near there");
+}
+
+#[test]
+fn three_edges_with_different_radii_meet_in_a_smooth_corner() {
+    let (a, b, c) = (40.0, 30.0, 20.0);
+    let block = bx(0.0, 0.0, 0.0, a, b, c, 1);
+    let upright = edge_at(&block, v3(a, b, 10.0));
+    let along_x = edge_at(&block, v3(20.0, b, c));
+    let along_y = edge_at(&block, v3(a, 15.0, c));
+    let sets = [(vec![along_y], Radius::Constant(2.0)), (vec![upright], Radius::Constant(5.0)), (vec![along_x], Radius::Constant(3.0))];
+    let f = fillet_radii(&block, &sets, 2).unwrap();
+    let v = sound(&f, "r5 r3 r2");
+    // Away from the corner each is what it should be: at the far end of each edge, on the diagonal of its section.
+    let index = coreshape::boolean::classify::Index::new(&f);
+    use coreshape::boolean::classify::BodyLoc;
+    let off = |r: f64, inside: bool| r * (1.0 - std::f64::consts::FRAC_1_SQRT_2) + if inside { 0.01 } else { -0.01 };
+    let check = |p: Vec3, want: BodyLoc| assert_eq!(index.locate_in_body(p), want, "at {p:?}");
+    check(v3(1.0, b - off(3.0, true), c - off(3.0, true)), BodyLoc::Inside);
+    check(v3(1.0, b - off(3.0, false), c - off(3.0, false)), BodyLoc::Outside);
+    check(v3(a - off(2.0, true), 1.0, c - off(2.0, true)), BodyLoc::Inside);
+    check(v3(a - off(2.0, false), 1.0, c - off(2.0, false)), BodyLoc::Outside);
+    check(v3(a - off(5.0, true), b - off(5.0, true), 1.0), BodyLoc::Inside);
+    check(v3(a - off(5.0, false), b - off(5.0, false), 1.0), BodyLoc::Outside);
+    // Nothing at the corner is left sharp, and it took about what it should: the upright's cut all the way, and each of the
+    // others, less what's round the corner, where they're somewhere between.
+    nothing_sharp_near(&f, v3(a - 5.0, b - 5.0, c), 7.0, "r5 r3 r2");
+    let least = 24000.0 - k(5.0) * c - k(3.0) * (a - 5.0) - k(2.0) * (b - 5.0) - k(3.0) * 2.0 * PI * 5.0 / 4.0;
+    let most = 24000.0 - k(5.0) * c - k(3.0) * (a - 5.0) - k(2.0) * (b - 5.0) - k(2.0) * 2.0 * PI * 4.0 / 4.0;
+    assert!(v > least && v < most, "{v} isn't between {least} and {most}");
+    // In any order.
+    let other = [(vec![upright], Radius::Constant(5.0)), (vec![along_x], Radius::Constant(3.0)), (vec![along_y], Radius::Constant(2.0))];
+    close(vol(&fillet_radii(&block, &other, 2).unwrap()), v, 1e-9, "another order");
+}
+
+#[test]
+fn sets_with_one_radius_are_the_plain_fillet() {
+    let block = bx(0.0, 0.0, 0.0, 40.0, 30.0, 20.0, 1);
+    let edges = edges_at(&block, &[v3(40.0, 30.0, 10.0), v3(20.0, 30.0, 20.0), v3(40.0, 15.0, 20.0)]);
+    let plain = fillet(&block, &edges, 3.0, 2).unwrap();
+    let sets: Vec<(Vec<usize>, Radius)> = edges.iter().map(|e| (vec![*e], Radius::Constant(3.0))).collect();
+    let f = fillet_radii(&block, &sets, 2).unwrap();
+    close(sound(&f, "same radii"), vol(&plain), 1e-10, "same radii");
+    assert_eq!(f.faces.iter().filter(|x| matches!(x.surface, Surface::Sphere { .. })).count(), 1);
+}
+
+#[test]
+fn a_corner_with_the_odd_edge_small_still_goes_first() {
+    // An L's inside upright is concave, and the rim beside it convex. Done the wrong way round there's no ball for the corner.
+    let ell = prism(&[(0.0, 0.0), (40.0, 0.0), (40.0, 15.0), (15.0, 15.0), (15.0, 40.0), (0.0, 40.0)], 20.0);
+    let sets = [(vec![edge_at(&ell, v3(15.0, 15.0, 10.0))], Radius::Constant(1.0)), (edges_at(&ell, &[v3(27.0, 15.0, 20.0), v3(15.0, 27.0, 20.0)]), Radius::Constant(4.0))];
+    let f = fillet_radii(&ell, &sets, 2).unwrap();
+    sound(&f, "small upright");
+    let up = fillet(&ell, &[edge_at(&ell, v3(15.0, 15.0, 10.0))], 1.0, 2).unwrap();
+    let by_hand = fillet(&up, &edges_at(&up, &[v3(27.0, 15.0, 20.0), v3(15.0, 27.0, 20.0)]), 4.0, 2).unwrap();
+    close(vol(&f), vol(&by_hand), 1e-10, "small upright");
+}
+
+#[test]
+fn a_drafted_cups_rounded_bottom() {
+    // A slanted seam: the ball's contact on the wall is still on the flat part when its contact on the bottom has gone round
+    // the corner. It once looked for it on the corner's surface there, and on the far wall.
+    let block = bx(-40.0, -30.0, 0.0, 80.0, 60.0, 40.0, 1);
+    let sides: Vec<usize> = (0..block.faces.len()).filter(|&f| matches!(block.faces[f].surface, Surface::Plane(p) if p.z.z.abs() < 1e-9)).collect();
+    let cup = draft(&block, &sides, Vec3::Z, Vec3::ZERO, -3f64.to_radians()).unwrap();
+    let uprights: Vec<usize> = (0..cup.edges.len()).filter(|&e| cup.edges[e].curve.derivative(cup.edges[e].t0).normalized().z.abs() > 0.5).collect();
+    assert_eq!(uprights.len(), 4);
+    let rounded = fillet(&cup, &uprights, 8.0, 3).unwrap();
+    let bottom = (0..rounded.edges.len()).find(|&e| (rounded.edge_midpoint(e).z).abs() < 1e-9 && matches!(rounded.edges[e].curve, Curve::Line { .. })).unwrap();
+    let f = fillet(&rounded, &[bottom], 5.0, 4).unwrap();
+    let v = sound(&f, "cup");
+    close(v, CUP, 2e-6, "cup");
+}
+
+/// OpenCASCADE's volume for the same fillets.
+const CUP: f64 = 200556.54495936664;
