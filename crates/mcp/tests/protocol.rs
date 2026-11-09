@@ -809,3 +809,390 @@ fn faces_and_edges_say_what_a_tool_needs_to_pick_them() {
     let want = std::f64::consts::PI * 25.0 * height;
     assert!((bodies.as_array().unwrap()[1].get("volume").and_then(Value::as_f64).unwrap() - want).abs() < 1e-5, "{}", bodies.to_text());
 }
+
+/// Two free blocks' worth of an assembly: the first fixed, and connectors at each one's corner.
+fn two_blocks(c: &mut Client) -> (f64, f64, f64, f64) {
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":10,"dy":10,"dz":10,"mode":"new_body"}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":10,"dy":10,"dz":10,"at":{"origin":[50,0,0]},"mode":"new_body"}}"#);
+    c.ok("tab_new", r#"{"type":"assembly"}"#);
+    let a = id_of(&parsed(&c.ok("instance_add", r#"{"part":"f1","fixed":true,"name":"A"}"#)));
+    let b = id_of(&parsed(&c.ok("instance_add", r#"{"part":"f2","name":"B"}"#)));
+    let frame = r#"{"frame":{"origin":[0,0,0]}}"#;
+    let ca = id_of(&parsed(&c.ok("connector_add", &format!(r#"{{"instance":{a},"on":{frame}}}"#))));
+    let frame_b = r#"{"frame":{"origin":[50,0,0]}}"#;
+    let cb = id_of(&parsed(&c.ok("connector_add", &format!(r#"{{"instance":{b},"on":{frame_b}}}"#))));
+    (a, b, ca, cb)
+}
+
+/// An instance's frame, by name, as origin, z and x.
+fn frame_of(state: &Value, name: &str) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let list = state.get("instances").and_then(Value::as_array).unwrap();
+    let it = list.iter().find(|i| i.get("name").and_then(Value::as_str) == Some(name)).unwrap_or_else(|| panic!("no {name} in {}", state.to_text()));
+    let at = it.get("at").unwrap();
+    (numbers(at.get("origin").unwrap()), numbers(at.get("z").unwrap()), numbers(at.get("x").unwrap()))
+}
+
+fn freedom_of(state: &Value) -> f64 {
+    state.get("freedom").and_then(Value::as_f64).unwrap()
+}
+
+fn shown_assembly(c: &mut Client) -> Value {
+    let shown = parsed(&c.ok("project_show", "{}"));
+    shown.get("tabs").unwrap().as_array().unwrap().iter().find(|t| t.get("assembly").is_some()).unwrap().get("assembly").unwrap().clone()
+}
+
+#[test]
+fn a_connectors_adjustments_do_what_they_say_through_the_tools() {
+    let dir = folder("connector_adjust");
+    let mut c = Client::start(&dir);
+    let (a, _, ca, _) = two_blocks(&mut c);
+    // Moved along its own axes, turned by degrees and by quarter turns, then flipped.
+    let made = parsed(&c.ok("connector_add", &format!(r#"{{"instance":{a},"on":{{"frame":{{"origin":[1,2,3]}}}},"offset":[1,0,0]}}"#)));
+    near(numbers(made.get("at").unwrap().get("origin").unwrap()), [2.0, 2.0, 3.0]);
+    let made = parsed(&c.ok("connector_add", &format!(r#"{{"instance":{a},"on":{{"frame":{{"origin":[0,0,0]}}}},"rotation":90}}"#)));
+    near(numbers(made.get("at").unwrap().get("x").unwrap()), [0.0, 1.0, 0.0]);
+    let made = parsed(&c.ok("connector_add", &format!(r#"{{"instance":{a},"on":{{"frame":{{"origin":[0,0,0]}}}},"quarter_turns":2}}"#)));
+    near(numbers(made.get("at").unwrap().get("x").unwrap()), [-1.0, 0.0, 0.0]);
+    let made = parsed(&c.ok("connector_add", &format!(r#"{{"instance":{a},"on":{{"frame":{{"origin":[0,0,0]}}}},"flip":true}}"#)));
+    near(numbers(made.get("at").unwrap().get("z").unwrap()), [0.0, 0.0, -1.0]);
+    let spare = id_of(&made);
+
+    // Edited, the saved form has each of them.
+    c.ok("connector_edit", &format!(r#"{{"id":{ca},"offset":[4,5,6],"rotation":30,"flip":true,"quarter_turns":1}}"#));
+    let shown = shown_assembly(&mut c);
+    let list = shown.get("connectors").unwrap().as_array().unwrap();
+    let it = list.iter().find(|k| k.get("id").and_then(Value::as_f64) == Some(ca)).unwrap();
+    assert_eq!(numbers(it.get("offset").unwrap()), vec![4.0, 5.0, 6.0]);
+    assert_eq!(it.get("rotation").and_then(Value::as_f64), Some(30.0));
+    assert_eq!(it.get("flip").and_then(Value::as_bool), Some(true));
+    assert_eq!(it.get("quarter_turns").and_then(Value::as_f64), Some(1.0));
+    // Edited to somewhere else altogether, by a place it can check.
+    c.ok("connector_edit", &format!(r#"{{"id":{ca},"on":{{"face":"f1:end"}}}}"#));
+    let shown = shown_assembly(&mut c);
+    let list = shown.get("connectors").unwrap().as_array().unwrap();
+    let it = list.iter().find(|k| k.get("id").and_then(Value::as_f64) == Some(ca)).unwrap();
+    assert_eq!(it.get("on").unwrap().get("face").and_then(Value::as_str), Some("f1:end"));
+    assert!(c.refused("connector_edit", &format!(r#"{{"id":{ca},"on":{{"face":"f9:end"}}}}"#)).contains("f9:end"));
+    assert!(c.refused("connector_edit", r#"{"id":999,"rotation":1}"#).contains("999"));
+    // One that nothing uses can go, and then it's gone.
+    c.ok("connector_delete", &format!(r#"{{"id":{spare}}}"#));
+    assert!(c.refused("connector_delete", &format!(r#"{{"id":{spare}}}"#)).contains("no connector"));
+}
+
+#[test]
+fn a_mates_adjustments_and_edits_do_what_they_say_through_the_tools() {
+    let dir = folder("mate_adjust");
+    let mut c = Client::start(&dir);
+    let (a, b, ca, cb) = two_blocks(&mut c);
+    let made = parsed(&c.ok("mate_add", &format!(r#"{{"type":"fastened","a":{ca},"b":{cb},"name":"Held","offset":[1,2,3]}}"#)));
+    let m = id_of(&made);
+    assert_eq!(freedom_of(&made), 0.0);
+    // Its connector was at x = 50 on the part, so that's the instance's frame less 50.
+    near(frame_of(&made, "B").0, [-49.0, 2.0, 3.0]);
+    let list = made.get("mates").unwrap().as_array().unwrap();
+    assert_eq!(list[0].get("name").and_then(Value::as_str), Some("Held"));
+
+    let edit = |c: &mut Client, fields: &str| parsed(&c.ok("mate_edit", &format!(r#"{{"id":{m},{fields}}}"#)));
+    let state = edit(&mut c, r#""offset":[0,0,0]"#);
+    near(frame_of(&state, "B").0, [-50.0, 0.0, 0.0]);
+    let state = edit(&mut c, r#""rotation":90"#);
+    near(frame_of(&state, "B").2, [0.0, 1.0, 0.0]);
+    // A quarter turn the other way, on the second end, undoes that.
+    let state = edit(&mut c, r#""quarter_turns":1"#);
+    near(frame_of(&state, "B").2, [1.0, 0.0, 0.0]);
+    let state = edit(&mut c, r#""rotation":0,"quarter_turns":0,"flip":true"#);
+    near(frame_of(&state, "B").1, [0.0, 0.0, -1.0]);
+    let state = edit(&mut c, r#""flip":false,"name":"Renamed""#);
+    let list = state.get("mates").unwrap().as_array().unwrap();
+    assert_eq!(list[0].get("name").and_then(Value::as_str), Some("Renamed"));
+
+    // Another kind of mate, and limits on it.
+    let state = edit(&mut c, r#""type":"revolute","limits":[{"dof":"angle","min":-10,"max":20}]"#);
+    assert_eq!(freedom_of(&state), 1.0);
+    let state = parsed(&c.ok("mate_set_value", &format!(r#"{{"id":{m},"dof":"angle","value":90}}"#)));
+    assert!((state.get("reached").and_then(Value::as_f64).unwrap() - 20.0).abs() < 0.01, "{}", state.to_text());
+    assert!(c.refused("mate_edit", &format!(r#"{{"id":{m},"type":"welded"}}"#)).contains("welded"));
+
+    // Suppressed, it says nothing about where the part goes, and the instance is as free as any.
+    let state = edit(&mut c, r#""suppressed":true"#);
+    assert_eq!(freedom_of(&state), 6.0);
+    assert_eq!(state.get("mates").unwrap().as_array().unwrap()[0].get("suppressed").and_then(Value::as_bool), Some(true));
+    let state = edit(&mut c, r#""suppressed":false"#);
+    assert_eq!(freedom_of(&state), 1.0);
+
+    // Deleted, it takes a connector made only for it, and leaves those made on their own.
+    let inline = parsed(&c.ok("mate_add", &format!(r#"{{"type":"planar","a":{{"instance":{b},"on":{{"face":"f2:start"}}}},"b":{{"instance":{a},"on":{{"face":"f1:end"}}}},"flip":true}}"#)));
+    let second = id_of(&inline);
+    assert_eq!(shown_assembly(&mut c).get("connectors").unwrap().as_array().unwrap().len(), 4);
+    let state = parsed(&c.ok("mate_delete", &format!(r#"{{"id":{second}}}"#)));
+    assert_eq!(state.get("mates").unwrap().as_array().unwrap().len(), 1);
+    assert_eq!(shown_assembly(&mut c).get("connectors").unwrap().as_array().unwrap().len(), 2);
+    assert!(c.refused("mate_delete", &format!(r#"{{"id":{second}}}"#)).contains("no mate"));
+}
+
+#[test]
+fn instances_can_be_edited_and_deleted_through_the_tools() {
+    let dir = folder("instance_edit");
+    let mut c = Client::start(&dir);
+    let (a, b, ca, cb) = two_blocks(&mut c);
+    let state = parsed(&c.ok("instance_edit", &format!(r#"{{"id":{b},"name":"Other","at":{{"origin":[7,8,9]}}}}"#)));
+    near(frame_of(&state, "Other").0, [7.0, 8.0, 9.0]);
+    // Fixed, it doesn't go anywhere when a mate pulls on it, and that's what fails.
+    c.ok("instance_edit", &format!(r#"{{"id":{b},"fixed":true}}"#));
+    let state = parsed(&c.ok("mate_add", &format!(r#"{{"type":"fastened","a":{cb},"b":{ca}}}"#)));
+    near(frame_of(&state, "Other").0, [7.0, 8.0, 9.0]);
+    assert!(state.get("mates").unwrap().as_array().unwrap()[0].get("failing").is_some(), "{}", state.to_text());
+    let state = parsed(&c.ok("instance_edit", &format!(r#"{{"id":{b},"fixed":false}}"#)));
+    assert!(state.get("mates").unwrap().as_array().unwrap()[0].get("failing").is_none());
+    // Suppressed, it isn't there, and its mate says so.
+    let state = parsed(&c.ok("instance_edit", &format!(r#"{{"id":{b},"suppressed":true}}"#)));
+    assert_eq!(state.get("instances").unwrap().as_array().unwrap().len(), 1);
+    assert!(state.get("mates").unwrap().as_array().unwrap()[0].get("failing").is_some());
+    let state = parsed(&c.ok("instance_edit", &format!(r#"{{"id":{b},"suppressed":false}}"#)));
+    assert_eq!(state.get("instances").unwrap().as_array().unwrap().len(), 2);
+    // A name for one from a part's maker, numbered among its copies.
+    let state = parsed(&c.ok("instance_add", r#"{"part":"f2"}"#));
+    let names: Vec<String> = state.get("instances").unwrap().as_array().unwrap().iter().map(|i| i.get("name").and_then(Value::as_str).unwrap().to_string()).collect();
+    assert!(names.iter().any(|n| n.ends_with("<2>")), "{names:?}");
+    // Deleted, its mates go too.
+    let state = parsed(&c.ok("instance_delete", &format!(r#"{{"id":{b}}}"#)));
+    assert!(state.get("mates").unwrap().as_array().unwrap().is_empty());
+    assert!(c.refused("instance_delete", &format!(r#"{{"id":{b}}}"#)).contains("no instance"));
+    assert!(c.refused("instance_edit", &format!(r#"{{"id":{b},"fixed":true}}"#)).contains("no instance"));
+    let _ = a;
+}
+
+#[test]
+fn groups_and_relations_go_through_the_tools() {
+    let dir = folder("groups");
+    let mut c = Client::start(&dir);
+    let (a, b, ca, cb) = two_blocks(&mut c);
+    let third = id_of(&parsed(&c.ok("instance_add", r#"{"part":"f2","name":"C","at":{"origin":[0,50,0]}}"#)));
+    // Grouped, two free parts count as one, in six ways rather than twelve.
+    let state = parsed(&c.ok("assembly_solve", "{}"));
+    assert_eq!(freedom_of(&state), 12.0);
+    let group = parsed(&c.ok("group_add", &format!(r#"{{"instances":[{b},[{third}]]}}"#)));
+    assert_eq!(freedom_of(&group), 6.0);
+    let state = parsed(&c.ok("group_delete", &format!(r#"{{"id":{}}}"#, id_of(&group))));
+    assert_eq!(freedom_of(&state), 12.0);
+    assert!(c.refused("group_delete", &format!(r#"{{"id":{}}}"#, id_of(&group))).contains("no group"));
+
+    // Two turning parts, geared. Adding it moves nothing, and from then on they go by the ratio.
+    let ground = format!(r#"{{"frame":{{"origin":[100,0,0]}}}}"#);
+    let second = id_of(&parsed(&c.ok("connector_add", &format!(r#"{{"instance":{a},"on":{ground}}}"#))));
+    let cc = id_of(&parsed(&c.ok("connector_add", &format!(r#"{{"instance":{third},"on":{{"frame":{{"origin":[0,0,0]}}}}}}"#))));
+    let m1 = id_of(&parsed(&c.ok("mate_add", &format!(r#"{{"type":"revolute","a":{cb},"b":{ca}}}"#))));
+    let m2 = id_of(&parsed(&c.ok("mate_add", &format!(r#"{{"type":"revolute","a":{cc},"b":{second}}}"#))));
+    c.ok("mate_set_value", &format!(r#"{{"id":{m1},"dof":"angle","value":10}}"#));
+    let geared = parsed(&c.ok("relation_add", &format!(r#"{{"type":"gear","ratio":3,"a":{m1},"b":{m2}}}"#)));
+    assert!((mate_value(&geared, m1, "angle") - 10.0).abs() < 1e-5, "{}", geared.to_text());
+    assert!(mate_value(&geared, m2, "angle").abs() < 1e-5, "{}", geared.to_text());
+    assert_eq!(freedom_of(&geared), 1.0);
+    let state = parsed(&c.ok("mate_set_value", &format!(r#"{{"id":{m1},"dof":"angle","value":20}}"#)));
+    assert!((mate_value(&state, m2, "angle") - 30.0).abs() < 1e-4, "{}", state.to_text());
+    // Taken off, they're free of each other.
+    let state = parsed(&c.ok("relation_delete", &format!(r#"{{"id":{}}}"#, id_of(&geared))));
+    assert_eq!(freedom_of(&state), 2.0);
+    assert!(c.refused("relation_delete", &format!(r#"{{"id":{}}}"#, id_of(&geared))).contains("no relation"));
+    // The other way round.
+    let backward = parsed(&c.ok("relation_add", &format!(r#"{{"type":"gear","ratio":3,"a":{m1},"b":{m2},"reverse":true}}"#)));
+    let was = mate_value(&backward, m2, "angle");
+    let state = parsed(&c.ok("mate_set_value", &format!(r#"{{"id":{m1},"dof":"angle","value":30}}"#)));
+    assert!((mate_value(&state, m2, "angle") - (was - 30.0)).abs() < 1e-4, "{}", state.to_text());
+    // A screw is on one mate, named once.
+    c.ok("mate_delete", &format!(r#"{{"id":{m2}}}"#));
+    c.ok("mate_edit", &format!(r#"{{"id":{m1},"type":"cylindrical"}}"#));
+    let screw = parsed(&c.ok("relation_add", &format!(r#"{{"type":"screw","lead":2,"a":{m1}}}"#)));
+    let start = mate_value(&screw, m1, "z");
+    let state = parsed(&c.ok("mate_set_value", &format!(r#"{{"id":{m1},"dof":"angle","value":390}}"#)));
+    let turned = mate_value(&state, m1, "angle") - mate_value(&screw, m1, "angle");
+    assert!((mate_value(&state, m1, "z") - start - turned / 360.0 * 2.0).abs() < 1e-4, "{}", state.to_text());
+}
+
+#[test]
+fn tabs_can_be_renamed_deleted_and_moved_between_through_the_tools() {
+    let dir = folder("tabs");
+    let mut c = Client::start(&dir);
+    let shown = parsed(&c.ok("tab_rename", r#"{"tab":1,"name":"Parts"}"#));
+    assert_eq!(shown.as_array().unwrap()[0].get("name").and_then(Value::as_str), Some("Parts"));
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":1,"dy":1,"dz":1,"mode":"new_body"}}"#);
+    // Deleting the Part Studio being worked on puts it on another, whose features are its own.
+    c.ok("tab_new", r#"{"type":"part_studio","name":"Second"}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":2,"dy":2,"dz":2,"mode":"new_body"},"name":"Mine"}"#);
+    let shown = parsed(&c.ok("tab_delete", r#"{"tab":2}"#));
+    let list = shown.as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].get("selected").and_then(Value::as_bool), Some(true));
+    let bodies = parsed(&c.ok("bodies_list", "{}"));
+    assert_eq!(bodies.as_array().unwrap()[0].get("volume").and_then(Value::as_f64), Some(1.0));
+    // Deleting the selected assembly goes back to the Part Studio.
+    c.ok("tab_new", r#"{"type":"assembly"}"#);
+    let shown = parsed(&c.ok("tab_delete", r#"{"tab":3}"#));
+    assert_eq!(shown.as_array().unwrap()[0].get("selected").and_then(Value::as_bool), Some(true));
+    assert!(c.refused("assembly_solve", "{}").contains("no assembly is selected"));
+    assert!(c.refused("tab_new", r#"{"type":"drawing"}"#).contains("drawing"));
+    assert!(c.refused("tab_rename", r#"{"tab":9,"name":"x"}"#).contains("9"));
+    assert!(c.refused("tab_delete", r#"{"tab":9}"#).contains("9"));
+    // The tools take an assembly by its tab, whichever is selected.
+    c.ok("tab_new", r#"{"type":"assembly","name":"Named"}"#);
+    c.ok("tab_select", r#"{"tab":1}"#);
+    assert_eq!(parsed(&c.ok("assembly_solve", r#"{"tab":4}"#)).get("tab").and_then(Value::as_f64), Some(4.0));
+    assert_eq!(parsed(&c.ok("bom", r#"{"tab":4}"#)).as_array().unwrap().len(), 0);
+    assert!(parsed(&c.ok("interference_check", r#"{"tab":4}"#)).get("interferences").unwrap().as_array().unwrap().is_empty());
+    assert!(c.refused("assembly_solve", r#"{"tab":1}"#).contains("Part Studio"));
+    let shown = parsed(&c.ok("tab_list", "{}"));
+    let names: Vec<&str> = shown.as_array().unwrap().iter().map(|t| t.get("name").and_then(Value::as_str).unwrap()).collect();
+    assert_eq!(names, vec!["Parts", "Named"]);
+}
+
+#[test]
+fn a_whole_pose_an_edge_and_a_view_of_one_part_go_through_the_tools() {
+    let dir = folder("assembly_more");
+    let mut c = Client::start(&dir);
+    let (_, b, _, _) = two_blocks(&mut c);
+    // A whole new pose.
+    let state = parsed(&c.ok("assembly_drag", &format!(r#"{{"instance":{b},"pose":{{"origin":[1,2,3],"z":[1,0,0],"x":[0,1,0]}}}}"#)));
+    let (origin, z, x) = frame_of(&state, "B");
+    near(origin, [1.0, 2.0, 3.0]);
+    near(z, [1.0, 0.0, 0.0]);
+    near(x, [0.0, 1.0, 0.0]);
+    // With no point given, it's the part's own origin that goes there.
+    let state = parsed(&c.ok("assembly_drag", &format!(r#"{{"instance":{b},"to":[4,5,6]}}"#)));
+    near(frame_of(&state, "B").0, [4.0, 5.0, 6.0]);
+    assert!(c.refused("assembly_drag", &format!(r#"{{"instance":{b},"to":[1,2]}}"#)).contains("three numbers"));
+    assert!(c.refused("assembly_drag", &format!(r#"{{"instance":{b},"to":[1,2,3],"pose":{{}}}}"#)).contains("either"));
+
+    // The places on an edge, in where the assembly has the part.
+    let edges = parsed(&c.ok("edges_list", r#"{"body":"f2"}"#));
+    assert!(!edges.as_array().unwrap().is_empty());
+    let faces = parsed(&c.ok("faces_list", r#"{"body":"f2"}"#));
+    let find = |wanted: &[f64; 3]| {
+        let list = faces.as_array().unwrap();
+        let hit = list.iter().find(|f| numbers(f.get("normal").unwrap()).iter().zip(wanted).all(|(a, b)| (a - b).abs() < 1e-9)).expect("a face that way");
+        hit.get("key").and_then(Value::as_str).unwrap().to_string()
+    };
+    let (top, side) = (find(&[0.0, 0.0, 1.0]), find(&[1.0, 0.0, 0.0]));
+    let places = parsed(&c.ok("connector_candidates", &format!(r#"{{"instance":{b},"edge":["{top}","{side}"]}}"#)));
+    let list = places.as_array().unwrap();
+    assert_eq!(list.len(), 3, "{}", places.to_text());
+    assert_eq!(list[0].get("label").and_then(Value::as_str), Some("middle"));
+    // Its middle: at (60, 5, 10) on the part, whose x, y and z axes now point along Y, Z and X, from (4, 5, 6).
+    near(numbers(list[0].get("at").unwrap().get("origin").unwrap()), [4.0 + 10.0, 5.0 + 60.0, 6.0 + 5.0]);
+    let on = list[0].get("on").unwrap().to_text();
+    c.ok("connector_add", &format!(r#"{{"instance":{b},"on":{on}}}"#));
+    assert!(c.refused("connector_candidates", &format!(r#"{{"instance":{b},"edge":["{top}","{top}x"]}}"#)).contains("x"));
+
+    // An STL of it all, and one part on its own, by name, though an assembly's selected.
+    c.ok("export", r#"{"format":"stl","path":"all.stl"}"#);
+    c.ok("export", r#"{"format":"stl","path":"one.stl","body":"f2"}"#);
+    let (all, one) = (std::fs::metadata(dir.join("all.stl")).unwrap().len(), std::fs::metadata(dir.join("one.stl")).unwrap().len());
+    assert_eq!(one, 84 + 12 * 50);
+    assert_eq!(all, 84 + 24 * 50);
+    // A part's STEP on its own is the plain kind, and the whole is an assembly.
+    assert!(!c.ok("export", r#"{"format":"step","body":"f2"}"#).contains("NEXT_ASSEMBLY_USAGE_OCCURRENCE"));
+    assert!(c.ok("export", r#"{"format":"step"}"#).contains("NEXT_ASSEMBLY_USAGE_OCCURRENCE"));
+    // With nothing in it, it says so.
+    c.ok("tab_new", r#"{"type":"assembly"}"#);
+    assert!(c.refused("render", "{}").contains("no parts in this assembly"));
+    assert!(c.refused("export", r#"{"format":"stl","path":"none.stl"}"#).contains("no parts in this assembly"));
+}
+
+#[test]
+fn a_session_gives_an_app_the_parts_and_where_they_go() {
+    let dir = folder("assembly_session");
+    let mut s = coreshape_mcp::Session::new(dir.clone());
+    let call = |s: &mut coreshape_mcp::Session, name: &str, args: &str| {
+        let answer = s.call_safely(name, &json::parse(args).unwrap());
+        assert_eq!(answer.get("isError").and_then(Value::as_bool), Some(false), "{name}: {}", answer.to_text());
+    };
+    assert!(s.solved().unwrap_err().contains("no assembly is selected"));
+    call(&mut s, "feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":2,"dy":3,"dz":4,"mode":"new_body"}}"#);
+    let studio = s.active_tab();
+    call(&mut s, "tab_new", r#"{"type":"assembly"}"#);
+    assert_ne!(s.active_tab(), studio);
+    call(&mut s, "instance_add", r#"{"part":"f1","at":{"origin":[10,0,0]}}"#);
+    let solved = s.solved().unwrap();
+    assert_eq!(solved.placed.len(), 1);
+    assert_eq!(solved.placed[0].at.origin.x, 10.0);
+    assert_eq!(solved.placed[0].body.faces.len(), 6);
+    // Everything's there to be got at, and the Part Studio being worked on is in its place among the tabs for that.
+    let bodies = s.with_project(|p| p.studio_mut(studio).unwrap().rebuild(None).bodies.len());
+    assert_eq!(bodies, 1);
+    assert_eq!(s.document().features().len(), 1);
+    // A panic inside doesn't lose it.
+    let lost = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.with_project(|_| panic!("on purpose"))));
+    assert!(lost.is_err());
+    assert_eq!(s.document().features().len(), 1);
+    assert_eq!(s.with_project(|p| p.studio_mut(studio).unwrap().features().len()), 1);
+}
+
+#[test]
+fn a_file_of_nothing_but_assemblies_still_has_a_part_studio_to_work_on() {
+    let dir = folder("assembly_only");
+    let mut c = Client::start(&dir);
+    let text = r#"{"format":"coreshape-project","version":1,"next_id":5,"tabs":[{"id":4,"name":"Alone","type":"assembly","assembly":{"instances":[],"connectors":[],"mates":[]}}]}"#;
+    c.ok("document_open", &format!(r#"{{"text":{}}}"#, Value::str(text).to_text()));
+    let tabs = parsed(&c.ok("tab_list", "{}"));
+    let list = tabs.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().any(|t| t.get("type").and_then(Value::as_str) == Some("part_studio")));
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":1,"dy":1,"dz":1,"mode":"new_body"}}"#);
+    assert_eq!(parsed(&c.ok("bodies_list", "{}")).as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn what_fails_in_a_sub_assembly_shows_above_it() {
+    let dir = folder("assembly_sub_failing");
+    let mut c = Client::start(&dir);
+    let (_, b, ca, cb) = two_blocks(&mut c);
+    // Two fixed parts in a tab, with a mate that can't be met there.
+    c.ok("instance_edit", &format!(r#"{{"id":{b},"fixed":true,"at":{{"origin":[300,0,0]}}}}"#));
+    c.ok("mate_add", &format!(r#"{{"type":"fastened","a":{ca},"b":{cb}}}"#));
+    c.ok("tab_new", r#"{"type":"assembly","name":"Top"}"#);
+    let sub = id_of(&parsed(&c.ok("instance_add", r#"{"assembly":2,"fixed":true}"#)));
+    let state = parsed(&c.ok("assembly_solve", "{}"));
+    let failing = state.get("failing_in_sub_assemblies").unwrap_or_else(|| panic!("{}", state.to_text())).as_array().unwrap();
+    assert_eq!(failing.len(), 1, "{}", state.to_text());
+    assert!(failing[0].get("failing").and_then(Value::as_str).unwrap().contains("sub-assembly"));
+    // Locked, it's that tab's own business, and nothing's wrong up here.
+    let state = parsed(&c.ok("instance_edit", &format!(r#"{{"id":{sub},"locked":true}}"#)));
+    assert!(state.get("failing_in_sub_assemblies").is_none(), "{}", state.to_text());
+}
+
+#[test]
+fn a_relation_that_cant_be_met_is_named() {
+    let dir = folder("assembly_relation_failing");
+    let mut c = Client::start(&dir);
+    let (a, b, ca, cb) = two_blocks(&mut c);
+    let cc = id_of(&parsed(&c.ok("connector_add", &format!(r#"{{"instance":{a},"on":{{"frame":{{"origin":[0,0,0]}}}}}}"#))));
+    let m1 = id_of(&parsed(&c.ok("mate_add", &format!(r#"{{"type":"revolute","a":{cb},"b":{ca},"limits":[{{"dof":"angle","min":-5,"max":5}}]}}"#))));
+    let third = id_of(&parsed(&c.ok("instance_add", r#"{"part":"f2","name":"C"}"#)));
+    let cd = id_of(&parsed(&c.ok("connector_add", &format!(r#"{{"instance":{third},"on":{{"frame":{{"origin":[50,0,0]}}}}}}"#))));
+    let m2 = id_of(&parsed(&c.ok("mate_add", &format!(r#"{{"type":"revolute","a":{cd},"b":{cc}}}"#))));
+    let tied = parsed(&c.ok("relation_add", &format!(r#"{{"type":"gear","ratio":1,"a":{m1},"b":{m2}}}"#)));
+    let r = id_of(&tied);
+    // Its limit stops the first, so through the gear, the second can't get where it's told.
+    let state = parsed(&c.ok("mate_set_value", &format!(r#"{{"id":{m2},"dof":"angle","value":90}}"#)));
+    assert!(state.get("reached").and_then(Value::as_f64).unwrap() <= 5.0 + 1e-3, "{}", state.to_text());
+    // Fixing the second where it isn't what the gear says makes it impossible, and that's what's named.
+    c.ok("instance_edit", &format!(r#"{{"id":{third},"at":{{"origin":[0,-50,0],"z":[0,0,1],"x":[0,1,0]}},"fixed":true}}"#));
+    c.ok("instance_edit", &format!(r#"{{"id":{b},"fixed":true}}"#));
+    let state = parsed(&c.ok("assembly_solve", "{}"));
+    let named = state.get("failing_relations").unwrap_or_else(|| panic!("{}", state.to_text())).as_array().unwrap();
+    assert_eq!(named[0].as_f64(), Some(r));
+}
+
+#[test]
+fn the_first_end_of_a_new_mate_is_what_moves_through_the_tools() {
+    let dir = folder("assembly_first_end");
+    let mut c = Client::start(&dir);
+    let (a, b, ca, cb) = two_blocks(&mut c);
+    // Neither is held, so it could be either that moves.
+    c.ok("instance_edit", &format!(r#"{{"id":{a},"fixed":false,"at":{{"origin":[7,0,0]}}}}"#));
+    c.ok("instance_edit", &format!(r#"{{"id":{b},"at":{{"origin":[0,30,0]}}}}"#));
+    let state = parsed(&c.ok("mate_add", &format!(r#"{{"type":"fastened","a":{cb},"b":{ca}}}"#)));
+    let (fa, fb) = (frame_of(&state, "A").0, frame_of(&state, "B").0);
+    // The second stays, to within what a preference leaves, and the first has gone to it.
+    assert!((fa[0] - 7.0).abs() < 1e-2 && fa[1].abs() < 1e-2, "{fa:?}");
+    assert!((fb[0] + 43.0).abs() < 1e-2 && fb[1].abs() < 1e-2, "{fb:?}");
+}

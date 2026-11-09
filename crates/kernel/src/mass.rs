@@ -90,6 +90,29 @@ type TracedNodes = std::sync::Arc<Vec<(Vec3, Vec3)>>;
 thread_local! {
     /// Nodes of traced edges for the body being measured, by the edge's address and the rule's length.
     static TRACED: std::cell::RefCell<crate::hash::HashMap<(usize, usize, usize), TracedNodes>> = std::cell::RefCell::new(Default::default());
+    /// Whether traced edges only need to be roughly right, as they do for telling which way a shell faces.
+    static ROUGHLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// How many pieces a traced edge is taken in when it only has to be roughly right, whatever its samples.
+const ROUGH_PIECES: usize = 12;
+
+/// Traces edges roughly until dropped, even if what's being measured panics and is caught further up.
+struct Roughly;
+
+impl Roughly {
+    fn start() -> Roughly {
+        forget_traced_nodes();
+        ROUGHLY.with(|r| r.set(true));
+        Roughly
+    }
+}
+
+impl Drop for Roughly {
+    fn drop(&mut self) {
+        ROUGHLY.with(|r| r.set(false));
+        forget_traced_nodes();
+    }
 }
 
 fn traced_nodes(body: &Body, edge: usize, e: &crate::topo::Edge, rule: &[(f64, f64)]) -> TracedNodes {
@@ -98,6 +121,22 @@ fn traced_nodes(body: &Body, edge: usize, e: &crate::topo::Edge, rule: &[(f64, f
         return found;
     }
     let mut nodes = Vec::new();
+    if ROUGHLY.with(|r| r.get()) {
+        let (a, b) = (e.t0, e.t1);
+        for k in 0..ROUGH_PIECES {
+            let (from, to) = (a + (b - a) * k as f64 / ROUGH_PIECES as f64, a + (b - a) * (k + 1) as f64 / ROUGH_PIECES as f64);
+            let (mid, half) = ((from + to) / 2.0, (to - from) / 2.0);
+            for &(x, weight) in gauss_legendre(2).iter() {
+                let t = mid + half * x;
+                nodes.push((e.curve.eval(t), e.curve.derivative(t) * (weight * half)));
+            }
+        }
+        let nodes = std::sync::Arc::new(nodes);
+        TRACED.with(|t| {
+            t.borrow_mut().insert(key, nodes.clone());
+        });
+        return nodes;
+    }
     // Between its samples and the knot lines it crosses, a traced curve's pieces are short and smooth, so a third
     // of the points does it, and on a free-form surface each point costs enough to be worth saving. The comparison
     // between the two rules still reports what's left.
@@ -491,6 +530,32 @@ pub fn per_face(body: &Body, reference: Vec3) -> Vec<(f64, f64)> {
     forget_traced_nodes();
     out
 }
+
+/// What a shell's volume comes to with its traced edges taken roughly, and what all its faces' parts of that add up to
+/// regardless of sign, which says how much the first can be trusted.
+pub fn rough_shell_volume(body: &Body, shell: usize) -> (f64, f64) {
+    let _roughly = Roughly::start();
+    let reference = body.aabb().center();
+    body.shells[shell].iter().fold((0.0, 0.0), |(sum, parts), &f| {
+        let v = face_integrals_with(body, &body.faces[f], reference, gauss_12()).0;
+        (sum + v, parts + v.abs())
+    })
+}
+
+/// Which way a shell faces: positive if it encloses material, and negative if it's a void. That's the sign of its volume,
+/// which all a reader needs of it, and on a traced curve the exact volume can be most of what reading a file takes. So it
+/// goes by a rough one when that's clear, and otherwise works out the exact one.
+pub fn shell_facing(body: &Body, shell: usize) -> f64 {
+    let (volume, parts) = rough_shell_volume(body, shell);
+    if volume.abs() > CLEARLY * parts {
+        volume
+    } else {
+        shell_volume(body, shell)
+    }
+}
+
+/// How much of a shell's parts have to survive adding up, for a rough volume's sign to be believed.
+const CLEARLY: f64 = 0.1;
 
 /// Signed volume of one shell. Positive encloses material, negative is a void.
 pub fn shell_volume(body: &Body, shell: usize) -> f64 {

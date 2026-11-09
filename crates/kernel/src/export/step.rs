@@ -7,7 +7,7 @@
 
 use crate::error::Result;
 use crate::curve::Curve;
-use crate::mass::shell_volume;
+use crate::mass::shell_facing;
 use crate::math::*;
 use crate::surface::Surface;
 use crate::topo::Body;
@@ -659,7 +659,7 @@ fn write_solids(w: &mut Writer, body: &Body) -> Vec<String> {
 
     // Whether each shell is a void. Void shells' faces point into the void, and STEP
     // wants them written as an ordinary closed shell around the void, turned inside out.
-    let is_void: Vec<bool> = (0..body.shells.len()).map(|s| shell_volume(body, s) < 0.0).collect();
+    let is_void: Vec<bool> = (0..body.shells.len()).map(|s| shell_facing(body, s) < 0.0).collect();
 
     let uses = body.edge_uses();
     let index = crate::boolean::classify::Index::new(body);

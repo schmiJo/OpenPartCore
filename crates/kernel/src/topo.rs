@@ -253,7 +253,7 @@ impl Body {
         } else {
             self
         };
-        (0..body.shells.len()).filter(|&s| crate::mass::shell_volume(body, s) >= 0.0).count()
+        (0..body.shells.len()).filter(|&s| crate::mass::shell_facing(body, s) >= 0.0).count()
     }
 
     /// This body as connected solids, each with the voids inside it, in the order of their first faces. A body of one
@@ -267,7 +267,7 @@ impl Body {
         } else {
             self
         };
-        let volumes: Vec<f64> = (0..body.shells.len()).map(|s| crate::mass::shell_volume(body, s)).collect();
+        let volumes: Vec<f64> = (0..body.shells.len()).map(|s| crate::mass::shell_facing(body, s)).collect();
         let outers: Vec<usize> = (0..body.shells.len()).filter(|&s| volumes[s] >= 0.0).collect();
         if outers.len() < 2 {
             return vec![body.clone()];

@@ -118,6 +118,8 @@ has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
 
 Checked further by `scripts/check_step_import.sh`, which has OpenCASCADE write 31 shapes, then reads each, compares volume and area, meshes it, cuts a box out of it, writes it back, and has OpenCASCADE check the result. 29 are read, watertight, and valid in OpenCASCADE afterwards. Most match to about 1e-13. Four flagged ones are B-spline conversions of a cylinder, a cone, a frustum and a drilled box, where the formulas agree with this and not with OpenCASCADE's own reported volume: this reads 4021.2385965950 for a true 4021.2385965949, where OpenCASCADE reports 4058.05, and 1272.345 for a cone of a true 405 pi. The two refused are a sphere and a torus as B-splines with no edges at all. 3,000 randomly damaged files were each read as a valid solid or refused, with no panics, and everything this kernel writes comes back the same.
 
+**How long a large file takes.** `moon_buggy` used to take about 35 s to read and 30 s to write, nearly all of it working out each shell's exact volume to see its sign. A rough volume decides that now, and the exact one is only for a shell too close to call: 7 of the 396 shells in the 100 files, and the rough sign was never wrong on any of them. It reads in about 5 s and writes in under 2 s, on this desktop with other work running. **Its exact volume still takes about 95 s,** by the same integrals along traced curves on free-form surfaces, and nothing has been done about that. `rear` still takes 12 to 25 s to read, depending on what else is running, and neither has been looked at further.
+
 ## Several bodies
 
 A Part Studio with several parts, as in Onshape: a body is one connected solid, and a feature acts on all of them unless it lists some, its merge scope. [FILE_FORMAT.md](FILE_FORMAT.md#bodies) has the rules, and `Outcome::bodies` has each one in code.
@@ -137,6 +139,8 @@ A Part Studio with several parts, as in Onshape: a body is one connected solid, 
 
 Instances, mate connectors, the eight mates with connectors, limits, groups, gear, rack and pinion, screw and linear relations, sub-assemblies and tabs, as Onshape has them: see [FILE_FORMAT.md](FILE_FORMAT.md#projects-and-assemblies). The solver is checked against closed formulas for a slider-crank over two turns and a four-bar linkage. A STEP assembly goes out with each part once and a use of it for each instance, and OpenCASCADE reads it with every solid valid and where a formula says, with the part names: `scripts/check_step_assembly.sh`.
 
+**Real files.** Every one of the 100 files `read_step` reads from [the two sets above](#step-import) also came in through `Project::import_step` as a Part Studio and an assembly: the same uses, each in exactly the same place with exactly the same volume. Written out as an assembly and read back, each has the same uses and distinct parts, among them `weldment` with 108 uses of 33 parts. OpenCASCADE, given the 17 files with more than one solid, read each export as valid, with every solid matched to the original's. On plain parts such as `as1` the volumes and centers of mass agree to about 1e-14. The worst was `rear`, at 2e-4 in volume and 0.014 mm in center of mass. That isn't the assembly: OpenCASCADE finds the same part of `rear` written as plain bodies within 3e-13 of the assembly's. Four files come back between 1e-6 and 5e-5 different in volume, by this kernel's measure: `rear`, `socks` and two of `ctc_05`. They do the same written as plain bodies, so it's the reader and writer, and it isn't explained yet.
+
 How long the solver takes grows with how many moving parts are joined into one mechanism, measured on this desktop on a chain of revolutes. A drag here moves its end 1 mm:
 
 | Moving parts in one chain | Solve | Drag |
@@ -151,13 +155,15 @@ Parts held by a fastened mate that's already met move as one and cost next to no
 
 - **A drag gets as close as it can, and says how far off that is.** A chain at full stretch can't reach a point beside its end, and `remaining` is the right distance, by formula.
 - **Whether two faces start out facing each other.** A mate brings z axes together, and Onshape's help says the same, with a flip to reverse them. I couldn't find it stated what Onshape picks by default for two faces, so here, nothing is picked for you. Two outward faces end up with one inside the other until flipped.
-- **A sub-assembly's mates keep no turn count.** Its own `turned` is kept in its own tab, so a limit or relation inside one, past a whole turn, is measured from where it starts each time it's solved from above.
 - **A sub-assembly's parts in STEP are flattened** into uses under one top product: the positions and parts are right, and its tree isn't kept. Reading a file keeps uses and part names, and also flattens.
 - **A mate connector's centroid on a curved outline** comes from 64 straight pieces per edge. On a 40 mm plate with a 10 mm hole a test holds it within 0.01 mm, which is fine for a place to put something, and it isn't used for anything measured.
 - **A connector found from a key that covers several faces** uses the first. Keys naming a piece (`#0`) avoid this.
+- **A mate in a sub-assembly can't be given a value from above,** or a relation added on it there. It moves when it's dragged, and its relations go on working. Those are for the tab that has it.
+- **One mechanism is on the page,** a slider-crank. It's a model with an assembly step, moved by its sliders, and one step of a drag took 11 to 37 ms on this desktop, in a browser, with other work running. There's no dragging parts or building an assembly on the page: that's the tools', and an app's.
+- **A crank that can't go round stays on its side of the gap.** With the rod shorter than the crank, it can't cross the angles the rod can't reach, so which stop it comes to depends on where it came from, as with the real thing. It says which.
 - **Interference is by Boolean,** so what a Boolean refuses comes back in `couldnt_tell` rather than as an answer, and every pair whose boxes meet takes a Boolean. Parts that only touch don't count. It's only as fast as the Booleans: an assembly of many complicated parts close together will take a while.
 - **Mates aren't undone by failing.** A mate that can't be met stays there, named, as in Onshape, and the rest still solve.
-- **Drive steps.** Taking a mate to a value goes in steps of 15 degrees, or 1/24 of the assembly's size, stopping at the last that worked. So stopped by a limit or a mechanism's end, it can be up to one step short of it, whereas a drag gets all the way.
+- **Drive steps.** Taking a mate to a value goes in steps of 15 degrees, or 1/24 of the assembly's size, so it stays on its branch. Stopped by a limit or a mechanism's end, it narrows down the place, to about 0.004 of a degree, and says where it got to. A jump between branches at a step can't be told from a move along one, but a test holds a slider-crank to its formula over two turns at five sets of lengths.
 
 ## Swept spline surfaces
 

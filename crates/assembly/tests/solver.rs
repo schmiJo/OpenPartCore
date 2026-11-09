@@ -517,3 +517,49 @@ fn a_thousand_fastened_parts_are_no_trouble() {
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
     assert!(d.remaining < 1e-6, "{d:?}");
 }
+
+#[test]
+fn a_drag_moves_what_it_prefers_and_leaves_the_rest_if_it_can() {
+    // Two free things on a revolute, with its pivot at (10, 0, 0). The second has a tip 10 further on.
+    let start = || Problem {
+        poses: vec![Frame::WORLD, Frame::translation(v3(10.0, 0.0, 0.0))],
+        fixed: vec![false, false],
+        joints: vec![Joint { on_a: Frame::translation(v3(10.0, 0.0, 0.0)), ..joint(0, 1, MateKind::Revolute) }],
+        ..Problem::default()
+    };
+    let goal = Goal::Point { thing: 1, local: v3(10.0, 0.0, 0.0), to: v3(10.0, 10.0, 0.0) };
+    // With no preference, both go some of the way.
+    let mut even = start();
+    let d = drag(&mut even, &goal);
+    assert!(d.remaining < 1e-6, "{d:?}");
+    assert!(even.poses[0].origin.norm() > 0.01, "{:?}", even.poses[0].origin);
+    // With one, the other doesn't move at all, and the tip still gets there by swinging round the pivot.
+    let mut p = start();
+    p.prefer = vec![1];
+    let d = drag(&mut p, &goal);
+    assert!(d.remaining < 1e-6, "{d:?}");
+    assert!(p.poses[0].origin.norm() < 1e-12, "{:?}", p.poses[0].origin);
+    assert!(p.poses[0].x.dist(Vec3::X) < 1e-12, "{:?}", p.poses[0].x);
+    assert!(p.poses[1].origin.dist(v3(10.0, 0.0, 0.0)) < 1e-7, "{:?}", p.poses[1].origin);
+    assert!(d.report.residual <= 1e-8);
+    // Preferring the other one, what's being dragged has to move, and it does.
+    let mut p = start();
+    p.prefer = vec![0];
+    let d = drag(&mut p, &goal);
+    assert!(d.remaining < 1e-6, "{d:?}");
+    assert!(d.report.residual <= 1e-8);
+    // And where that isn't enough, the one not preferred does move, as it has to for the tip to get there at all.
+    let mut p = start();
+    p.prefer = vec![1];
+    let far = Goal::Point { thing: 1, local: v3(10.0, 0.0, 0.0), to: v3(40.0, 0.0, 0.0) };
+    let d = drag(&mut p, &far);
+    assert!(d.remaining < 1e-3, "{d:?}");
+    assert!(d.report.residual <= 1e-8, "{d:?}");
+    // A preference for something fixed changes nothing about that it's fixed.
+    let mut p = start();
+    p.fixed = vec![true, false];
+    p.prefer = vec![0];
+    let d = drag(&mut p, &goal);
+    assert_eq!(p.poses[0], Frame::WORLD);
+    assert!(d.remaining < 1e-6, "{d:?}");
+}

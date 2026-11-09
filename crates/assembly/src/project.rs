@@ -116,6 +116,8 @@ pub fn connector_frame(c: &Connector, body: &Body) -> Result<Frame> {
 }
 
 const FRAC_PI_2: f64 = std::f64::consts::FRAC_PI_2;
+/// How many times a drive halves the last step, to find where something stops it: a 15 degree step comes to under 0.004.
+const STOP_HALVINGS: usize = 12;
 
 /// What came out of flattening an assembly into things that move.
 #[derive(Default)]
@@ -324,12 +326,13 @@ impl Project {
         }
         // Its mates and groups, unless it's inside a locked sub-assembly, where they've had their say already.
         if walk.locked.is_none() {
-            self.add_joints(here, &walk.prefix, is_top, flat);
+            self.add_joints(here, walk, is_top, flat);
         }
         Ok(())
     }
 
-    fn add_joints(&self, here: &Assembly, prefix: &[u32], is_top: bool, flat: &mut Flat) {
+    fn add_joints(&self, here: &Assembly, walk: &Walk, is_top: bool, flat: &mut Flat) {
+        let prefix = walk.prefix.as_slice();
         let find = |flat: &Flat, inner: &[u32]| -> Option<usize> {
             let path: Vec<u32> = prefix.iter().chain(inner).copied().collect();
             flat.placed.iter().position(|p| p.path == path)
@@ -369,7 +372,11 @@ impl Project {
                     continue;
                 }
             };
-            let joint = mate_joint(mate, a, b, fa, fb);
+            let mut joint = mate_joint(mate, a, b, fa, fb);
+            // How far a sub-assembly's mate has turned here is kept here, and its own tab's says nothing about that.
+            if let Some(turned) = walk.top.moved_turns.get(&(prefix.to_vec(), mate.id)) {
+                joint.turned = *turned;
+            }
             joint_of.insert(mate.id, flat.joints.len());
             flat.joints.push(joint);
             flat.joint_mates.push((mate.id, prefix.to_vec()));
@@ -435,11 +442,13 @@ impl Project {
                 None => keep(&flat.placed[i].path, now, flat.top_at[i]),
             }
         }
-        for (joint, (mate, prefix)) in problem.joints.iter().zip(&flat.joint_mates) {
+        for ((joint, was), (mate, prefix)) in problem.joints.iter().zip(&flat.joints).zip(&flat.joint_mates) {
             if prefix.is_empty() {
                 if let Ok(m) = a.mate_mut(*mate) {
                     m.turned = joint.turned;
                 }
+            } else if joint.turned != was.turned {
+                a.moved_turns.insert((prefix.clone(), *mate), joint.turned);
             }
         }
         Ok(())
@@ -535,19 +544,41 @@ impl Project {
         // Steps of a twelfth of a turn, or the same share of the distance's own size.
         let span = (want - start).abs();
         let count = if dof == Dof::Angle { (span / (TAU / 24.0)).ceil() } else { (span / (solver::problem_size(&problem) / 24.0).max(1e-9)).ceil() }.clamp(1.0, 2000.0) as usize;
+        // A mate that was failing already, elsewhere, says nothing about whether this one can go on. One that starts to, or a
+        // relation that does, is what stops it: left to itself the solver would drop a gear to get where it's told.
+        let (known, known_relations) = (first.failing.clone(), first.failing_couplings.clone());
+        let holds = |step: &Report| step.failing.iter().all(|f| known.contains(f)) && step.failing_couplings.iter().all(|f| known_relations.contains(f));
         let mut report = first;
+        let mut reached = start;
         for k in 1..=count {
             let at = start + (want - start) * k as f64 / count as f64;
             let before = problem.clone();
             problem.drives = vec![Drive { joint, dof, value: at }];
             let step = solver::solve(&mut problem);
             problem.drives.clear();
-            if !step.failing.is_empty() {
-                // As far as it goes.
-                problem = before;
-                break;
+            if holds(&step) {
+                report = step;
+                reached = at;
+                continue;
             }
-            report = step;
+            // As far as it goes, which is somewhere between the last that worked and this.
+            problem = before;
+            let (mut good, mut bad) = (reached, at);
+            for _ in 0..STOP_HALVINGS {
+                let middle = (good + bad) / 2.0;
+                let before = problem.clone();
+                problem.drives = vec![Drive { joint, dof, value: middle }];
+                let step = solver::solve(&mut problem);
+                problem.drives.clear();
+                if holds(&step) {
+                    report = step;
+                    good = middle;
+                } else {
+                    problem = before;
+                    bad = middle;
+                }
+            }
+            break;
         }
         problem.drives.clear();
         self.finish(id, flat, &problem, report, None)

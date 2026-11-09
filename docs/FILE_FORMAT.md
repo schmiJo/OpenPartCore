@@ -82,6 +82,7 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `fillet` | `edges`, `radius`, `propagate` (default true: follow tangent neighbours) |
 | `chamfer` | `edges`, `distance`, `propagate` (default true: follow tangent neighbours) |
 | `import_step` | `text`: a whole STEP file, kept in the document, and `mode`. Its faces are named by their place in the file: `f3:side.0` is the first. A wide face cut into pieces on the way in keeps one name for them all. An assembly's parts are placed where it puts them. With `mode` `new_body`, which is what an assembly wants, each solid is a part of its own. With `add`, those that touch are merged by Boolean, which can fail where they meet, and says to use `new_body`. A file it can't represent fails the feature, and says what's in the way. |
+| `import_step_parts` | `text`: a whole STEP file, kept in the document. Each distinct solid in it comes in once as a new body, in its own coordinates, for an assembly to use, however many times the file uses it. Its faces are named as for `import_step` |
 | `transform` | `motion`, the `bodies` to move, and `copy` (default false), which leaves them and adds moved copies as new parts. `motion` is `{"type": "translate", "by": [x, y, z]}`, `{"type": "rotate", "point": [x, y, z], "axis": [x, y, z], "degrees": d}` or `{"type": "frames", "from": placement, "to": placement}` |
 | `delete_bodies` | The `bodies` to delete, which it has to name |
 | `boolean` | `operation`: `union`, `subtract` or `intersect`, `tools`: a list of bodies, and `keep_tools` (default false). `subtract` cuts the tools from the `bodies`, its targets, which it has to name. The others take the `bodies` and `tools` together, and what's left has the first one's name. Bodies that don't meet are refused |
@@ -209,7 +210,7 @@ A project is an Onshape document: tabs of Part Studios and assemblies. **A proje
 ] }
 ```
 
-An assembly never changes a part. It holds uses of parts and where they are, so a part changed in its Part Studio changes in every assembly, what's mated to it follows, and nothing about moving an instance goes in a history.
+An assembly never changes a part. It holds uses of parts and where they are, so a part changed in its Part Studio changes in every assembly, what's mated to it follows, and nothing about moving an instance goes in a history. It can also have an `app`, kept for an app as a document's is.
 
 | Thing | Fields |
 |---|---|
@@ -225,7 +226,7 @@ An assembly never changes a part. It holds uses of parts and where they are, so 
 |---|---|
 | `{"face": "f1:end"}` | The centroid of a flat face, with z straight out of it, or the middle of a round face's axis, with z along it. `"point"` can also be `axis_start`, `axis_end` or `apex` |
 | `{"face": "f1:end", "near": [x, y, z]}` | The nearest of the face's corners, edge middles and arc centers |
-| `{"edge": ["f1:end", "f1:side.0"], "point": "middle"}` | On the edge between two faces: `middle`, `start`, `end`, or `center` for a round one |
+| `{"edge": ["f1:end", "f1:side.0"], "point": "middle"}` | On the edge between two faces: `middle`, `start`, `end`, or `center` for a round one. Its z runs along a straight edge, and along the axis of a round one |
 | `{"frame": {"origin", "z", "x"}}` | Just a place, in the part's own coordinates, which follows nothing |
 
 If what it's found from has gone, that mate fails, says which face, and the rest of the assembly still solves. The first of a key's faces is used if it covers several.
@@ -256,7 +257,7 @@ Two faces' z axes both point out of them, so two faces need `flip` to lie agains
 
 `offset` is set when it's added, from where they are, so that adding it moves nothing.
 
-**A sub-assembly** is an instance of an assembly tab, and as in Onshape its mates go on working in the assembly above, so its parts can move there. Where they've got to is kept in that assembly's `moved`, by path, relative to the top-level instance they're in, so moving the instance takes them along. `fixed` counts only in the assembly it's set in. `locked` keeps the parts as their own tab solves them, moving as one. A connector reaches into a sub-assembly by a longer `instance` list, which has to go all the way down to a part.
+**A sub-assembly** is an instance of an assembly tab, and as in Onshape its mates go on working in the assembly above, so its parts can move there. Where they've got to is kept in that assembly's `moved`, by path, relative to the top-level instance they're in, so moving the instance takes them along, and how far its mates have turned there in `moved_turns`, by the sub-assembly's path and the mate's id. `fixed` counts only in the assembly it's set in. `locked` keeps the parts as their own tab solves them, moving as one. A connector reaches into a sub-assembly by a longer `instance` list, which has to go all the way down to a part.
 
 ## Rules a reader enforces
 
