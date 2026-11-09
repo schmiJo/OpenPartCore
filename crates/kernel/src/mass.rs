@@ -327,6 +327,24 @@ fn face_integrals_with(body: &Body, face: &Face, reference: Vec3, along_edges: &
             let x_ref = (lo + hi) / 2.0;
             let knots = patch.chart_breaks_x();
             let rule = gauss_legendre(patch.quadrature_points());
+            let inner = |at: Vec2| -> (f64, f64) {
+                let (from, to) = (x_ref.min(at.x), x_ref.max(at.x));
+                let sense = if at.x >= x_ref { 1.0 } else { -1.0 };
+                let mut stops = vec![from];
+                stops.extend(knots.iter().copied().filter(|k| *k > from && *k < to));
+                stops.push(to);
+                let (mut h_flux, mut h_area) = (0.0, 0.0);
+                for w in stops.windows(2) {
+                    let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
+                    for &(x, weight) in &rule {
+                        let (q, sx, sy) = surface.chart_derivs(chart, v2(mid + half * x, at.y));
+                        let n = sx.cross(sy);
+                        h_flux += weight * half * (q - reference).dot(n);
+                        h_area += weight * half * n.norm();
+                    }
+                }
+                (sense * h_flux, sense * h_area)
+            };
             let (mut flux, mut area) = (0.0, 0.0);
             for lp in &face.loops {
                 for &c in lp {
@@ -335,24 +353,42 @@ fn face_integrals_with(body: &Body, face: &Face, reference: Vec3, along_edges: &
                         if duv.y == 0.0 {
                             return;
                         }
-                        let (from, to) = (x_ref.min(uv.x), x_ref.max(uv.x));
-                        let sense = if uv.x >= x_ref { 1.0 } else { -1.0 };
-                        let mut stops = vec![from];
-                        stops.extend(knots.iter().copied().filter(|k| *k > from && *k < to));
-                        stops.push(to);
-                        let (mut h_flux, mut h_area) = (0.0, 0.0);
-                        for w in stops.windows(2) {
-                            let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
-                            for &(x, weight) in &rule {
-                                let (q, sx, sy) = surface.chart_derivs(chart, v2(mid + half * x, uv.y));
-                                let n = sx.cross(sy);
-                                h_flux += weight * half * (q - reference).dot(n);
-                                h_area += weight * half * n.norm();
-                            }
-                        }
-                        flux += sense * h_flux * duv.y;
-                        area += sense * h_area * duv.y;
+                        let (h_flux, h_area) = inner(uv);
+                        flux += h_flux * duv.y;
+                        area += h_area * duv.y;
                     });
+                }
+                // Where a side of the chart is all one point in space, a tip, no edge runs along that side, but the
+                // region's boundary in the chart does all the same, and it's owed its share. Without this a cone-like
+                // face was short by whatever lay between that side and the reference: a quarter of it.
+                for (i, &c) in lp.iter().enumerate() {
+                    let next = lp[(i + 1) % lp.len()];
+                    let tip = body.coedge_point(next, 0.0);
+                    let at = |c: Coedge, f: f64| surface.to_chart(chart, body.coedge_point(c, f));
+                    let (arrive, leave) = (at(c, 1.0 - 1e-5), at(next, 1e-5));
+                    let side = surface.to_chart(chart, tip).x;
+                    let span = (leave.y - arrive.y).abs();
+                    let on_side = (arrive.x - side).abs() < 1e-2 * span.max(1e-9) && (leave.x - side).abs() < 1e-2 * span.max(1e-9);
+                    if !on_side || span <= 1e-3 * (arrive.x - leave.x).abs().max(1e-6) {
+                        continue;
+                    }
+                    let all_one_point = (1..8).all(|k| surface.from_chart(chart, v2(side, arrive.y + (leave.y - arrive.y) * k as f64 / 8.0)).dist(tip) <= 1e-5);
+                    if !all_one_point {
+                        continue;
+                    }
+                    let (from, to) = (arrive.y.min(leave.y), arrive.y.max(leave.y));
+                    let mut stops = vec![from];
+                    stops.extend(patch.chart_breaks_y().into_iter().filter(|k| *k > from && *k < to));
+                    stops.push(to);
+                    let sense = if leave.y > arrive.y { 1.0 } else { -1.0 };
+                    for w in stops.windows(2) {
+                        let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
+                        for &(y, weight) in along_edges {
+                            let (h_flux, h_area) = inner(v2(side, mid + half * y));
+                            flux += sense * h_flux * weight * half;
+                            area += sense * h_area * weight * half;
+                        }
+                    }
                 }
             }
             (flux / 3.0, area * sign)

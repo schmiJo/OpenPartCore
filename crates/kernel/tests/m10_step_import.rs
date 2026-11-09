@@ -144,8 +144,6 @@ fn bad_files_are_refused_with_a_reason() {
     assert!(read_step("not a step file", 1).is_err());
     assert!(read_step("ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n", 1).unwrap_err().to_string().contains("no solids"));
     assert!(read_step("ISO-10303-21;\nDATA;\n#1=MANIFOLD_SOLID_BREP('',#2);\nENDSEC;", 1).is_err());
-    let assembly = SEAMED_CYLINDER.replace("#38=MANIFOLD", "#39=NEXT_ASSEMBLY_USAGE_OCCURRENCE('','','',#40,#41,$);\n#38=MANIFOLD");
-    assert!(read_step(&assembly, 1).unwrap_err().to_string().contains("assembly"));
     // A vertex far off its surfaces isn't rounding.
     let off = SEAMED_CYLINDER.replace("#2=CARTESIAN_POINT('',(5.,0.,0.));", "#2=CARTESIAN_POINT('',(5.5,0.,0.));");
     assert!(read_step(&off, 1).is_err());

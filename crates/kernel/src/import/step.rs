@@ -23,7 +23,7 @@ use crate::spline::{Hom, PlaneCurve, Spline};
 use crate::surface::Surface;
 use crate::topo::{Body, Coedge, Edge, FaceTag};
 use crate::validate::validate;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 // ----- The file's syntax -----
@@ -185,12 +185,12 @@ fn parse(text: &str) -> Result<BTreeMap<usize, Instance>> {
                         if name.is_empty() {
                             return Err(bad(format!("a bad complex instance at byte {}", scan.at)));
                         }
-                        parts.push((name, scan.arguments(0)?));
+                        parts.push((long_name(name), scan.arguments(0)?));
                     }
                     scan.at += 1;
                 } else {
                     let name = scan.word();
-                    parts.push((name, scan.arguments(0)?));
+                    parts.push((long_name(name), scan.arguments(0)?));
                 }
                 scan.eat(b';')?;
                 out.insert(id, parts);
@@ -205,6 +205,36 @@ fn parse(text: &str) -> Result<BTreeMap<usize, Instance>> {
 }
 
 // ----- Reading instances -----
+
+/// The long name for an entity's short one. The format allows either, and CATIA V4 for one writes short names.
+fn long_name(name: String) -> String {
+    const SHORT: &[(&str, &str)] = &[
+        ("ABSR", "ADVANCED_BREP_SHAPE_REPRESENTATION"), ("ADVFC", "ADVANCED_FACE"), ("A2PL3D", "AXIS2_PLACEMENT_3D"), ("BSPCR", "B_SPLINE_CURVE"),
+        ("BSCWK", "B_SPLINE_CURVE_WITH_KNOTS"), ("BSPSR", "B_SPLINE_SURFACE"), ("BSSWK", "B_SPLINE_SURFACE_WITH_KNOTS"), ("BZRCRV", "BEZIER_CURVE"),
+        ("BZRSRF", "BEZIER_SURFACE"), ("BNDCR", "BOUNDARY_CURVE"), ("BNDCRV", "BOUNDED_CURVE"), ("BNDSRF", "BOUNDED_SURFACE"), ("BRWTVD", "BREP_WITH_VOIDS"),
+        ("CRTPNT", "CARTESIAN_POINT"), ("CLSSHL", "CLOSED_SHELL"), ("CMPCRV", "COMPOSITE_CURVE"), ("CMCRSG", "COMPOSITE_CURVE_SEGMENT"),
+        ("CNCSRF", "CONICAL_SURFACE"), ("CNFCST", "CONNECTED_FACE_SET"), ("CDSR", "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"), ("CNBSUN", "CONVERSION_BASED_UNIT"),
+        ("CRBNSR", "CURVE_BOUNDED_SURFACE"), ("CYLSRF", "CYLINDRICAL_SURFACE"), ("DGTRSR", "DEGENERATE_TOROIDAL_SURFACE"), ("DMNEXP", "DIMENSIONAL_EXPONENTS"),
+        ("DRCTN", "DIRECTION"), ("EDGCRV", "EDGE_CURVE"), ("EDGLP", "EDGE_LOOP"), ("ELLPS", "ELLIPSE"), ("FCBND", "FACE_BOUND"), ("FCOTBN", "FACE_OUTER_BOUND"),
+        ("FCSRF", "FACE_SURFACE"), ("FCTBR", "FACETED_BREP"), ("FBSR", "FACETED_BREP_SHAPE_REPRESENTATION"), ("GBSSR", "GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION"),
+        ("GMCRST", "GEOMETRIC_CURVE_SET"), ("GMRPCN", "GEOMETRIC_REPRESENTATION_CONTEXT"), ("GMTST", "GEOMETRIC_SET"), ("GUAC", "GLOBAL_UNIT_ASSIGNED_CONTEXT"),
+        ("HYPRBL", "HYPERBOLA"), ("INTCRV", "INTERSECTION_CURVE"), ("ITDFTR", "ITEM_DEFINED_TRANSFORMATION"), ("LMWU", "LENGTH_MEASURE_WITH_UNIT"),
+        ("LNGUNT", "LENGTH_UNIT"), ("MNSLBR", "MANIFOLD_SOLID_BREP"), ("MPPITM", "MAPPED_ITEM"), ("NMDUNT", "NAMED_UNIT"), ("NAUO", "NEXT_ASSEMBLY_USAGE_OCCURRENCE"),
+        ("OFFSRF", "OFFSET_SURFACE"), ("OPNSHL", "OPEN_SHELL"), ("ORCLSH", "ORIENTED_CLOSED_SHELL"), ("ORNEDG", "ORIENTED_EDGE"), ("ORNFC", "ORIENTED_FACE"),
+        ("PAMWU", "PLANE_ANGLE_MEASURE_WITH_UNIT"), ("PLANUN", "PLANE_ANGLE_UNIT"), ("PLYLN", "POLYLINE"), ("PLYLP", "POLY_LOOP"), ("PRBL", "PARABOLA"),
+        ("PRDDFN", "PRODUCT_DEFINITION"), ("PRDFSH", "PRODUCT_DEFINITION_SHAPE"), ("QSUNCR", "QUASI_UNIFORM_CURVE"), ("QSUNSR", "QUASI_UNIFORM_SURFACE"),
+        ("RBSC", "RATIONAL_B_SPLINE_CURVE"), ("RBSS", "RATIONAL_B_SPLINE_SURFACE"), ("RCTRSR", "RECTANGULAR_TRIMMED_SURFACE"), ("RPRSNT", "REPRESENTATION"),
+        ("RPRCNT", "REPRESENTATION_CONTEXT"), ("RPRMP", "REPRESENTATION_MAP"), ("RPRRLT", "REPRESENTATION_RELATIONSHIP"), ("RRWT", "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION"),
+        ("SMCRV", "SEAM_CURVE"), ("SHDFRP", "SHAPE_DEFINITION_REPRESENTATION"), ("SHPRPR", "SHAPE_REPRESENTATION"), ("SHRPRL", "SHAPE_REPRESENTATION_RELATIONSHIP"),
+        ("SBSM", "SHELL_BASED_SURFACE_MODEL"), ("SUNT", "SI_UNIT"), ("SLANUN", "SOLID_ANGLE_UNIT"), ("SPHSRF", "SPHERICAL_SURFACE"), ("SRFCRV", "SURFACE_CURVE"),
+        ("SOLE", "SURFACE_OF_LINEAR_EXTRUSION"), ("SROFRV", "SURFACE_OF_REVOLUTION"), ("TRDSRF", "TOROIDAL_SURFACE"), ("TRMCRV", "TRIMMED_CURVE"),
+        ("UMWU", "UNCERTAINTY_MEASURE_WITH_UNIT"), ("UNFCRV", "UNIFORM_CURVE"), ("UNFSRF", "UNIFORM_SURFACE"), ("VRTLP", "VERTEX_LOOP"), ("VRTPNT", "VERTEX_POINT"),
+    ];
+    match SHORT.iter().find(|(s, _)| *s == name) {
+        Some((_, long)) => (*long).to_string(),
+        None => name,
+    }
+}
 
 struct File {
     items: BTreeMap<usize, Instance>,
@@ -295,22 +325,73 @@ impl File {
         Ok(Frame::new(origin, z, x))
     }
 
+    /// Whether this is a B-spline curve of any of the forms STEP has.
+    fn is_spline(&self, id: usize) -> bool {
+        ["B_SPLINE_CURVE", "B_SPLINE_CURVE_WITH_KNOTS", "QUASI_UNIFORM_CURVE", "UNIFORM_CURVE", "BEZIER_CURVE"].iter().any(|n| self.has(id, n))
+    }
+
+    fn is_patch(&self, id: usize) -> bool {
+        ["B_SPLINE_SURFACE", "B_SPLINE_SURFACE_WITH_KNOTS", "QUASI_UNIFORM_SURFACE", "UNIFORM_SURFACE", "BEZIER_SURFACE"].iter().any(|n| self.has(id, n))
+    }
+
+    /// The knots of a spline form that doesn't list them, from how many control points it has along a direction.
+    fn implied_knots(form: &str, degree: usize, count: usize) -> Result<Vec<f64>> {
+        if count <= degree {
+            return Err(bad(format!("a {form} of degree {degree} with {count} control points")));
+        }
+        Ok(match form {
+            // Uniform inside, and clamped at both ends.
+            "QUASI" => {
+                let inner = count - degree;
+                let mut k = vec![0.0; degree + 1];
+                k.extend((1..inner).map(|i| i as f64));
+                k.extend(vec![inner as f64; degree + 1]);
+                k
+            }
+            // Uniform all the way, which the unclamped case below takes the defined part of.
+            "UNIFORM" => (0..count + degree + 1).map(|i| i as f64).collect(),
+            // Pieces end to end, sharing their end points.
+            _ => {
+                let pieces = (count - 1) / degree;
+                if pieces * degree != count - 1 {
+                    return Err(bad(format!("a Bezier form of degree {degree} with {count} control points")));
+                }
+                let mut k = vec![0.0; degree + 1];
+                for i in 1..pieces {
+                    k.extend(vec![i as f64; degree]);
+                }
+                k.extend(vec![pieces as f64; degree + 1]);
+                k
+            }
+        })
+    }
+
     fn spline(&self, id: usize) -> Result<Spline> {
-        // Plain, or a complex instance with the same data spread over its parts.
+        // Plain, or a complex instance with the same data spread over its parts. In a plain one, the name comes first.
+        let plain = ["B_SPLINE_CURVE_WITH_KNOTS", "QUASI_UNIFORM_CURVE", "UNIFORM_CURVE", "BEZIER_CURVE"];
         let (degree, poles) = if let Ok(a) = self.part(id, "B_SPLINE_CURVE") {
             (File::number(a.first())?, a.get(1))
         } else {
-            let a = self.part(id, "B_SPLINE_CURVE_WITH_KNOTS")?;
+            let a = plain.iter().find_map(|n| self.part(id, n).ok()).ok_or_else(|| bad(format!("#{id} should be a B-spline curve")))?;
             (File::number(a.get(1))?, a.get(2))
         };
-        let knots_part = self.part(id, "B_SPLINE_CURVE_WITH_KNOTS")?;
-        let offset = if self.has(id, "B_SPLINE_CURVE") { 0 } else { 6 };
-        let mults = File::numbers(knots_part.get(offset))?;
-        let values = File::numbers(knots_part.get(offset + 1))?;
-        let mut knots = Vec::new();
-        for (m, k) in mults.iter().zip(&values) {
-            knots.extend(std::iter::repeat_n(*k, *m as usize));
-        }
+        let count = File::list(poles)?.len();
+        let knots = if let Ok(knots_part) = self.part(id, "B_SPLINE_CURVE_WITH_KNOTS") {
+            let offset = if self.has(id, "B_SPLINE_CURVE") { 0 } else { 6 };
+            let mults = File::numbers(knots_part.get(offset))?;
+            let values = File::numbers(knots_part.get(offset + 1))?;
+            let mut knots = Vec::new();
+            for (m, k) in mults.iter().zip(&values) {
+                knots.extend(std::iter::repeat_n(*k, *m as usize));
+            }
+            knots
+        } else if self.has(id, "QUASI_UNIFORM_CURVE") {
+            File::implied_knots("QUASI", degree as usize, count)?
+        } else if self.has(id, "UNIFORM_CURVE") {
+            File::implied_knots("UNIFORM", degree as usize, count)?
+        } else {
+            File::implied_knots("BEZIER", degree as usize, count)?
+        };
         let points: Vec<Vec3> = File::list(poles)?.iter().map(|p| self.point(File::id(Some(p))?)).collect::<Result<_>>()?;
         let weights = match self.part(id, "RATIONAL_B_SPLINE_CURVE") {
             Ok(a) => File::numbers(a.first())?,
@@ -331,13 +412,14 @@ impl File {
 impl File {
     /// A B-spline surface, in its plain form or spread over a complex instance's parts.
     fn patch(&self, id: usize) -> Result<Patch> {
-        let knots_part = self.part(id, "B_SPLINE_SURFACE_WITH_KNOTS")?;
         let complex = self.has(id, "B_SPLINE_SURFACE");
-        let (du, dv, rows, offset) = if complex {
+        let plain = ["B_SPLINE_SURFACE_WITH_KNOTS", "QUASI_UNIFORM_SURFACE", "UNIFORM_SURFACE", "BEZIER_SURFACE"];
+        let (du, dv, rows) = if complex {
             let a = self.part(id, "B_SPLINE_SURFACE")?;
-            (File::number(a.first())?, File::number(a.get(1))?, a.get(2), 0)
+            (File::number(a.first())?, File::number(a.get(1))?, a.get(2))
         } else {
-            (File::number(knots_part.get(1))?, File::number(knots_part.get(2))?, knots_part.get(3), 8)
+            let a = plain.iter().find_map(|n| self.part(id, n).ok()).ok_or_else(|| bad(format!("#{id} should be a B-spline surface")))?;
+            (File::number(a.get(1))?, File::number(a.get(2))?, a.get(3))
         };
         let expand = |mults: Vec<f64>, values: Vec<f64>| -> Vec<f64> {
             let mut out = Vec::new();
@@ -346,8 +428,26 @@ impl File {
             }
             out
         };
-        let knots_u = expand(File::numbers(knots_part.get(offset))?, File::numbers(knots_part.get(offset + 2))?);
-        let knots_v = expand(File::numbers(knots_part.get(offset + 1))?, File::numbers(knots_part.get(offset + 3))?);
+        let (count_u, count_v) = {
+            let list = File::list(rows)?;
+            (list.len(), File::list(list.first())?.len())
+        };
+        let (knots_u, knots_v) = if let Ok(knots_part) = self.part(id, "B_SPLINE_SURFACE_WITH_KNOTS") {
+            let offset = if complex { 0 } else { 8 };
+            (
+                expand(File::numbers(knots_part.get(offset))?, File::numbers(knots_part.get(offset + 2))?),
+                expand(File::numbers(knots_part.get(offset + 1))?, File::numbers(knots_part.get(offset + 3))?),
+            )
+        } else {
+            let form = if self.has(id, "QUASI_UNIFORM_SURFACE") {
+                "QUASI"
+            } else if self.has(id, "UNIFORM_SURFACE") {
+                "UNIFORM"
+            } else {
+                "BEZIER"
+            };
+            (File::implied_knots(form, du as usize, count_u)?, File::implied_knots(form, dv as usize, count_v)?)
+        };
         let rows = File::list(rows)?;
         let nu = rows.len();
         let mut points = Vec::new();
@@ -389,9 +489,90 @@ impl File {
         Patch::new((du, dv), (knots_u, knots_v), (nu, nv), points, weights)
     }
 
+    /// A circle swept around an axis in its own plane, as the torus or sphere it makes. Nothing if it isn't one. The
+    /// second value is as for
+    /// `revolved_line`: a circle running counter-clockwise, seen with distance from the axis to the right and height
+    /// upward, has the normal to its right pointing away from the tube's centre, which is a torus's own.
+    fn revolved_circle(&self, id: usize, origin: Vec3, z: Vec3) -> Result<Option<(Surface, bool)>> {
+        let (mut circle, mut sense, mut middle) = (id, true, None);
+        if self.name(id) == "TRIMMED_CURVE" {
+            let a = self.part(id, "TRIMMED_CURVE")?;
+            circle = File::id(a.get(1))?;
+            sense = File::truth(a.get(4)).unwrap_or(true);
+            if let (Ok(t0), Ok(t1)) = (File::numbers(a.get(2)), File::numbers(a.get(3))) {
+                if let (Some(t0), Some(t1)) = (t0.first(), t1.first()) {
+                    let (a0, mut a1) = (t0 * self.angle, t1 * self.angle);
+                    while a1 <= a0 {
+                        a1 += TAU;
+                    }
+                    // More than a turn is degrees, whatever unit the file declares.
+                    middle = Some(if a1 - a0 < TAU { (a0 + a1) / 2.0 } else { (t0 + t1) / 2.0 * PI / 180.0 });
+                }
+            }
+        }
+        if self.name(circle) != "CIRCLE" {
+            return Ok(None);
+        }
+        let c = self.part(circle, "CIRCLE")?;
+        let frame = self.placement(File::id(c.get(1))?)?;
+        let r = File::number(c.get(2))? * self.length;
+        let to_centre = frame.origin - origin;
+        if frame.z.dot(z).abs() > 1e-9 || to_centre.dot(frame.z).abs() > TOL || r <= TOL {
+            return Ok(None);
+        }
+        let height = to_centre.dot(z);
+        let radial = to_centre - z * height;
+        let centre = origin + z * height;
+        let runs_ccw = |out: Vec3| (frame.z.dot(out.cross(z)) > 0.0) == sense;
+        if radial.norm() <= TOL {
+            // On the axis: its two sides sweep the sphere with opposite normals, so the side the arc's on decides.
+            let at = middle.map(|m: f64| frame.x * m.cos() + frame.y * m.sin());
+            let out = at.map(|p| p - z * p.dot(z)).filter(|d| d.norm() > 1e-6);
+            let against = out.is_some_and(|d| !runs_ccw(d.normalized()));
+            let x = z.any_perpendicular();
+            return Ok(Some((Surface::Sphere { frame: Frame::new(centre, z, x), radius: r }, against)));
+        }
+        let major = radial.norm();
+        let out = radial / major;
+        // The axis passing through the tube leaves two shapes, and the side of it the arc's on says which: the apple
+        // around the centre, or the lemon across the axis from it.
+        let at = middle.map(|m: f64| frame.origin + (frame.x * m.cos() + frame.y * m.sin()) * r);
+        let across = major <= r && at.is_some_and(|p| (p - centre).dot(out) < 0.0);
+        let (signed, out) = if across { (-major, -out) } else { (major, out) };
+        Ok(Some((Surface::Torus { frame: Frame::new(centre, z, out), major: signed, minor: r }, !runs_ccw(out))))
+    }
+
     /// The curve a swept surface is swept from, as a spline: a conic is exactly one.
     fn basis_curve(&self, id: usize) -> Result<Spline> {
         match self.name(id) {
+            // Part of another curve. Its ends matter for a line, which has none of its own, and for an arc.
+            "TRIMMED_CURVE" => {
+                let a = self.part(id, "TRIMMED_CURVE")?;
+                let basis = File::id(a.get(1))?;
+                let ends = (File::numbers(a.get(2)), File::numbers(a.get(3)));
+                match (self.name(basis), ends) {
+                    ("LINE", (Ok(t0), Ok(t1))) if !t0.is_empty() && !t1.is_empty() => {
+                        let line = self.part(basis, "LINE")?;
+                        let origin = self.point(File::id(line.get(1))?)?;
+                        let v = self.part(File::id(line.get(2))?, "VECTOR")?;
+                        let along = self.direction(File::id(v.get(1))?)? * (File::number(v.get(2))? * self.length);
+                        let (p, q) = (origin + along * t0[0], origin + along * t1[0]);
+                        Spline::new(1, vec![0.0, 0.0, 1.0, 1.0], vec![p, q], vec![1.0, 1.0])
+                    }
+                    ("CIRCLE", (Ok(t0), Ok(t1))) if !t0.is_empty() && !t1.is_empty() => {
+                        let c = self.part(basis, "CIRCLE")?;
+                        let frame = self.placement(File::id(c.get(1))?)?;
+                        let r = File::number(c.get(2))? * self.length;
+                        let (a0, mut a1) = (t0[0] * self.angle, t1[0] * self.angle);
+                        while a1 <= a0 {
+                            a1 += TAU;
+                        }
+                        // Some writers give these in degrees whatever unit they declare. More than a turn is a turn.
+                        Spline::ellipse_arc(frame.origin, frame.x, frame.y, r, r, a0, a1.min(a0 + TAU))
+                    }
+                    _ => self.basis_curve(basis),
+                }
+            }
             "CIRCLE" => {
                 let a = self.part(id, "CIRCLE")?;
                 let frame = self.placement(File::id(a.get(1))?)?;
@@ -819,6 +1000,63 @@ fn walls_for(b: &Builder, face: &RawFace, family: Family) -> Option<[f64; 2]> {
     Some([center, center + PI])
 }
 
+/// How far a point on a face's surface is from the nearest piece of its boundary, seams aside, going by `measure`, and
+/// whether it's on that boundary's left, which is the side the face is on.
+fn nearest_boundary(b: &Builder, face: &RawFace, surface: &Surface, seams: &[usize], q: Vec3, measure: impl Fn(Vec3) -> f64) -> (f64, bool) {
+    let sign = if face.flipped { -1.0 } else { 1.0 };
+    let mut nearest = (f64::INFINITY, false);
+    for c in face.loops.iter().flatten() {
+        if seams.contains(&c.edge) {
+            continue;
+        }
+        let e = &b.edges[c.edge];
+        for k in 0..32 {
+            let t = e.t0 + (e.t1 - e.t0) * (k as f64 + 0.5) / 32.0;
+            let p = e.curve.eval(t);
+            let far = measure(p);
+            if far < nearest.0 {
+                let travel = e.curve.derivative(t) * if c.reversed { -1.0 } else { 1.0 };
+                nearest = (far, (surface.normal(p) * sign).cross(travel).dot(q - p) > 0.0);
+            }
+        }
+    }
+    nearest
+}
+
+/// A sphere's axis is only a way of describing it, and a face that needs cutting into half turns around it mustn't have
+/// corners on its poles: the walls all meet there, and a chart can't tell which way anything leaves a pole. So its axis
+/// is turned to wherever's furthest from all of the face's boundary.
+fn aim_sphere_clear_of_corners(b: &Builder, face: &mut RawFace) {
+    let Surface::Sphere { frame, radius } = face.surface else { return };
+    // A seam is a meridian of this axis, and says where the cutting goes.
+    if !seams_of(face).is_empty() {
+        return;
+    }
+    let points = b.boundary_points(face);
+    let on_pole = |p: &Vec3| (*p - frame.origin).normalized().dot(frame.z).abs() > 1.0 - 1e-10;
+    let corner = face.loops.iter().flatten().find_map(|c| {
+        let e = &b.edges[c.edge];
+        [b.vertices[e.v0], b.vertices[e.v1]].into_iter().find(|p| on_pole(p))
+    });
+    let Some(corner) = corner else { return };
+    if walls_for(b, face, Family::AroundAxis).is_none() {
+        return;
+    }
+    let d = (corner - frame.origin).normalized();
+    let x = d.any_perpendicular();
+    let y = d.cross(x);
+    let clearance = |z: Vec3| points.iter().map(|p| 1.0 - (*p - frame.origin).normalized().dot(z).abs()).fold(f64::INFINITY, f64::min);
+    let best = (0..24)
+        .map(|k| {
+            let a = k as f64 * PI / 24.0 + 0.013;
+            x * a.cos() + y * a.sin()
+        })
+        .max_by(|p, q| clearance(*p).total_cmp(&clearance(*q)));
+    if let Some(z) = best {
+        face.surface = Surface::Sphere { frame: Frame::new(frame.origin, z, d), radius };
+    }
+}
+
 /// The surface for the half turn of phase from `start`.
 fn sector_surface(surface: &Surface, family: Family, start: f64) -> Result<Surface> {
     let Surface::Free { frame, patch } = surface else {
@@ -977,8 +1215,12 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
             v
         };
         if stops.is_empty() {
-            // Nothing crosses it, so it's a pole-to-pole wall on a face wrapped all the way round, or it misses.
-            if !closes_on_itself && face.loops.iter().flatten().all(|c| seam_edges.contains(&c.edge)) {
+            // Nothing crosses it, so it's a pole-to-pole wall on a face wrapped all the way round, or it misses. The piece
+            // of boundary nearest to it says which, as the face is on that boundary's left.
+            let middle = curve.eval((lo + hi) / 2.0);
+            let nearest = nearest_boundary(b, face, surface, &seam_edges, middle, |p| p.dist(middle));
+            let only_seams = nearest.0 == f64::INFINITY;
+            if !closes_on_itself && (only_seams || nearest.1) {
                 let (first, second) = (end_at(b, lo), end_at(b, hi));
                 intervals.push((lo, first, hi, second));
             }
@@ -1115,6 +1357,33 @@ fn split_extruded(b: &mut Builder, faces: Vec<RawFace>) -> Result<Vec<RawFace>> 
                 continue;
             }
             let e = &b.edges[c.edge];
+            // A closed curve's own ends are a place to cut as well, when an edge goes past them.
+            let (from, to) = curve.spline.domain();
+            let span = to - from;
+            if curve.spline.eval(from).dist(curve.spline.eval(to)) <= 2.0 * TOL {
+                let n = 256;
+                let mut before = foot(e.curve.eval(e.t0));
+                for i in 1..=n {
+                    let t = e.t0 + (e.t1 - e.t0) * i as f64 / n as f64;
+                    let now = foot(e.curve.eval(t));
+                    // Only an edge really going past them, and not one that merely starts or stops there.
+                    let inner = |x: f64| x > from + 1e-6 * span && x < to - 1e-6 * span;
+                    if (before - now).abs() > span * 0.5 && inner(before) && inner(now) {
+                        let high_first = before > now;
+                        let (mut lo, mut hi) = (t - (e.t1 - e.t0) / n as f64, t);
+                        for _ in 0..60 {
+                            let mid = (lo + hi) / 2.0;
+                            if (foot(e.curve.eval(mid)) > from + span / 2.0) == high_first {
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        cuts.entry(c.edge).or_default().push(((lo + hi) / 2.0, None));
+                    }
+                    before = now;
+                }
+            }
             for &(start, _, _) in ranges.iter().skip(1) {
                 let n = 256;
                 let mut before = foot(e.curve.eval(e.t0)) - start;
@@ -1171,7 +1440,7 @@ fn split_extruded(b: &mut Builder, faces: Vec<RawFace>) -> Result<Vec<RawFace>> 
         }
         // Rulings between neighbouring ranges, including across the join of a closed curve.
         let mut joins: Vec<(f64, usize, usize)> = (1..ranges.len()).map(|i| (ranges[i].0, i - 1, i)).collect();
-        if closed && !seams.is_empty() {
+        if closed {
             joins.push((u0, ranges.len() - 1, 0));
         }
         for (t, below, above) in joins {
@@ -1179,7 +1448,7 @@ fn split_extruded(b: &mut Builder, faces: Vec<RawFace>) -> Result<Vec<RawFace>> 
             let line = Curve::Line { origin: frame.point(at.x, at.y, 0.0), dir: frame.z };
             let tangent = curve.derivative(t);
             let along = frame.x * tangent.x + frame.y * tangent.y;
-            let mut stops: Vec<(f64, usize, bool)> = Vec::new();
+            let mut stops: Vec<(f64, usize)> = Vec::new();
             for c in face.loops.iter().flatten() {
                 if seams.contains(&c.edge) {
                     continue;
@@ -1189,18 +1458,25 @@ fn split_extruded(b: &mut Builder, faces: Vec<RawFace>) -> Result<Vec<RawFace>> 
                     let v = if end == c.reversed { e.v0 } else { e.v1 };
                     let p = b.vertices[v];
                     let (z, off) = line.closest(p, -1e9, 1e9);
-                    if off > 8.0 * TOL || stops.iter().any(|s| s.1 == v) {
+                    // A file's edges can lie a little off its surface, and what's cut from them with them.
+                    if off > 8.0 * TOL + 2.0 * face.surface.sdf(p).abs() || stops.iter().any(|s| s.1 == v) {
                         continue;
                     }
-                    let param = if end == c.reversed { e.t0 } else { e.t1 };
-                    let travel = e.curve.derivative(param) * if c.reversed { -1.0 } else { 1.0 };
-                    let n = face.surface.normal(p) * sign;
-                    stops.push((z, v, n.cross(travel).dot(frame.z) > 0.0));
+                    stops.push((z, v));
                 }
             }
             stops.sort_by(|x, y| x.0.total_cmp(&y.0));
             for w in stops.windows(2) {
-                if w[0].2 {
+                // A vertex on the ruling can be one the boundary only touches it at, so what's between two of them is
+                // for the boundary nearby to say, and anything already running along the ruling needs no edge.
+                // Nearby means along the ruling: on a thin tube, the far side of the tube is closer through the air.
+                let middle = line.eval((w[0].0 + w[1].0) / 2.0);
+                let on_tube = |p: Vec3| {
+                    let (l, m) = (frame.to_local(p), frame.to_local(middle));
+                    (l.z - m.z).abs() + 100.0 * (l.x - m.x).hypot(l.y - m.y)
+                };
+                let (far, inside) = nearest_boundary(b, &face, &face.surface, &seams, middle, on_tube);
+                if inside && far > 8.0 * TOL {
                     let id = b.add_edge(Edge { curve: line.clone(), t0: w[0].0, t1: w[1].0, v0: w[0].1, v1: w[1].1 });
                     // Each side keeps its own piece on its left, going by which way the curve runs.
                     let n = face.surface.normal(line.eval((w[0].0 + w[1].0) / 2.0)) * sign;
@@ -1221,7 +1497,11 @@ fn split_extruded(b: &mut Builder, faces: Vec<RawFace>) -> Result<Vec<RawFace>> 
             let surface = Surface::Extruded { frame, curve: Arc::new(PlaneCurve::new(curve.spline.sub(start, stop)?)) };
             let chart = surface.fit_chart(&[]);
             let fc = FaceChart { surface: &surface, chart: &chart, flipped: face.flipped };
-            for loops in trace_faces(&fc, &b.edges, &b.vertices, list)? {
+            let pieces = trace_faces(&fc, &b.edges, &b.vertices, list)?;
+            if pieces.is_empty() {
+                return Err(Error::NearDegenerate("an extruded face couldn't be cut along its curve".into()));
+            }
+            for loops in pieces {
                 out.push(RawFace { surface: surface.clone(), flipped: face.flipped, loops, points: Vec::new(), tag: face.tag });
             }
         }
@@ -1267,12 +1547,18 @@ struct Reader<'a> {
     file: &'a File,
     next_slot: u32,
     feature: u32,
+    /// The corners of a faceted solid's polygons, which name no vertices, so that those at one place are one.
+    corners: Vec<(Vec3, usize)>,
+    /// The sides of those polygons, by their two corners, as neighbours share them.
+    sides: BTreeMap<(usize, usize), usize>,
+    /// Surfaces read as a kind whose natural normal is the opposite of the one their file means.
+    against: BTreeSet<usize>,
 }
 
 impl Reader<'_> {
-    fn surface(&self, id: usize) -> Result<Surface> {
+    fn surface(&mut self, id: usize) -> Result<Surface> {
         let f = self.file;
-        if f.has(id, "B_SPLINE_SURFACE_WITH_KNOTS") {
+        if f.is_patch(id) {
             let patch = f.patch(id)?;
             return Ok(Surface::Free { frame: Frame::WORLD, patch: Arc::new(patch) });
         }
@@ -1315,10 +1601,17 @@ impl Reader<'_> {
             }
             "SURFACE_OF_REVOLUTION" => {
                 let a = f.part(id, "SURFACE_OF_REVOLUTION")?;
-                let spline = f.basis_curve(File::id(a.get(1))?)?;
+                let basis = File::id(a.get(1))?;
                 let axis = f.part(File::id(a.get(2))?, "AXIS1_PLACEMENT")?;
                 let (o, z) = (f.point(File::id(axis.get(1))?)?, f.direction(File::id(axis.get(2))?)?);
-                swept_around(&spline, o, z)?
+                let (surface, against) = match f.revolved_circle(basis, o, z)? {
+                    Some(exact) => exact,
+                    None => swept_around(&f.basis_curve(basis)?, o, z)?,
+                };
+                if against {
+                    self.against.insert(id);
+                }
+                surface
             }
             other => return Err(Error::Unsupported(format!("a face uses {other}"))),
         })
@@ -1336,10 +1629,17 @@ impl Reader<'_> {
             return Err(bad(format!("#{id} should be a closed shell, not a {}", f.name(id))));
         };
         for item in list {
-            let face_id = File::id(Some(item))?;
+            let mut face_id = File::id(Some(item))?;
+            // A face used the other way round. The shell's orientation gets settled as a whole, below.
+            let mut turned_over = false;
+            if let Ok(o) = f.part(face_id, "ORIENTED_FACE") {
+                turned_over = !File::truth(o.get(3))?;
+                face_id = File::id(o.get(2))?;
+            }
             let parts = f.part(face_id, "ADVANCED_FACE").or_else(|_| f.part(face_id, "FACE_SURFACE"))?;
-            let surface = self.surface(File::id(parts.get(2))?)?;
-            let same = File::truth(parts.get(3))?;
+            let surface_id = File::id(parts.get(2))?;
+            let surface = self.surface(surface_id)?;
+            let same = (File::truth(parts.get(3))? != turned_over) != self.against.contains(&surface_id);
             let tag = FaceTag { feature: self.feature, slot: 2 + self.next_slot };
             self.next_slot += 1;
             let mut loops = Vec::new();
@@ -1354,15 +1654,20 @@ impl Reader<'_> {
                     points.push(self.vertex(v, b, vertices)?);
                     continue;
                 }
-                let list = File::list(f.part(loop_id, "EDGE_LOOP")?.get(1))?;
-                let mut lp = Vec::with_capacity(list.len());
-                for oriented in list {
-                    let oe = f.part(File::id(Some(oriented))?, "ORIENTED_EDGE")?;
-                    let (edge, flip) = self.edge(File::id(oe.get(3))?, b, vertices, edges)?;
-                    let along = File::truth(oe.get(4))?;
-                    lp.push(Coedge { edge, reversed: along == flip });
-                }
-                if !forward {
+                let mut lp = if f.has(loop_id, "POLY_LOOP") {
+                    self.polygon(loop_id, b)?
+                } else {
+                    let list = File::list(f.part(loop_id, "EDGE_LOOP")?.get(1))?;
+                    let mut lp = Vec::with_capacity(list.len());
+                    for oriented in list {
+                        let oe = f.part(File::id(Some(oriented))?, "ORIENTED_EDGE")?;
+                        let (edge, flip) = self.edge(File::id(oe.get(3))?, b, vertices, edges)?;
+                        let along = File::truth(oe.get(4))?;
+                        lp.push(Coedge { edge, reversed: along == flip });
+                    }
+                    lp
+                };
+                if !forward != turned_over {
                     lp.reverse();
                     for c in &mut lp {
                         c.reversed = !c.reversed;
@@ -1420,6 +1725,49 @@ impl Reader<'_> {
         Ok(())
     }
 
+    /// A polygon's sides as edges. A faceted solid's faces are polygons, listing points and not edges, so faces share an
+    /// edge by having the same two corners.
+    fn polygon(&mut self, id: usize, b: &mut Builder) -> Result<Vec<Coedge>> {
+        let f = self.file;
+        let mut ring: Vec<usize> = Vec::new();
+        for item in File::list(f.part(id, "POLY_LOOP")?.get(1))? {
+            let p = f.point(File::id(Some(item))?)?;
+            let at = match self.corners.iter().find(|(q, _)| q.dist(p) <= 1e-6) {
+                Some((_, v)) => *v,
+                None => {
+                    let v = b.add_vertex(p);
+                    self.corners.push((p, v));
+                    v
+                }
+            };
+            if ring.last() != Some(&at) {
+                ring.push(at);
+            }
+        }
+        while ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        if ring.len() < 3 {
+            return Err(bad(format!("#{id} is a polygon with fewer than three corners")));
+        }
+        let mut out = Vec::with_capacity(ring.len());
+        for k in 0..ring.len() {
+            let (a, c) = (ring[k], ring[(k + 1) % ring.len()]);
+            let key = (a.min(c), a.max(c));
+            let edge = match self.sides.get(&key) {
+                Some(&e) => e,
+                None => {
+                    let (p, q) = (b.vertices[key.0], b.vertices[key.1]);
+                    let e = b.add_edge(Edge { curve: Curve::line_through(p, q), t0: 0.0, t1: p.dist(q), v0: key.0, v1: key.1 });
+                    self.sides.insert(key, e);
+                    e
+                }
+            };
+            out.push(Coedge { edge, reversed: a != key.0 });
+        }
+        Ok(out)
+    }
+
     fn vertex(&self, id: usize, b: &mut Builder, vertices: &mut BTreeMap<usize, usize>) -> Result<usize> {
         if let Some(&v) = vertices.get(&id) {
             return Ok(v);
@@ -1440,9 +1788,9 @@ impl Reader<'_> {
         let (start, end) = (self.vertex(File::id(a.get(1))?, b, vertices)?, self.vertex(File::id(a.get(2))?, b, vertices)?);
         let same = File::truth(a.get(4))?;
         let mut geom = File::id(a.get(3))?;
-        // A curve on a surface, or a seam, is its 3D curve with extras.
-        while f.has(geom, "SURFACE_CURVE") || f.has(geom, "SEAM_CURVE") {
-            let part = f.part(geom, "SURFACE_CURVE").or_else(|_| f.part(geom, "SEAM_CURVE"))?;
+        // A curve on a surface, a seam, an intersection or a trimmed curve is its 3D curve with extras, as the ends are
+        // the edge's own.
+        while let Some(part) = ["SURFACE_CURVE", "SEAM_CURVE", "INTERSECTION_CURVE", "TRIMMED_CURVE"].iter().find_map(|n| f.part(geom, n).ok()) {
             geom = File::id(part.get(1))?;
         }
         let (p, q) = (b.vertices[start], b.vertices[end]);
@@ -1474,7 +1822,30 @@ impl Reader<'_> {
                 };
                 (Curve::Ellipse { frame, major, minor }, angle(p), angle(q))
             }
-            name if name.starts_with("B_SPLINE_CURVE") || f.has(geom, "B_SPLINE_CURVE") => {
+            "HYPERBOLA" | "PARABOLA" if closed => return Err(bad(format!("#{id} is a {} edge that starts and ends at one point", f.name(geom)))),
+            "HYPERBOLA" => {
+                let c = f.part(geom, "HYPERBOLA")?;
+                let frame = f.placement(File::id(c.get(1))?)?;
+                let (major, imaginary) = (File::number(c.get(2))? * f.length, File::number(c.get(3))? * f.length);
+                let along = |r: Vec3| (frame.to_local(r).y / imaginary).asinh();
+                let (a, c) = (along(p), along(q));
+                // A conic between two points is exactly a rational quadratic, its middle point where the end tangents meet.
+                let (m, w) = ((a + c) / 2.0, ((c - a) / 2.0).cosh());
+                let middle = frame.point(major * m.cosh() / w, imaginary * m.sinh() / w, 0.0);
+                let s = Spline::new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![p, middle, q], vec![1.0, w, 1.0])?;
+                (Curve::Spline(Arc::new(s)), 0.0, 1.0)
+            }
+            "PARABOLA" => {
+                let c = f.part(geom, "PARABOLA")?;
+                let frame = f.placement(File::id(c.get(1))?)?;
+                let focal = File::number(c.get(2))? * f.length;
+                let along = |r: Vec3| frame.to_local(r).y / (2.0 * focal);
+                let (a, c) = (along(p), along(q));
+                let middle = frame.point(focal * a * c, focal * (a + c), 0.0);
+                let s = Spline::new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![p, middle, q], vec![1.0, 1.0, 1.0])?;
+                (Curve::Spline(Arc::new(s)), 0.0, 1.0)
+            }
+            _ if f.is_spline(geom) => {
                 let s = f.spline(geom)?;
                 let (u0, u1) = s.domain();
                 let (ta, tb) = if closed { (u0, u1) } else { (s.closest(p, u0, u1).0, s.closest(q, u0, u1).0) };
@@ -1505,6 +1876,16 @@ impl Reader<'_> {
 /// A spline in a plane square to `dir`, as a swept surface whose coordinates are in that plane.
 fn swept_along(spline: &Spline, dir: Vec3) -> Result<Surface> {
     let origin = spline.start();
+    // A straight line swept along makes a plane, with the normal the sweep would have given it.
+    if let Ok(pieces) = spline.face_pieces() {
+        if let [crate::spline::FacePiece::Line(a, b)] = pieces.as_slice() {
+            let along = *b - *a;
+            let normal = along.cross(dir);
+            if normal.norm() > 1e-9 * along.norm().max(TOL) {
+                return Ok(Surface::Plane(Frame::new(*a, normal.normalized(), along.normalized())));
+            }
+        }
+    }
     let x = dir.any_perpendicular();
     let frame = Frame::new(origin, dir, x);
     // The surface's section square to its direction, which an affine map gives exactly.
@@ -1517,8 +1898,36 @@ fn swept_along(spline: &Spline, dir: Vec3) -> Result<Surface> {
     Ok(Surface::Extruded { frame, curve: Arc::new(PlaneCurve::new(flat)) })
 }
 
-/// A spline in a plane through the axis, as a swept surface.
-fn swept_around(spline: &Spline, origin: Vec3, z: Vec3) -> Result<Surface> {
+/// A straight line swept around an axis it shares a plane with: a cylinder, a cone or a plane, which everything else
+/// handles exactly. Given as distance from the axis and height along it. The second value says the normal the file
+/// means, to the right of the line's direction of travel, is the opposite of the one the surface has by nature.
+fn revolved_line(frame: &Frame, a: (f64, f64), b: (f64, f64)) -> Result<(Surface, bool)> {
+    let (dr, dh) = (b.0 - a.0, b.1 - a.1);
+    if a.0 * b.0 < -TOL * TOL {
+        return Err(Error::Unsupported("SURFACE_OF_REVOLUTION of a line crossing its own axis".into()));
+    }
+    let up = frame.z;
+    let point = |height: f64| frame.origin + up * height;
+    let flat = dh.abs() <= 1e-9 * dr.abs();
+    let upright = dr.abs() <= 1e-9 * dh.abs();
+    Ok(if flat {
+        // Moving out, the normal to the right of it points down the axis.
+        let normal = if dr > 0.0 { -up } else { up };
+        (Surface::Plane(Frame::new(point(a.1), normal, frame.x)), false)
+    } else if upright {
+        (Surface::Cylinder { frame: Frame::new(point(a.1), up, frame.x), radius: a.0.abs() }, dh < 0.0)
+    } else {
+        // A cone widens along its own z, and is measured from the wide end here so as to be well away from its tip.
+        let widens_up = (dr > 0.0) == (dh > 0.0);
+        let wide = if a.0.abs() > b.0.abs() { a } else { b };
+        let axis = if widens_up { up } else { -up };
+        let half_angle = (dr / dh).abs().atan();
+        (Surface::Cone { frame: Frame::new(point(wide.1), axis, frame.x), radius: wide.0.abs(), half_angle }, dh < 0.0)
+    })
+}
+
+/// A spline in a plane through the axis, as a swept surface. The second value is as for `revolved_line`.
+fn swept_around(spline: &Spline, origin: Vec3, z: Vec3) -> Result<(Surface, bool)> {
     // The half-plane the curve's in, from a point of it off the axis.
     let (u0, u1) = spline.domain();
     let off = (0..=16)
@@ -1538,8 +1947,13 @@ fn swept_around(spline: &Spline, origin: Vec3, z: Vec3) -> Result<Surface> {
     if spline.points().iter().any(|p| frame.to_local(*p).y.abs() > 1e-6) {
         return Err(Error::Unsupported("SURFACE_OF_REVOLUTION of a curve not in a plane through its axis".into()));
     }
+    if let Ok(pieces) = flat.face_pieces() {
+        if let [crate::spline::FacePiece::Line(a, b)] = pieces.as_slice() {
+            return revolved_line(&frame, (a.x, a.y), (b.x, b.y));
+        }
+    }
     single_piece(&flat, "SURFACE_OF_REVOLUTION")?;
-    Ok(Surface::Revolved { frame, curve: Arc::new(PlaneCurve::new(flat)) })
+    Ok((Surface::Revolved { frame, curve: Arc::new(PlaneCurve::new(flat)) }, false))
 }
 
 /// A swept surface here needs a curve that one face can cover. Larger ones would need cutting by the curve,
@@ -1554,12 +1968,16 @@ fn single_piece(flat: &Spline, what: &str) -> Result<()> {
 
 /// Everything that can't be imported, named and counted.
 fn unsupported_surfaces(file: &File, shells: &[usize]) -> Vec<(String, usize)> {
-    let known = ["B_SPLINE_SURFACE_WITH_KNOTS", "OFFSET_SURFACE", "PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE", "SPHERICAL_SURFACE", "TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE", "SURFACE_OF_LINEAR_EXTRUSION", "SURFACE_OF_REVOLUTION"];
+    let known = ["B_SPLINE_SURFACE_WITH_KNOTS", "B_SPLINE_SURFACE", "QUASI_UNIFORM_SURFACE", "UNIFORM_SURFACE", "BEZIER_SURFACE", "OFFSET_SURFACE", "PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE", "SPHERICAL_SURFACE", "TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE", "SURFACE_OF_LINEAR_EXTRUSION", "SURFACE_OF_REVOLUTION"];
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for &s in shells {
         let Ok(list) = file.part(s, "CLOSED_SHELL").and_then(|a| File::list(a.get(1))) else { continue };
         for item in list {
-            let Ok(face) = File::id(Some(item)) else { continue };
+            let Ok(mut face) = File::id(Some(item)) else { continue };
+            if let Ok(o) = file.part(face, "ORIENTED_FACE") {
+                let Ok(inner) = File::id(o.get(2)) else { continue };
+                face = inner;
+            }
             let Ok(parts) = file.part(face, "ADVANCED_FACE").or_else(|_| file.part(face, "FACE_SURFACE")) else { continue };
             let Ok(surface) = File::id(parts.get(2)) else { continue };
             // A complex instance names its parts in another order, so check them all.
@@ -1654,9 +2072,10 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
         let surfaces: Vec<Surface> = list.iter().map(|&f| faces[f].surface.clone()).collect();
         let start = b.vertices[v];
         let mut moved = nearest_to_all(&surfaces, start, limit);
-        // Surfaces close to tangent can send it a long way for little gain. If the file's own place is close enough to
-        // all of them, that's a better answer.
-        if moved.dist(start) > limit && surfaces.iter().all(|s| s.sdf(start).abs() <= limit) {
+        // Surfaces close to tangent can send it a long way for little gain, and across a small face that distorts it. So
+        // a move out of all proportion to the gap it closes isn't made, as long as the file's own place is close enough.
+        let off = surfaces.iter().fold(0.0f64, |m, s| m.max(s.sdf(start).abs()));
+        if off <= limit && moved.dist(start) > (8.0 * off).max(limit.min(1e-5)) {
             moved = start;
         }
         if moved.dist(start) > limit {
@@ -1694,9 +2113,13 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
                 let mut crossing = true;
                 'walk: for w in breaks.windows(2) {
                     for i in 0..12 {
-                        match crate::surface::refine_on_two(sa, sb, s.eval(w[0] + (w[1] - w[0]) * i as f64 / 12.0)) {
-                            Some(p) => points.push(p),
-                            None => {
+                        let on_curve = s.eval(w[0] + (w[1] - w[0]) * i as f64 / 12.0);
+                        // Where the surfaces are close to tangent the place they cross can be a long way along from
+                        // the curve, for a gap that's far smaller, and following it would only put a kink in the edge.
+                        let off = sa.sdf(on_curve).abs().max(sb.sdf(on_curve).abs());
+                        match crate::surface::refine_on_two(sa, sb, on_curve) {
+                            Some(p) if p.dist(on_curve) <= (8.0 * off).max(1e-5) => points.push(p),
+                            _ => {
                                 crossing = false;
                                 break 'walk;
                             }
@@ -1736,6 +2159,34 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
     // Inside the kernel's own tolerance, there's nothing to state.
     b.gap = if gap > TOL { gap } else { 0.0 };
     Ok(())
+}
+
+/// A loop's signed area in a chart, counter-clockwise being positive. A polygon's corners cut off what's outside them, and
+/// a whole circle is a single edge, so it's compared at two resolutions and what's cut off is put back. On its own, a
+/// polygon around a circle can measure smaller than the toothed loop just inside it, and so look like the hole.
+fn area_in_chart(b: &Builder, surface: &Surface, chart: &crate::surface::Chart, lp: &[Coedge]) -> f64 {
+    const STEPS: usize = 64;
+    let (mut coarse, mut fine) = (Vec::new(), Vec::new());
+    for c in lp {
+        let e = &b.edges[c.edge];
+        for k in 0..STEPS {
+            let f = k as f64 / STEPS as f64;
+            let u = if c.reversed { 1.0 - f } else { f };
+            let p = surface.to_chart(chart, e.curve.eval(e.t0 + (e.t1 - e.t0) * u));
+            if k % 2 == 0 {
+                coarse.push(p);
+            }
+            fine.push(p);
+        }
+    }
+    let shoelace = |points: &[Vec2]| -> f64 {
+        (0..points.len()).map(|k| {
+            let (p, q) = (points[k], points[(k + 1) % points.len()]);
+            p.x * q.y - p.y * q.x
+        }).sum::<f64>() / 2.0
+    };
+    let (a, c) = (shoelace(&coarse), shoelace(&fine));
+    c + (c - a) / 3.0
 }
 
 /// Makes a shell's loops agree: every edge used once each way. A writer's flags aren't enough to go on here. A file can
@@ -1792,23 +2243,15 @@ fn orient_shell(b: &Builder, faces: &mut [RawFace]) {
             if !within_half_turn(&face.surface, &everything) || matches!(face.surface, Surface::Sphere { .. }) {
                 continue;
             }
+            // A closed curve's extrusion can go all the way round, and its chart can't show that as a loop.
+            if let Surface::Extruded { curve, .. } = &face.surface {
+                let (u0, u1) = curve.spline.domain();
+                if curve.spline.eval(u0).dist(curve.spline.eval(u1)) <= 2.0 * TOL {
+                    continue;
+                }
+            }
             let chart = face.surface.fit_chart(&everything);
-            let area_of = |lp: &Vec<Coedge>| -> f64 {
-                let mut points = Vec::new();
-                for c in lp {
-                    let e = &b.edges[c.edge];
-                    for k in 0..16 {
-                        let u = if c.reversed { 1.0 - k as f64 / 16.0 } else { k as f64 / 16.0 };
-                        points.push(face.surface.to_chart(&chart, e.curve.eval(e.t0 + (e.t1 - e.t0) * u)));
-                    }
-                }
-                let mut area = 0.0;
-                for k in 0..points.len() {
-                    let (p, q) = (points[k], points[(k + 1) % points.len()]);
-                    area += p.x * q.y - p.y * q.x;
-                }
-                area
-            };
+            let area_of = |lp: &Vec<Coedge>| area_in_chart(b, &face.surface, &chart, lp);
             let area = area_of(&face.loops[l]);
             if area == 0.0 {
                 continue;
@@ -1842,13 +2285,25 @@ fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Re
     let mut b = Builder { vertices: Vec::new(), edges: Vec::new(), gap: 0.0 };
     let (mut vertices, mut edges) = (BTreeMap::new(), BTreeMap::new());
     let mut faces: Vec<RawFace> = Vec::new();
-    let mut reader = Reader { file, next_slot: 0, feature };
+    let mut reader = Reader { file, next_slot: 0, feature, corners: Vec::new(), sides: BTreeMap::new(), against: BTreeSet::new() };
     reader.shell(outer, false, &mut b, &mut vertices, &mut edges, &mut faces)?;
     for &(v, invert) in voids {
         reader.shell(v, invert, &mut b, &mut vertices, &mut edges, &mut faces)?;
     }
 
+    // A shell the file calls closed has a face on both sides of every edge. If not, nothing further can repair it.
+    let mut uses: BTreeMap<usize, usize> = BTreeMap::new();
+    for c in faces.iter().flat_map(|f| f.loops.iter().flatten()) {
+        *uses.entry(c.edge).or_insert(0) += 1;
+    }
+    let lone = uses.values().filter(|&&n| n == 1).count();
+    if lone > 0 {
+        return Err(Error::NearDegenerate(format!("a shell this file calls closed isn't closed: {lone} of its {} edges have a face on one side only", uses.len())));
+    }
     orient_shell(&b, &mut faces);
+    for face in &mut faces {
+        aim_sphere_clear_of_corners(&b, face);
+    }
     let mut faces = split_extruded(&mut b, faces)?;
     // Cut until nothing's left to cut. A torus can go round in two directions, and a face goes first in the direction
     // it goes all the way round, since until then a chart can't tell one side of the cut from the other.
@@ -1921,23 +2376,7 @@ fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Re
         }
         let everything = b.boundary_points(face);
         let chart = face.surface.fit_chart(&everything);
-        let area_of = |lp: &Vec<Coedge>| -> f64 {
-            let mut points = Vec::new();
-            for c in lp {
-                let e = &b.edges[c.edge];
-                for k in 0..16 {
-                    let u = if c.reversed { 1.0 - k as f64 / 16.0 } else { k as f64 / 16.0 };
-                    points.push(face.surface.to_chart(&chart, e.curve.eval(e.t0 + (e.t1 - e.t0) * u)));
-                }
-            }
-            let mut area = 0.0;
-            for k in 0..points.len() {
-                let (p, q) = (points[k], points[(k + 1) % points.len()]);
-                area += p.x * q.y - p.y * q.x;
-            }
-            area.abs()
-        };
-        let areas: Vec<f64> = face.loops.iter().map(area_of).collect();
+        let areas: Vec<f64> = face.loops.iter().map(|lp| area_in_chart(&b, &face.surface, &chart, lp).abs()).collect();
         let largest = (0..areas.len()).max_by(|&a, &c| areas[a].total_cmp(&areas[c])).unwrap_or(0);
         face.loops.swap(0, largest);
     }
@@ -2002,21 +2441,285 @@ fn seam_on_wall(b: &Builder, face: &RawFace, family: Family, e: usize, wall: &[f
     wall.iter().any(|w| wrap_pi(a - w).abs() < 1e-6)
 }
 
+/// A solid's shells: the outer one, and any voids, each with whether it's used inside out.
+type SolidShells = (usize, Vec<(usize, bool)>);
+
+/// The shape representations of a file: what's in each, and how they're placed in each other. An assembly is a tree of these.
+/// A part's solids are in a representation, an assembly's representation places others, by an item-defined transformation
+/// or a mapped item, and a plain relationship says two representations are of one thing, in one place.
+struct Placements {
+    /// Each representation's own items.
+    items: BTreeMap<usize, Vec<usize>>,
+    /// Representations that are the same thing in the same place.
+    same: BTreeMap<usize, Vec<usize>>,
+    /// For a representation, the others it places, with the motion from theirs to its.
+    children: BTreeMap<usize, Vec<(usize, Frame)>>,
+    /// Those placed by anything.
+    placed: BTreeSet<usize>,
+    /// The placements each representation lists among its items.
+    frames: BTreeMap<usize, Vec<Frame>>,
+    /// Those that say something about a product without being its shape.
+    on_the_side: BTreeSet<usize>,
+}
+
+impl Placements {
+    fn of(file: &File) -> Result<Placements> {
+        let mut out = Placements { items: BTreeMap::new(), same: BTreeMap::new(), children: BTreeMap::new(), placed: BTreeSet::new(), frames: BTreeMap::new(), on_the_side: BTreeSet::new() };
+        // The representations of each product definition, and which way round each assembly usage goes.
+        let mut reps_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for instance in file.items.values() {
+            for (name, args) in instance {
+                if name == "SHAPE_DEFINITION_REPRESENTATION" {
+                    let (Ok(shape), Ok(rep)) = (File::id(args.first()), File::id(args.get(1))) else { continue };
+                    if let Ok(pds) = file.part(shape, "PRODUCT_DEFINITION_SHAPE") {
+                        if let Ok(pd) = File::id(pds.get(2)) {
+                            reps_of.entry(pd).or_default().push(rep);
+                        }
+                    }
+                }
+            }
+        }
+        // A representation given as the shape of a plain property, or of a feature on the part, is no copy of the part or
+        // anything added to it. It's validation properties, or a feature tree's history of how a hole was made.
+        for instance in file.items.values() {
+            for (name, args) in instance {
+                if name == "SHAPE_DEFINITION_REPRESENTATION" {
+                    if let (Ok(shape), Ok(rep)) = (File::id(args.first()), File::id(args.get(1))) {
+                        let of_feature = file.part(shape, "PRODUCT_DEFINITION_SHAPE").ok().and_then(|p| File::id(p.get(2)).ok()).is_some_and(|d| file.has(d, "SHAPE_ASPECT"));
+                        if of_feature || file.has(shape, "PROPERTY_DEFINITION") {
+                            out.on_the_side.insert(rep);
+                        }
+                    }
+                }
+            }
+        }
+        let mut usage: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+        for instance in file.items.values() {
+            for (name, args) in instance {
+                if name == "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" {
+                    let (Ok(rel), Ok(shape)) = (File::id(args.first()), File::id(args.get(1))) else { continue };
+                    let Ok(pds) = file.part(shape, "PRODUCT_DEFINITION_SHAPE") else { continue };
+                    let Ok(nauo_id) = File::id(pds.get(2)) else { continue };
+                    let Ok(nauo) = file.part(nauo_id, "NEXT_ASSEMBLY_USAGE_OCCURRENCE") else { continue };
+                    if let (Ok(parent), Ok(child)) = (File::id(nauo.get(3)), File::id(nauo.get(4))) {
+                        usage.insert(rel, (parent, child));
+                    }
+                }
+            }
+        }
+        // What each representation lists, for checking below which of them holds what. A complex instance can be one.
+        let mut lists: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (&id, instance) in &file.items {
+            for (name, args) in instance {
+                if name.ends_with("REPRESENTATION") {
+                    if let Ok(list) = File::list(args.get(1)) {
+                        lists.insert(id, list.iter().filter_map(|i| File::id(Some(i)).ok()).collect());
+                    }
+                }
+            }
+        }
+        for (&id, instance) in &file.items {
+            for (name, args) in instance {
+                // Only representations of shape: a draughting model maps the same things to show them in some colour.
+                let of_shape = name == "REPRESENTATION" || name.ends_with("SHAPE_REPRESENTATION") && name != "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION";
+                if of_shape {
+                    if let Ok(list) = File::list(args.get(1)) {
+                        out.items.insert(id, list.iter().filter_map(|i| File::id(Some(i)).ok()).collect());
+                    }
+                }
+            }
+            // A relationship between two representations, in its plain form or spread over a complex instance's parts.
+            let relation = instance.iter().find(|(n, _)| n == "REPRESENTATION_RELATIONSHIP" || n == "SHAPE_REPRESENTATION_RELATIONSHIP" && instance.len() == 1);
+            if let Some((_, args)) = relation {
+                let (Ok(first), Ok(second)) = (File::id(args.get(2)), File::id(args.get(3))) else { continue };
+                let moved = instance.iter().find(|(n, _)| n == "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION");
+                let Some((_, op)) = moved else {
+                    out.same.entry(first).or_default().push(second);
+                    out.same.entry(second).or_default().push(first);
+                    continue;
+                };
+                let operator = File::id(op.first())?;
+                let t = file.part(operator, "ITEM_DEFINED_TRANSFORMATION").map_err(|_| Error::Unsupported(format!("an assembly placed by a {}, which can scale what it places", file.name(operator))))?;
+                let (item_a, item_b) = (File::id(t.get(2))?, File::id(t.get(3))?);
+                let (a, b) = (file.placement(item_a)?, file.placement(item_b)?);
+                // The standard has the first representation the child, and writers differ, so the assembly usage says
+                // which is which if it can.
+                let parent_first = usage.get(&id).is_some_and(|(parent, child)| {
+                    let holds = |pd: &usize, rep: usize| reps_of.get(pd).is_some_and(|l| l.contains(&rep));
+                    holds(parent, first) && holds(child, second)
+                });
+                let (parent, child) = if parent_first { (first, second) } else { (second, first) };
+                // The motion carries the child's item onto the parent's. The standard has each item in its own
+                // representation, in that order, and some writers swap them, so see which representation really holds
+                // which: one that goes by the order alone would put the part on the wrong side of the assembly.
+                let in_rep = |rep: usize, item: usize| lists.get(&rep).is_some_and(|l| l.contains(&item));
+                let a_is_parents = if in_rep(parent, item_a) && !in_rep(parent, item_b) {
+                    true
+                } else if in_rep(parent, item_b) && !in_rep(parent, item_a) {
+                    false
+                } else if in_rep(child, item_a) && !in_rep(child, item_b) {
+                    false
+                } else if in_rep(child, item_b) && !in_rep(child, item_a) {
+                    true
+                } else {
+                    parent_first
+                };
+                let motion = if a_is_parents { a.compose(&b.inverse()) } else { b.compose(&a.inverse()) };
+                out.children.entry(parent).or_default().push((child, motion));
+                out.placed.insert(child);
+            }
+        }
+        // A mapped item: a representation inside another, from one placement to another.
+        let items: Vec<(usize, Vec<usize>)> = out.items.iter().map(|(k, v)| (*k, v.clone())).collect();
+        for (rep, list) in items {
+            for item in list {
+                if file.has(item, "AXIS2_PLACEMENT_3D") {
+                    out.frames.entry(rep).or_default().push(file.placement(item)?);
+                }
+                let Ok(m) = file.part(item, "MAPPED_ITEM") else { continue };
+                let source = File::id(m.get(1))?;
+                let map = file.part(source, "REPRESENTATION_MAP")?;
+                // Mapped from something other than a placement, such as a camera's view of a model, it places nothing.
+                let origin_id = File::id(map.first())?;
+                if !file.has(origin_id, "AXIS2_PLACEMENT_3D") {
+                    continue;
+                }
+                let (origin, child) = (file.placement(origin_id)?, File::id(map.get(1))?);
+                let target_id = File::id(m.get(2))?;
+                let target = file.placement(target_id).map_err(|_| Error::Unsupported(format!("an assembly placed by a {}, which can scale what it places", file.name(target_id))))?;
+                out.children.entry(rep).or_default().push((child, target.compose(&origin.inverse())));
+                out.placed.insert(child);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every solid in the tree under a representation, wherever the motions put it.
+    fn walk(&self, rep: usize, at: Frame, on_path: &mut Vec<usize>, solids: &BTreeSet<usize>, out: &mut Vec<(usize, Frame)>) {
+        // This one and whatever's the same as it, all at this place.
+        let mut group = vec![rep];
+        let mut k = 0;
+        while k < group.len() {
+            for other in self.same.get(&group[k]).map_or(&[][..], Vec::as_slice) {
+                if !group.contains(other) {
+                    group.push(*other);
+                }
+            }
+            k += 1;
+        }
+        if group.iter().any(|g| on_path.contains(g)) {
+            return;
+        }
+        on_path.extend_from_slice(&group);
+        let mut seen: Vec<usize> = Vec::new();
+        for g in &group {
+            for item in self.items.get(g).map_or(&[][..], Vec::as_slice) {
+                if solids.contains(item) && !seen.contains(item) {
+                    seen.push(*item);
+                    out.push((*item, at));
+                }
+            }
+            for (child, motion) in self.children.get(g).map_or(&[][..], Vec::as_slice) {
+                self.walk(*child, at.compose(motion), on_path, solids, out);
+            }
+        }
+        on_path.truncate(on_path.len() - group.len());
+    }
+
+    /// Where each solid goes, once for each time it's used, in the order they're reached.
+    fn placed_solids(&self, solids: &BTreeSet<usize>) -> Vec<(usize, Frame)> {
+        let mut out = Vec::new();
+        let mut path = Vec::new();
+        // The roots: whatever isn't placed by anything, nor the same as something that is.
+        let is_placed = |rep: usize| -> bool {
+            let mut group = vec![rep];
+            let mut k = 0;
+            while k < group.len() {
+                for other in self.same.get(&group[k]).map_or(&[][..], Vec::as_slice) {
+                    if !group.contains(other) {
+                        group.push(*other);
+                    }
+                }
+                k += 1;
+            }
+            group.iter().any(|g| self.placed.contains(g))
+        };
+        let roots: Vec<usize> = self.items.keys().copied().filter(|&rep| !is_placed(rep) && !self.on_the_side.contains(&rep)).collect();
+        let places_things = |rep: usize| self.children.get(&rep).is_some_and(|c| !c.is_empty()) || self.same.get(&rep).is_some_and(|o| o.iter().any(|g| self.children.get(g).is_some_and(|c| !c.is_empty())));
+        let mut done: BTreeSet<usize> = BTreeSet::new();
+        let mut visit = |rep: usize, out: &mut Vec<(usize, Frame)>, skip_known: bool| {
+            if !done.insert(rep) {
+                return;
+            }
+            for other in self.same.get(&rep).map_or(&[][..], Vec::as_slice) {
+                done.insert(*other);
+            }
+            // A placement listed beside a solid in a part nothing else places is where the part goes: it's how ACIS
+            // writes a body's own transform, and OpenCASCADE reads it that way too. It's something else altogether
+            // in an assembly, where it's what the motions are measured from.
+            let items = self.items.get(&rep).map_or(&[][..], Vec::as_slice);
+            let holds_solid = items.iter().any(|i| solids.contains(i));
+            let at = match self.frames.get(&rep).map_or(&[][..], Vec::as_slice) {
+                [only] if holds_solid && !places_things(rep) => *only,
+                _ => Frame::WORLD,
+            };
+            let mut found = Vec::new();
+            self.walk(rep, at, &mut path, solids, &mut found);
+            for (s, f) in found {
+                if !skip_known || !out.iter().any(|(t, _)| *t == s) {
+                    out.push((s, f));
+                }
+            }
+        };
+        // Assemblies first. A representation elsewhere can list the same solid again for some other purpose, such as
+        // validation properties, and that's no further copy of it.
+        for &rep in roots.iter().filter(|&&r| places_things(r)) {
+            visit(rep, &mut out, false);
+        }
+        for &rep in &roots {
+            visit(rep, &mut out, true);
+        }
+        // Two representations that are the same thing would each have found the solid above.
+        let mut unique: Vec<(usize, Frame)> = Vec::with_capacity(out.len());
+        for (s, f) in out {
+            if !unique.iter().any(|(t, g)| *t == s && g.origin.dist(f.origin) < 1e-9 && g.x.dist(f.x) < 1e-9 && g.y.dist(f.y) < 1e-9) {
+                unique.push((s, f));
+            }
+        }
+        // A solid in nothing is still in the file, and it's not for this to drop. Nor is one on the side, if that's all
+        // the file has.
+        let on_the_side = |s: usize| self.on_the_side.iter().any(|r| self.items.get(r).is_some_and(|l| l.contains(&s)));
+        let any_proper = !unique.is_empty();
+        for &s in solids {
+            if !unique.iter().any(|(t, _)| *t == s) && !(any_proper && on_the_side(s)) {
+                unique.push((s, Frame::WORLD));
+            }
+        }
+        unique
+    }
+}
+
 /// Reads every solid in a STEP file, each as its own body, with faces named by `feature` and their position
-/// in the file. A file holding anything this can't represent exactly is refused, naming what it found.
+/// in the file. An assembly's parts come out where it puts them, one body for each time each is used. A file holding
+/// anything this can't represent exactly is refused, naming what it found.
 pub fn read_step(text: &str, feature: u32) -> Result<Vec<Body>> {
     let items = parse(text)?;
     let (length, angle) = units(&items)?;
     let file = File { items, length, angle };
-    if file.items.values().any(|i| i.iter().any(|(n, _)| n == "NEXT_ASSEMBLY_USAGE_OCCURRENCE")) {
-        return Err(Error::Unsupported("this file is an assembly, with parts placed by transforms, and only single parts can be imported yet".into()));
-    }
+    // A solid of a kind that isn't read here mustn't quietly go missing from the part.
+    const OTHER_SOLIDS: [&str; 13] = [
+        "CSG_SOLID", "BOOLEAN_RESULT", "EXTRUDED_AREA_SOLID", "REVOLVED_AREA_SOLID", "EXTRUDED_FACE_SOLID", "REVOLVED_FACE_SOLID", "SOLID_REPLICA", "FACETED_BREP_WITH_VOIDS",
+        "BLOCK", "RIGHT_ANGULAR_WEDGE", "RIGHT_CIRCULAR_CONE", "RIGHT_CIRCULAR_CYLINDER", "SWEPT_DISK_SOLID",
+    ];
+    let mut others: BTreeMap<&str, usize> = BTreeMap::new();
     // The solids, in file order.
-    let mut solids: Vec<(usize, Vec<(usize, bool)>)> = Vec::new();
+    let mut solids: BTreeMap<usize, SolidShells> = BTreeMap::new();
     for (&id, instance) in &file.items {
         for (name, args) in instance {
             match name.as_str() {
-                "MANIFOLD_SOLID_BREP" => solids.push((File::id(args.get(1))?, Vec::new())),
+                "MANIFOLD_SOLID_BREP" | "FACETED_BREP" => {
+                    solids.insert(id, (File::id(args.get(1))?, Vec::new()));
+                }
                 "BREP_WITH_VOIDS" => {
                     let mut voids = Vec::new();
                     for v in File::list(args.get(2))? {
@@ -2028,15 +2731,22 @@ pub fn read_step(text: &str, feature: u32) -> Result<Vec<Body>> {
                             voids.push((vid, false));
                         }
                     }
-                    solids.push((File::id(args.get(1))?, voids));
+                    solids.insert(id, (File::id(args.get(1))?, voids));
                 }
-                _ => {}
+                other => {
+                    if let Some(kind) = OTHER_SOLIDS.iter().find(|k| **k == other) {
+                        *others.entry(kind).or_insert(0) += 1;
+                    }
+                }
             }
         }
-        let _ = id;
+    }
+    if !others.is_empty() {
+        let list: Vec<String> = others.iter().map(|(n, c)| format!("{c} {n}")).collect();
+        return Err(Error::Unsupported(format!("this file has solids of kinds that can't be imported yet: {}. Boundary representations can", list.join(", "))));
     }
     if solids.is_empty() {
-        let surface_model = file.items.values().any(|i| i.iter().any(|(n, _)| n == "SHELL_BASED_SURFACE_MODEL" || n == "GEOMETRIC_CURVE_SET"));
+        let surface_model = file.items.values().any(|i| i.iter().any(|(n, _)| n == "SHELL_BASED_SURFACE_MODEL" || n == "GEOMETRIC_CURVE_SET" || n == "CURVE_BOUNDED_SURFACE"));
         return Err(if surface_model {
             Error::Unsupported("this file holds surfaces or curves, not closed solids".into())
         } else {
@@ -2044,7 +2754,7 @@ pub fn read_step(text: &str, feature: u32) -> Result<Vec<Body>> {
         });
     }
     // Refuse everything at once, naming it all, before doing any work.
-    let shells: Vec<usize> = solids.iter().flat_map(|(o, v)| std::iter::once(*o).chain(v.iter().map(|x| x.0))).collect();
+    let shells: Vec<usize> = solids.values().flat_map(|(o, v)| std::iter::once(*o).chain(v.iter().map(|x| x.0))).collect();
     let missing = unsupported_surfaces(&file, &shells);
     if !missing.is_empty() {
         let list: Vec<String> = missing.iter().map(|(n, c)| format!("{c} on {n}")).collect();
@@ -2053,5 +2763,21 @@ pub fn read_step(text: &str, feature: u32) -> Result<Vec<Body>> {
             list.join(", ")
         )));
     }
-    solids.iter().map(|(outer, voids)| solid(&file, feature, *outer, voids)).collect()
+    let placements = Placements::of(&file)?;
+    let ids: BTreeSet<usize> = solids.keys().copied().collect();
+    let mut built: BTreeMap<usize, Body> = BTreeMap::new();
+    let mut out = Vec::new();
+    for (k, (id, at)) in placements.placed_solids(&ids).into_iter().enumerate() {
+        if !built.contains_key(&id) {
+            let (outer, voids) = &solids[&id];
+            built.insert(id, solid(&file, feature, *outer, voids)?);
+        }
+        let mut body = built[&id].transformed(&at);
+        // Each one has names of its own, the way a pattern's copies do.
+        if k > 0 {
+            body.mark_copy(feature, k as u32);
+        }
+        out.push(body);
+    }
+    Ok(out)
 }

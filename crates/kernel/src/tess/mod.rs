@@ -258,13 +258,14 @@ pub fn min_sample_gap(size: f64) -> f64 {
 pub fn tessellate(body: &Body, params: &TessParams) -> Result<Mesh> {
     let mut density = vec![1usize; body.edges.len()];
     let mut graded = vec![false; body.edges.len()];
+    let mut needs_more = vec![false; body.edges.len()];
     let mut bounds = Aabb::EMPTY;
     for &p in &body.vertices {
         bounds.add(p);
     }
     let min_gap = min_sample_gap(bounds.diagonal());
     let mut last_error = None;
-    for _attempt in 0..5 {
+    for _attempt in 0..8 {
         let mut polylines: Vec<Vec<Vec3>> = body
             .edges
             .iter()
@@ -272,26 +273,25 @@ pub fn tessellate(body: &Body, params: &TessParams) -> Result<Mesh> {
             .map(|(i, e)| edge_polyline(e, &body.vertices, params, density[i], graded[i], min_gap))
             .collect();
         let mut mesh = Mesh::default();
-        let mut crossing = None;
+        // Every face that fails gets its more samples at once, or a part with many thin faces runs out of tries.
+        let mut crossed = false;
         for f in 0..body.faces.len() {
             if let Err(e) = tessellate_face(body, f, &mut polylines, params, &mut mesh) {
-                crossing = Some((f, e));
-                break;
+                crossed = true;
+                last_error = Some(e);
+                for c in body.faces[f].loops.iter().flatten() {
+                    graded[c.edge] = true;
+                    needs_more[c.edge] = true;
+                }
             }
         }
-        match crossing {
-            None => {
-                mesh.edge_lines = polylines;
-                return Ok(mesh);
-            }
-            Some((f, e)) => {
-                last_error = Some(e);
-                for lp in &body.faces[f].loops {
-                    for c in lp {
-                        density[c.edge] *= 2;
-                        graded[c.edge] = true;
-                    }
-                }
+        if !crossed {
+            mesh.edge_lines = polylines;
+            return Ok(mesh);
+        }
+        for (e, more) in needs_more.iter_mut().enumerate() {
+            if std::mem::take(more) {
+                density[e] *= 2;
             }
         }
     }

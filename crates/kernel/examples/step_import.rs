@@ -34,7 +34,21 @@ fn main() {
                     }
                     Err(e) => format!("refused: {}", e.to_string().replace(',', ";")),
                 };
-                println!("{name},ok,{},{v},{a},{f},{watertight},{cut}", bodies.len());
+                // Where it all is, and how much it holds, by its triangles, as neither depends on anyone's integrator.
+                let mut lo = Vec3::splat(f64::INFINITY);
+                let mut hi = Vec3::splat(f64::NEG_INFINITY);
+                let mut held = 0.0;
+                for b in &bodies {
+                    if let Ok(mesh) = tessellate(b, &TessParams::for_size(b.aabb().diagonal())) {
+                        held += mesh.volume();
+                        for p in &mesh.positions {
+                            lo = lo.min(*p);
+                            hi = hi.max(*p);
+                        }
+                    }
+                }
+                let c = (lo + hi) * 0.5;
+                println!("{name},ok,{},{v},{a},{f},{watertight},{cut},{},{},{},{held}", bodies.len(), c.x, c.y, c.z);
             }
             Err(e) => println!("{name},refused,{}", e.to_string().replace(',', ";")),
         }

@@ -8,7 +8,7 @@
 //! using them, and loops wind the right way in the face chart.
 
 use crate::math::*;
-use crate::topo::Body;
+use crate::topo::{Body, Coedge, Face};
 use crate::hash::HashMap;
 
 /// Largest gap allowed between geometry that should coincide. Intersection points
@@ -212,6 +212,24 @@ fn check_geometry(body: &Body, errors: &mut Vec<String>) {
     }
 }
 
+/// A loop's area in its chart, with what chords cut off curved edges put back: Richardson's step from polygons of two
+/// resolutions, which for a parabola's arc is Archimedes' four thirds of the triangle.
+fn careful_area(body: &Body, face: &Face, lp: &[Coedge]) -> f64 {
+    const STEPS: usize = 128;
+    let (mut coarse, mut fine) = (Vec::new(), Vec::new());
+    for &c in lp {
+        for k in 0..STEPS {
+            let p = face.surface.to_chart(&face.chart, body.coedge_point(c, k as f64 / STEPS as f64));
+            if k % 2 == 0 {
+                coarse.push(p);
+            }
+            fine.push(p);
+        }
+    }
+    let (a, b) = (polygon_area(&coarse), polygon_area(&fine));
+    b + (b - a) / 3.0
+}
+
 /// Loops must wind correctly in the chart, and holes must be inside the outer loop.
 fn check_windings(body: &Body, errors: &mut Vec<String>) {
     for (f, face) in body.faces.iter().enumerate() {
@@ -230,7 +248,12 @@ fn check_windings(body: &Body, errors: &mut Vec<String>) {
             })
             .collect();
         for (l, poly) in polygons.iter().enumerate() {
-            let area = polygon_area(poly) * sign;
+            let mut area = polygon_area(poly) * sign;
+            // On a sliver of a face, thinner than a chord strays from its curve, a coarse polygon can come out the
+            // wrong way round, so a wrong answer gets a careful second look before it counts.
+            if (l == 0) == (area <= 0.0) {
+                area = careful_area(body, face, &face.loops[l]) * sign;
+            }
             if l == 0 && area <= 0.0 {
                 errors.push(format!("face {f} outer loop winds the wrong way (area {area:e})"));
             }

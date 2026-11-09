@@ -18,7 +18,7 @@ These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 - **Draft on spline and free-form faces,** and any draft that changes the topology, other than taking a fillet off and putting it back.
 - **Sheet bodies.** Everything here is a closed solid, so thicken takes faces of a solid, and a surface can't exist alone.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
-- **Assemblies and drawings.** A STEP assembly is refused.
+- **Assemblies as assemblies, and drawings.** A STEP assembly's parts are read, each where the assembly puts it, but as separate bodies with no tree to hold them in, and a document's one body has to [merge them](#step-import).
 
 ## Fuzz results
 
@@ -77,22 +77,44 @@ has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
 
 `coreshape::import::step::read_step`, or the `import_step` feature. It reads closed solids on planes, cylinders, cones, spheres, tori, curves swept along a line or around an axis, and rational B-spline surfaces, in millimetres, metres, inches and so on.
 
-- **Refused, naming the surface and how many faces use it:** any other surface, such as `OFFSET_SURFACE`, so that no result has faces missing.
+- **Refused, naming the surface and how many faces use it:** any other surface, so that no result has faces missing.
+- **Refused, naming the solid:** a solid that isn't a boundary representation, such as `CSG_SOLID` or `EXTRUDED_AREA_SOLID`. An earlier version quietly dropped any solid it didn't recognise: one file's second solid went missing, 68,722 for 868,722, with no error. Faceted solids are read now.
 - **Refused, saying why:** a B-spline surface with a fold or of degree above 16, a face that runs across its surface's seam, or a closed one with no edges of its own at all, as OpenCASCADE writes a whole sphere or torus converted to B-splines. A closed one whose seam is on the face's own boundary is fine: it's cut into two faces along its parameter. A pole is fine too, where a whole side shrinks to a point.
-- **Refused:** assemblies, since parts placed by transforms aren't read yet; open shells; any other edge curve, such as a hyperbola; a surface of revolution whose curve turns too far for one face, which an extrusion's curve can do because it gets cut up.
+- **Refused:** open shells, a shell the file calls closed that has a face on only one side of some edge, and a surface of revolution of a curve other than a line or circle that turns too far for one face, which an extrusion's curve can do because it gets cut up.
+- **Assemblies come in as one body per use of each part,** placed by item-defined transformations and mapped items, nested to any depth, and each copy after the first gets a key of its own (`@f.k`). Writers disagree on which way round a placement's items go, so this looks up which representation really holds each. Going by the order alone put one file's part on the wrong side of the assembly. A shape that only describes a part, such as validation properties or the history of how a feature was made, is no further copy of it.
+- **A placement listed beside a solid, in a part nothing else places, moves that part.** That's how ACIS writes a body's own transform, and OpenCASCADE reads it that way by default, so the two agree on where these parts are: 6 files here. The standard doesn't actually say so. It's a reference for assemblies, and a reader going strictly by it would leave them where their coordinates say.
+- **A document can't hold an assembly as one.** `read_step` gives every part, but the `import_step` feature has one body, so it merges them by Boolean, which can't work for parts that touch along tangent faces, as bolts in holes do. Of 4 assemblies tried: `cubcylso` (2 solids) merged in no time; `bernetl` (7) merged, and rightly lost volume where its parts overlap; `as1` (18) was refused after 56 s and `rear` (40) after 14 s. So for a real assembly, use `read_step`.
+- **Exact forms where they're hiding.** A straight line revolved is read as a plane, cylinder or cone, and a circle revolved as a torus or sphere, including the apple and lemon a circle makes when the axis goes through it. A straight line extruded is a plane. Some writers give a circle's trim in degrees whatever unit they declare, so more than a whole turn counts as a whole turn, and as degrees when working out which side of the axis the arc is on.
 - **Faces change shape on the way in.** This kernel's edges have two different ends and its curved faces stay within half a turn, so a seamed full cylinder comes in as two halves under one name, and so on. Volumes and areas don't change.
 - **Traced edges.** A B-spline edge between two surfaces, which is how other systems store an intersection curve, gets resampled onto both surfaces, so it follows them to this kernel's tolerance and not the file's. That's why `tee` and `cross_drilled` differ from OpenCASCADE by about 1e-6 relative.
 - **A file's flags aren't trusted.** Writers get these wrong in practice: `FACE_BOUND` senses that OpenCASCADE's own reader repairs by looking at the shape, an edge's sense against its line when the two ends say otherwise, and a hole listed before a face's outer loop. So this works out each loop's direction from its neighbours, lets simple faces vote on which way round the group goes, takes a line's direction from its two ends, and puts the largest loop first.
 - **Units are the ones the geometry is assigned,** through its representation's context. An earlier version took the first in the file, and read every inch part as millimetres.
-- **A file's gaps are healed or stated, within a limit.** Vertices move onto the surfaces around them, by up to a thousandth of the part and never more than 0.25 mm. Where surfaces cross, edges get traced onto both exactly. Where they're tangent, as around a fillet, nothing can bring them together, so the file's curve stays. The widest gap left over becomes `Body::tolerance`, which that body's validity is held to in place of the kernel's own 5e-7, and which Booleans on it inherit. So a body read this way is not as exact as one built here, and a gap can make a later Boolean refuse: of the parts below, 1 of 30 refused a box cut through it. Past the limit, a file is refused.
+- **A file's gaps are healed or stated, within a limit.** Vertices move onto the surfaces around them, by up to a thousandth of the part and never more than 0.25 mm. Where surfaces cross, edges get traced onto both exactly. Where they're tangent or close to it, as around a fillet, nothing useful can bring them together, so the file's curve and vertices stay. Close to tangent means a move more than 8 times the gap it would close: following one of those moved a vertex 0.018 mm to close a much smaller gap, put a kink in an edge, and took 2% off a small face. The widest gap left over becomes `Body::tolerance`, which that body's validity is held to in place of the kernel's own 5e-7, and which Booleans on it inherit. So a body read this way is not as exact as one built here, and a gap can make a later Boolean refuse: of the parts below, 1 of 30 refused a box cut through it. Past the limit, a file is refused.
 
-**Checked on real parts** with NIST's public MBE PMI test files, 33 STEP files of 11 parts from CATIA, NX, Creo, SolidWorks and others, up to 671 faces. `NIST-PMI-STEP-Files.zip` is from nist.gov, and stays out of this repository: `scripts/step_import/check_nist.sh <folder>` runs on a folder of those files.
+**Checked on real parts** with two sets of files from other systems, neither kept in this repository. `scripts/step_import/check_nist.sh <folder> <scratch>` reads any folder of `.stp` files with this kernel and OpenCASCADE and compares volume, area and where it all is.
 
-- **30 of 33 read.** The refusals are one file holding no solid at all, which is right, one with an edge 1.4 mm off its faces, and one cone that can't be cut into half turns.
-- **25 of those 30 match OpenCASCADE's reading of the same file** to 1e-3 in volume and area. Most are far closer. In the other 5, OpenCASCADE's own reading disagrees with itself: on CTC 02 it gives 47.85M, 47.10M and 45.47M from three files of one part, where this reads 47.10M, 47.10M and 47.11M, and on STC 08 it gives 388,155 against 503,592 from its own reading of the sibling file, which is what this reads.
+**NIST's public MBE PMI test files,** 33 STEP files of 11 parts from CATIA, NX, Creo, SolidWorks and others, up to 671 faces. `NIST-PMI-STEP-Files.zip` is from nist.gov.
+
+- **31 of 33 read, all watertight.** The refusals are one file holding no solid at all, which is right, and one cone in `ctc_02`'s AP203 file that can't be cut into half turns, whose boundary doesn't alternate in and out along the cut. A Boolean cut through the part was refused on 1 of the 31.
+- **25 of those 31 match OpenCASCADE's reading of the same file** to 1e-3 in volume and area. Most are far closer. Two of the 25 match by OpenCASCADE's solid alone, as `ftc_07` and `stc_07` have two more faces outside the solid that move the middle of its whole shape.
+- **In the other 6, OpenCASCADE's own reading disagrees with itself.** On CTC 02 it gives 47.85M, 47.10M and 45.47M from three files of one part, where this reads 47.10M and 47.11M. On CTC 05 it gives 12.83M, 12.69M and 12.69M, where this reads 12.69M from all three. On STC 08 it gives 388,155 against 503,592 from its own reading of the sibling file, which is what this reads.
 - **The first run read 5 of 33,** and quietly read every inch part at the wrong scale. Those bugs are fixed, with tests, but it says what to expect from a set this hasn't met yet.
 
-Checked further by `scripts/check_step_import.sh`, which has OpenCASCADE write 31 shapes, then reads each, compares volume and area, meshes it, cuts a box out of it, writes it back, and has OpenCASCADE check the result. 29 are read, watertight, and valid in OpenCASCADE afterwards. Most match to about 1e-13. Three flagged ones are B-spline conversions of a cylinder, cone and frustum, where this reads 4021.2385965950 for a true 4021.2385965949, and OpenCASCADE's own reported volume is 4058.05. The two refused are a sphere and a torus as B-splines with no edges at all. 3,000 randomly damaged files were each read as a valid solid or refused, with no panics, and everything this kernel writes comes back the same.
+**75 sample files from STEP Tools,** 55 AP203 and 20 AP214, from ACIS, Pro/ENGINEER, CATIA, Unigraphics, AutoCAD and others, up to 2,604 faces and 108 solids. They came from steptools.com, whose pages state no licence, so they were only used locally.
+
+- **The first run read 13 of 75,** and silently lost a solid from one. Now 69 of 75 read, all watertight, and a Boolean cut through the first solid of each worked on all 69.
+- **66 of those 69 match OpenCASCADE** to 1e-3 in volume and area and to 1e-2 of the part's size in position, counting all the assemblies' parts. Most are far closer.
+- **In the other 3, OpenCASCADE's reading is broken.** On `socks` it reports a volume of -43,703 and this reads 24,089. On `piston` and `filler` it reports no solid and loses faces, 38 of 66 and 11 of 19, where this keeps them all. Refining this kernel's own mesh converges on its exact values: `piston` goes 11,681, 11,697, 11,700 for an exact 11,701.
+- **3 of the 6 refused ought to be:** `snet` has no geometry, `gear` is surfaces only, and `chair` is 36 shells called closed that are each one open face.
+- **3 of the 6 are this kernel's failures.** `jack_in_the_box` has an extruded face it can't cut along its curve, where OpenCASCADE reads 56 solids. `tork` and `st203-bapl` have B-spline surfaces it finds folded, which OpenCASCADE reads as no solid, with a volume of -13.9M from the mesh of `st203-bapl`, so they may be bad files, but that hasn't been shown.
+
+**What those files found in the kernel itself,** beyond the reader:
+
+- **Volume and area were wrong on a spline face ending in a tip.** The integral runs around the face's boundary in its parameters, and no edge runs along the side that's all one point, so everything between that side and its reference was missed: exactly a quarter of a cone, with no error. `moon_buggy` was off by 1e-3 overall and 25% on two faces. Fixed, with a closed-form test.
+- **OpenCASCADE was off too on that file.** On `moon_buggy`, its own area is about 1e-3 high on many of the faces. Its fine mesh, face by face, agrees with this kernel to about 7e-5, from below as a mesh should.
+- **A band thinner than a chord strays failed.** A 1.6 micron chamfer on `boxy`, 7 files, made polygons through its two rims cross, so it was refused as wound the wrong way, and then couldn't be meshed. Winding now gets a careful second look before it counts, and the mesher adds samples to every face that fails in one pass, up to 8 passes.
+
+Checked further by `scripts/check_step_import.sh`, which has OpenCASCADE write 31 shapes, then reads each, compares volume and area, meshes it, cuts a box out of it, writes it back, and has OpenCASCADE check the result. 29 are read, watertight, and valid in OpenCASCADE afterwards. Most match to about 1e-13. Four flagged ones are B-spline conversions of a cylinder, a cone, a frustum and a drilled box, where the formulas agree with this and not with OpenCASCADE's own reported volume: this reads 4021.2385965950 for a true 4021.2385965949, where OpenCASCADE reports 4058.05, and 1272.345 for a cone of a true 405 pi. The two refused are a sphere and a torus as B-splines with no edges at all. 3,000 randomly damaged files were each read as a valid solid or refused, with no panics, and everything this kernel writes comes back the same.
 
 ## Swept spline surfaces
 
@@ -134,8 +156,15 @@ Found by an independent review harness and still open. `--example review named <
 | Cylinder r = 5 with its axis offset 1e-5: subtract the sliver | Refused: "the result does not close" | Volume 0.001 |
 
 These are slivers near the tolerance, and a refusal there is the safe answer, but the
-message should name the sliver instead of blaming closure. OpenCASCADE also reads surfaces with poles and
-assemblies from STEP files, which this kernel refuses.
+message should name the sliver instead of blaming closure.
+
+Two more were found while writing a test, both on a thin wall beside a large circle, a 128-sided hole just inside a circle of radius 100, and both refused and never wrong. A chord of the circle at the resolution these checks use strays about 0.5, which is what's in the way.
+
+| Wall | Subtract the hole | A profile with that hole | OpenCASCADE subtracting it |
+|---|---|---|---|
+| 0.1 | Refused: "the result does not close" | Refused: "hole 0 crosses the outer wire" | Valid, 376.9509, which is the formula |
+| 0.2 | Works | Refused, wrongly | Valid, 690.5130, which is the formula, as this kernel gets |
+| 0.3 and up | Works | Works | Not tried |
 
 ## What Booleans refuse by design
 
@@ -389,6 +418,6 @@ Free-form surfaces got a good deal faster for the helix demos, in ways that help
 - **Running on macOS and Windows.** The kernel compiles for both, but tests have only run on Linux.
 - **The download path on the hosted page.** Saving uses the host's download capability with the
   file wrapped in a zip, because `.step` and `.stl` aren't on its allowlist.
-- **Other CAD systems.** Files this kernel writes have only been read back in OpenCASCADE. Files from other systems have only been NIST's 33 test parts, which are real but few, and their free-form surfaces are a small share. Expect the next set to find problems these haven't. CAx-IF's benchmark files haven't been tried, and they're the obvious next test.
+- **Other CAD systems.** Files this kernel writes have only been read back in OpenCASCADE. Files from other systems have only been NIST's 33 test parts and STEP Tools' 75 samples, and their free-form surfaces are a small share. Those two sets took the reader from 5 of 33 and 13 of 75 to where it is, so a third set will find more. CAx-IF's newer rounds seem to be in a member area, and haven't been tried. Expect the next set to find problems these haven't. CAx-IF's benchmark files haven't been tried, and they're the obvious next test.
 - **A real MCP client.** Only the test suite has connected to the server: see [MCP.md](MCP.md).
 - **Splines in the sketch solver against PlaneGCS.** Lines, arcs, circles, ellipses and distances were compared, and splines only have the solver's own fuzz: see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).

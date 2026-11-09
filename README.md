@@ -22,7 +22,7 @@ It runs natively and in the browser through WebAssembly.
   redundant and conflicting constraints, supports dragging, and is fast enough for every mouse
   move. Checked against FreeCAD's PlaneGCS: see [docs/SKETCH_SOLVER.md](docs/SKETCH_SOLVER.md).
 - **Output:** exact volume and area, a watertight mesh, STL and STEP, and offscreen PNG images.
-- **Input:** STEP files with analytic surfaces, swept curves and free-form surfaces, healing what real files get wrong, and tested on NIST's public parts. Anything else is refused by name.
+- **Input:** STEP files with analytic surfaces, swept curves, free-form surfaces, faceted solids and assemblies, healing what real files get wrong, and tested against OpenCASCADE on 108 files from other systems: 100 read. Anything else is refused by name.
 - **For agents:** an MCP server for building, editing and inspecting parts by stable names. See
   [docs/MCP.md](docs/MCP.md).
 

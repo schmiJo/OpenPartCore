@@ -1201,6 +1201,11 @@ impl Patch {
         if !(u.0 >= u0 && u.1 <= u1 && u.1 > u.0 && v.0 >= v0 && v.1 <= v1 && v.1 > v.0) {
             return Err(Error::InvalidInput(format!("free-form surface: {u:?} by {v:?} isn't inside its range")));
         }
+        // A cut that rounding has put a hair from a knot belongs on it. Past it, the piece would start with a cell of
+        // no width, which has no tangent to speak of.
+        let snap = |x: f64, knots: &[f64], range: f64| knots.iter().copied().find(|k| (k - x).abs() <= 1e-9 * range).unwrap_or(x);
+        let u = (snap(u.0, &self.knots.0, u1 - u0), snap(u.1, &self.knots.0, u1 - u0));
+        let v = (snap(v.0, &self.knots.1, v1 - v0), snap(v.1, &self.knots.1, v1 - v0));
         let (nu, nv) = self.count;
         let mut along: Vec<Vec<Hom>> = (0..nv).map(|j| (0..nu).map(|i| Hom::of(self.points[i * nv + j], self.weights[i * nv + j])).collect()).collect();
         let (knots_u, keep_u) = cut_lines(self.degree.0, &self.knots.0, u, &mut along);
@@ -1734,6 +1739,10 @@ impl Patch {
     /// The chart x positions of the knots, where a smooth rule of integration has to stop.
     pub fn chart_breaks_x(&self) -> Vec<f64> {
         self.breaks.0.iter().map(|u| u * self.scale.0).collect()
+    }
+
+    pub fn chart_breaks_y(&self) -> Vec<f64> {
+        self.breaks.1.iter().map(|v| v * self.scale.1).collect()
     }
 }
 

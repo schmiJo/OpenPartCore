@@ -225,6 +225,17 @@ impl Frame {
     }
 
     /// `other` expressed through this rigid transform.
+    /// The motion that undoes this one.
+    pub fn inverse(&self) -> Frame {
+        let o = self.origin;
+        Frame {
+            origin: v3(-o.dot(self.x), -o.dot(self.y), -o.dot(self.z)),
+            x: v3(self.x.x, self.y.x, self.z.x),
+            y: v3(self.x.y, self.y.y, self.z.y),
+            z: v3(self.x.z, self.y.z, self.z.z),
+        }
+    }
+
     pub fn compose(&self, other: &Frame) -> Frame {
         Frame {
             origin: self.to_world(other.origin),
