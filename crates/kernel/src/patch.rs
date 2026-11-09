@@ -812,30 +812,34 @@ impl Patch {
         // No normal anywhere means a pole or a fold, and the sign and the chart both need one. Sampled, along
         // with the tightest curve, which sets how fine a trace over this surface has to be.
         let mut min_radius = f64::INFINITY;
-        const SAMPLES: usize = 12;
+        // At most this many samples a side per cell. A surface with many small cells gets fewer per cell, down to a limit,
+        // as they're that much closer together already: a helix would otherwise spend most of its time here.
+        const MOST: usize = 12;
+        let samples = ((12.0 * 12.0 * 8.0 / cells.len() as f64).sqrt() as usize).clamp(4, MOST);
         let near_pole = |q: Vec3| poles.iter().any(|p: &Vec3| p.dist(q) <= 1e-6 * size.max(1.0));
-        for c in &cells {
+        // What a look at a cell finds at a given spacing: the tightest bend, or why it can't be used.
+        let scan = |c: &BezierCell, n: usize| -> std::result::Result<f64, String> {
+            let mut tightest = f64::INFINITY;
             // A fold is narrow and the normal doesn't have to come near zero at any sample, but it does turn over
             // between two close ones, which no smooth surface does at this spacing.
-            let mut last_row = [Vec3::ZERO; SAMPLES + 1];
-            for a in 0..=SAMPLES {
-                for b in 0..=SAMPLES {
-                    let q = c.local(a as f64 / SAMPLES as f64, b as f64 / SAMPLES as f64);
-                    let n = q.ds.cross(q.dt);
+            let mut last_row = [Vec3::ZERO; MOST + 1];
+            for a in 0..=n {
+                for b in 0..=n {
+                    let q = c.local(a as f64 / n as f64, b as f64 / n as f64);
+                    let unit_n = q.ds.cross(q.dt);
                     let (e, f, g) = (q.ds.dot(q.ds), q.ds.dot(q.dt), q.dt.dot(q.dt));
                     let area2 = e * g - f * f;
                     // A pole has no normal, and that's all right: it's a point, and what's around it has one.
                     if near_pole(q.p) {
                         continue;
                     }
+                    let (u, v) = (c.u.0 + (c.u.1 - c.u.0) * a as f64 / n as f64, c.v.0 + (c.v.1 - c.v.0) * b as f64 / n as f64);
                     if !(area2 > 1e-14 * e * g) || !(e > 0.0) || !(g > 0.0) {
-                        let (u, v) = (c.u.0 + (c.u.1 - c.u.0) * a as f64 / SAMPLES as f64, c.v.0 + (c.v.1 - c.v.0) * b as f64 / SAMPLES as f64);
-                        return bad(format!("it has no normal near u = {u:.6}, v = {v:.6}, which means a pole or a fold, and those aren't supported yet"));
+                        return Err(format!("it has no normal near u = {u:.6}, v = {v:.6}, which means a pole or a fold, and those aren't supported yet"));
                     }
-                    let unit = n.normalized();
+                    let unit = unit_n.normalized();
                     if unit.dot(last_row[b]) < -0.5 || (b > 0 && unit.dot(last_row[b - 1]) < -0.5) {
-                        let (u, v) = (c.u.0 + (c.u.1 - c.u.0) * a as f64 / SAMPLES as f64, c.v.0 + (c.v.1 - c.v.0) * b as f64 / SAMPLES as f64);
-                        return bad(format!("it folds over itself near u = {u:.6}, v = {v:.6}, which means a pole or a fold, and those aren't supported yet"));
+                        return Err(format!("it folds over itself near u = {u:.6}, v = {v:.6}, which means a pole or a fold, and those aren't supported yet"));
                     }
                     last_row[b] = unit;
                     let (l, m, r) = (q.dss.dot(unit), q.dst.dot(unit), q.dtt.dot(unit));
@@ -843,9 +847,19 @@ impl Patch {
                     let gauss = (l * r - m * m) / area2;
                     let bend = mean.abs() + (mean * mean - gauss).max(0.0).sqrt();
                     if bend > 1e-12 {
-                        min_radius = min_radius.min(1.0 / bend);
+                        tightest = tightest.min(1.0 / bend);
                     }
                 }
+            }
+            Ok(tightest)
+        };
+        for c in &cells {
+            // A cell that looks wrong from a distance gets a closer look before anything is refused, since a sharp twist looks
+            // like a fold if the samples are far enough apart.
+            let found = scan(c, samples).or_else(|why| if samples < MOST { scan(c, MOST) } else { Err(why) });
+            match found {
+                Ok(tightest) => min_radius = min_radius.min(tightest),
+                Err(why) => return bad(why),
             }
         }
 
@@ -1024,6 +1038,12 @@ impl Patch {
         let room = Vec3::splat(self.offset.abs());
         for cell in &self.cells {
             if cell.u.1 < u.0 || cell.u.0 > u.1 || cell.v.1 < v.0 || cell.v.0 > v.1 {
+                continue;
+            }
+            // All of this cell: its own control points bound it, without building anything for a search.
+            if cell.u.0 >= u.0 && cell.u.1 <= u.1 && cell.v.0 >= v.0 && cell.v.1 <= v.1 {
+                lo = lo.min(cell.lo - room);
+                hi = hi.max(cell.hi + room);
                 continue;
             }
             let (du, dv) = (cell.u.1 - cell.u.0, cell.v.1 - cell.v.0);
@@ -1255,21 +1275,57 @@ impl Patch {
         let mut budget = SEARCH_BUDGET;
         // What a search that ran out of budget can still prove.
         let mut proven = f64::INFINITY;
-        // A close first answer rules most of the patch out straight away: the nearest cell's nearest leaf, by
-        // its center, and Newton from there.
-        let nearest = self.cells.iter().min_by(|a, b| a.center.dist(p).total_cmp(&b.center.dist(p)));
-        // The stationary point Newton found, which a box can recognise as its one root without looking again.
+        // Most queries are points on the surface: along a face's own edges, or checking what was just built. So first Newton
+        // from a few places in the cells that could hold it, which needs nothing built, and a helix's or a fine loft's hundreds
+        // of cells then only ever build their search structures if something needs them.
         let mut root = None;
         let mut minimum = false;
-        if let Some(cell) = nearest {
-            consider(cell, 0.5, 0.5, p, &mut best);
-            if let Some(leaf) = cell.leaves().iter().min_by(|a, b| a.center.dist(p).total_cmp(&b.center.dist(p))) {
-                let (s, t) = ((leaf.s.0 + leaf.s.1) / 2.0, (leaf.t.0 + leaf.t.1) / 2.0);
+        // A point on the surface is in its own cell's box, so only those are worth trying, the nearest first.
+        let mut first: Option<(&BezierCell, f64)> = None;
+        let mut holding: Vec<(&BezierCell, f64)> = Vec::new();
+        for cell in &self.cells {
+            let d = cell.center.dist(p);
+            if first.is_none_or(|x| d < x.1) {
+                first = Some((cell, d));
+            }
+            if box_distance(p, cell.lo, cell.hi) <= TOL + self.offset.abs() {
+                holding.push((cell, d));
+            }
+        }
+        holding.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for &(cell, _) in holding.iter().take(4) {
+            let (mut near, mut at) = (f64::INFINITY, (0.5, 0.5));
+            for a in 0..3 {
+                for b in 0..3 {
+                    let (s, t) = (0.5 * a as f64, 0.5 * b as f64);
+                    let d = consider(cell, s, t, p, &mut best);
+                    if d < near {
+                        near = d;
+                        at = (s, t);
+                    }
+                }
+            }
+            if let Some((s, t)) = cell.newton(at.0, at.1, p) {
                 consider(cell, s, t, p, &mut best);
-                if let Some((s, t)) = cell.newton(s, t, p) {
+                root = Some((std::ptr::from_ref(cell), s, t));
+                minimum = cell.is_minimum(s, t, p);
+                if best.0 < TOL {
+                    break;
+                }
+            }
+        }
+        if !(best.0 < TOL) && !(root.is_some() && self.offset != 0.0 && (best.0 - self.offset.abs()).abs() < TOL && minimum) {
+            // A close first answer rules most of the patch out straight away: the nearest cell's nearest leaf, by
+            // its center, and Newton from there.
+            if let Some((cell, _)) = first {
+                if let Some(leaf) = cell.leaves().iter().min_by(|a, b| a.center.dist(p).total_cmp(&b.center.dist(p))) {
+                    let (s, t) = ((leaf.s.0 + leaf.s.1) / 2.0, (leaf.t.0 + leaf.t.1) / 2.0);
                     consider(cell, s, t, p, &mut best);
-                    root = Some((std::ptr::from_ref(cell), s, t));
-                    minimum = cell.is_minimum(s, t, p);
+                    if let Some((s, t)) = cell.newton(s, t, p) {
+                        consider(cell, s, t, p, &mut best);
+                        root = Some((std::ptr::from_ref(cell), s, t));
+                        minimum = cell.is_minimum(s, t, p);
+                    }
                 }
             }
         }
@@ -1410,21 +1466,37 @@ impl Patch {
     /// need, and it's a good deal faster than one.
     pub fn distance_near(&self, uv: Vec2, p: Vec3) -> f64 {
         let ((u0, u1), (v0, v1)) = self.domain();
-        let (u, v) = ((uv.x / self.scale.0).clamp(u0, u1), (uv.y / self.scale.1).clamp(v0, v1));
-        let (cell, s, t) = self.cell_at(u, v);
-        match cell.newton(s, t, p) {
-            Some((s, t)) if self.offset == 0.0 => cell.point(s, t).dist(p),
-            Some((s, t)) => {
-                let (q, ds, dt) = cell.first(s, t);
+        let (mut u, mut v) = ((uv.x / self.scale.0).clamp(u0, u1), (uv.y / self.scale.1).clamp(v0, v1));
+        // Newton over the whole patch, so that a point just over a knot line carries on into the next cell.
+        for _ in 0..16 {
+            let (cell, s, t) = self.cell_at(u, v);
+            let q = cell.local(s, t);
+            let r = q.p - p;
+            let (g1, g2) = (r.dot(q.ds), r.dot(q.dt));
+            let (a, b, d) = (q.ds.dot(q.ds) + r.dot(q.dss), q.ds.dot(q.dt) + r.dot(q.dst), q.dt.dot(q.dt) + r.dot(q.dtt));
+            let det = a * d - b * b;
+            if det == 0.0 || !det.is_finite() {
+                break;
+            }
+            let (dx, dy) = ((d * g1 - b * g2) / det, (a * g2 - b * g1) / det);
+            let (nu, nv) = ((u - dx * (cell.u.1 - cell.u.0)).clamp(u0, u1), (v - dy * (cell.v.1 - cell.v.0)).clamp(v0, v1));
+            let moved = (nu - u).abs() / (u1 - u0) + (nv - v).abs() / (v1 - v0);
+            (u, v) = (nu, nv);
+            if moved < 1e-13 {
+                let (cell, s, t) = self.cell_at(u, v);
+                let q = cell.point(s, t);
+                if self.offset == 0.0 {
+                    return q.dist(p);
+                }
+                let (_, ds, dt) = cell.first(s, t);
                 let n = ds.cross(dt);
                 if n.norm() > 1e-12 * ds.norm() * dt.norm() {
-                    ((p - q).dot(n.normalized()) - self.offset).abs()
-                } else {
-                    self.signed_distance(p).abs()
+                    return ((p - q).dot(n.normalized()) - self.offset).abs();
                 }
+                break;
             }
-            None => self.signed_distance(p).abs(),
         }
+        self.signed_distance(p).abs()
     }
 
     /// The normal at a chart position in the domain.
@@ -1493,6 +1565,38 @@ impl Patch {
     pub fn interior_knots(&self) -> [&[f64]; 2] {
         let inner = |list: &'_ Vec<f64>| -> std::ops::Range<usize> { 1..list.len() - 1 };
         [&self.breaks.0[inner(&self.breaks.0)], &self.breaks.1[inner(&self.breaks.1)]]
+    }
+
+    /// Whether a point, in the patch's own coordinates, is inside the box of any of its cells, with this much room.
+    pub fn boxes_hold(&self, p: Vec3, room: f64) -> bool {
+        let room = room + self.offset.abs();
+        self.cells.iter().any(|c| p.x >= c.lo.x - room && p.x <= c.hi.x + room && p.y >= c.lo.y - room && p.y <= c.hi.y + room && p.z >= c.lo.z - room && p.z <= c.hi.z + room)
+    }
+
+    /// The stretch of a ray, in the patch's own coordinates, that passes through the boxes of its cells, if any does.
+    pub fn ray_span(&self, p: Vec3, d: Vec3, room: f64) -> Option<(f64, f64)> {
+        let room = room + self.offset.abs();
+        let mut span: Option<(f64, f64)> = None;
+        for c in &self.cells {
+            let (mut enter, mut leave) = (f64::NEG_INFINITY, f64::INFINITY);
+            let mut hit = true;
+            for (o, v, lo, hi) in [(p.x, d.x, c.lo.x - room, c.hi.x + room), (p.y, d.y, c.lo.y - room, c.hi.y + room), (p.z, d.z, c.lo.z - room, c.hi.z + room)] {
+                if v.abs() < 1e-300 {
+                    if o < lo || o > hi {
+                        hit = false;
+                        break;
+                    }
+                } else {
+                    let (a, b) = ((lo - o) / v, (hi - o) / v);
+                    enter = enter.max(a.min(b));
+                    leave = leave.min(a.max(b));
+                }
+            }
+            if hit && enter <= leave {
+                span = Some(span.map_or((enter, leave), |s| (s.0.min(enter), s.1.max(leave))));
+            }
+        }
+        span
     }
 
     /// The chart position of these parameters.

@@ -387,17 +387,45 @@ pub fn face_meshes_cleanly(body: &Body, f: usize, is_new: &[bool], params: &Tess
 
 struct FaceFrame {
     lo: Vec2,
-    scale: f64,
+    scale: (f64, f64),
 }
 
 impl FaceFrame {
     fn to_grid(&self, uv: Vec2) -> [i64; 2] {
-        [((uv.x - self.lo.x) * self.scale).round() as i64, ((uv.y - self.lo.y) * self.scale).round() as i64]
+        [((uv.x - self.lo.x) * self.scale.0).round() as i64, ((uv.y - self.lo.y) * self.scale.1).round() as i64]
     }
 
     fn from_grid(&self, q: [i64; 2]) -> Vec2 {
-        v2(q[0] as f64 / self.scale + self.lo.x, q[1] as f64 / self.scale + self.lo.y)
+        v2(q[0] as f64 / self.scale.0 + self.lo.x, q[1] as f64 / self.scale.1 + self.lo.y)
     }
+}
+
+/// How many mesh steps a free-form face needs along each chart direction, from how far its normal turns and how long it is.
+/// A triangulation is even in whatever coordinates it's given, so a thin tube triangulated as it stands in its chart gets as
+/// many points along it as around it, which it has no use for. Stretching the chart so that one step is about the same size
+/// both ways gives long triangles along it instead. That's only a change of coordinates, so it can't cross a boundary.
+fn steps_needed(surface: &Surface, chart: &crate::surface::Chart, lo: Vec2, hi: Vec2, params: &TessParams) -> (f64, f64) {
+    const N: usize = 6;
+    let at = |i: usize, j: usize| {
+        let uv = v2(lo.x + (hi.x - lo.x) * i as f64 / N as f64, lo.y + (hi.y - lo.y) * j as f64 / N as f64);
+        let (p, a, b) = surface.chart_derivs(chart, uv);
+        (p, a.cross(b).normalized())
+    };
+    let grid: Vec<Vec<(Vec3, Vec3)>> = (0..=N).map(|i| (0..=N).map(|j| at(i, j)).collect()).collect();
+    let need = |turn: f64, length: f64| (turn / params.angle).max((length * turn / (8.0 * params.chord)).max(0.0).sqrt()).max(1.0);
+    let line = |points: &[(Vec3, Vec3)]| {
+        let (mut turn, mut length) = (0.0, 0.0);
+        for w in points.windows(2) {
+            if w[0].1.is_finite() && w[1].1.is_finite() {
+                turn += w[0].1.dot(w[1].1).clamp(-1.0, 1.0).acos();
+            }
+            length += w[0].0.dist(w[1].0);
+        }
+        need(turn, length)
+    };
+    let along_x = (0..=N).map(|j| line(&grid.iter().map(|c| c[j]).collect::<Vec<_>>())).fold(1.0f64, f64::max);
+    let along_y = (0..=N).map(|i| line(&grid[i])).fold(1.0f64, f64::max);
+    (along_x, along_y)
 }
 
 fn tessellate_face(
@@ -449,7 +477,26 @@ fn build_face(
         hi = v2(hi.x.max(uv.x), hi.y.max(uv.y));
     }
     let extent = (hi.x - lo.x).max(hi.y - lo.y).max(1e-9);
-    let frame = FaceFrame { lo, scale: (GRID - 2) as f64 / extent };
+    let even = (GRID - 2) as f64 / extent;
+    let scale = if matches!(surface, Surface::Free { .. }) && hi.x > lo.x && hi.y > lo.y {
+        // Per step along each way, as evenly as the grid will allow, and neither axis squeezed too far.
+        let (nx, ny) = steps_needed(surface, chart, lo, hi, params);
+        let (mut sx, mut sy) = (nx / (hi.x - lo.x), ny / (hi.y - lo.y));
+        let ratio = (sx / sy).clamp(1.0 / 64.0, 64.0);
+        if sx > sy {
+            sx = ratio;
+            sy = 1.0;
+        } else {
+            sx = 1.0;
+            sy = 1.0 / ratio;
+        }
+        let top = (sx * (hi.x - lo.x)).max(sy * (hi.y - lo.y));
+        let fit = (GRID - 2) as f64 / top;
+        (sx * fit, sy * fit)
+    } else {
+        (even, even)
+    };
+    let frame = FaceFrame { lo, scale };
 
     let mut cdt = Cdt::new();
     let mut point_of: HashMap<u32, Vec3> = HashMap::default();

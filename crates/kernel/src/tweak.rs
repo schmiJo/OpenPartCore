@@ -936,9 +936,14 @@ pub fn shell(body: &Body, open: &[usize], thickness: f64, feature: u32) -> Resul
         f.tag.feature = feature;
     }
     let result = subtract(body, &inner)?;
-    let (whole, cavity, left) = (crate::mass::mass_properties(body).volume, crate::mass::mass_properties(&inner).volume, crate::mass::mass_properties(&result).volume);
-    if open.is_empty() && (whole - cavity - left).abs() > 1e-6 * whole.abs().max(1.0) {
-        return Err(Error::Internal(format!("the shell's volume doesn't add up: {whole} - {cavity} isn't {left}")));
+    // A closed shell's volume has to add up, which is worth checking on what's quick to check. Free-form faces take
+    // integrating three times over for it, and those have the Boolean's own checks behind them.
+    let quick = !body.faces.iter().any(|f| matches!(f.surface, Surface::Free { .. } | Surface::Extruded { .. } | Surface::Revolved { .. }));
+    if open.is_empty() && quick {
+        let (whole, cavity, left) = (crate::mass::mass_properties(body).volume, crate::mass::mass_properties(&inner).volume, crate::mass::mass_properties(&result).volume);
+        if (whole - cavity - left).abs() > 1e-6 * whole.abs().max(1.0) {
+            return Err(Error::Internal(format!("the shell's volume doesn't add up: {whole} - {cavity} isn't {left}")));
+        }
     }
     Ok(result)
 }

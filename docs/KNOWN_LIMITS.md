@@ -60,6 +60,10 @@ tangency, because the curve touches a face boundary tangentially at a vertex.
 | Spline profiles, revolved | 1,000 | 1 (0.1%) | 0 |
 | Lofts through mixed sections | 1,000 | 1 (0.1%) | 0 |
 
+Rerun on 2026-11-09 after changes to the search and to point and ray tests: 500 of each category here, with 0 wrong, 2,000 of each in the table above, with 0 wrong, and 1,000 lofts, with 0 wrong and the same one refused.
+
+A loft fuzz case on 2026-11-09 (`loft 535`) showed that whether a curve just grazing a free-form face got found depended on where the search's range happened to be halved, which could put a point on the wrong side of a part. The fix keeps halving wherever a dip could hide, and a test holds that ray over ranges from 4 to 40. It's an old fault that a faster ray test happened to expose, so earlier runs' 0 wrong were lucky on this one.
+
 The refusals are "extrusion and torus meet in a loop too small to trace" (`ext 775`) and "plane and torus are tangent at a point on their
 intersection" (`rev 115`). The loft's is "two edges claim the same continuation" (`loft 912`), an internal error near a tangency that should name it. About one generated loft in twelve is refused when it's built, as a fold or as sides that cross, and doesn't count as a case. An earlier run reported one wrong result, a mesh that wouldn't close on a seed-96 extrusion. The profile really did cross
 itself, within the last sample before a corner, and outlines are now checked more closely toward corners, so that one is now refused.
@@ -106,7 +110,7 @@ Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.
 
 Rational B-spline patches, from a loft or a file: see [NURBS_DESIGN.md](NURBS_DESIGN.md#phase-3-free-form-patches).
 
-- **Refused by name:** draft on these faces, as on swept splines. A pole or a fold, found by sampling each knot interval at 169 points for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
+- **Refused by name:** draft on these faces, as on swept splines. A pole or a fold, found by sampling each knot interval at 25 to 169 points, fewer when there are many small intervals and with a closer look before refusing, for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
 - **Two surfaces lying on each other are refused unless they're the same patch.** A patch that's exactly a cylinder, against a real cylinder of that size, is refused as a tangency, and nothing guesses that they're the same.
 - **The proof has edges.** The closest point is proven for every point of the patch. Past its boundary the surface carries on along its tangent planes, where the value is only a height, and that's only used near faces' edges. Far from a surface, if a great many points are almost equally close, a search can run out of budget and report a smaller distance it can prove. A patch's tightest bend, which sets how fine a trace is, is sampled and not proven, so a very small feature between samples could be stepped over. The checks on every result still apply.
 - **Lofts take one outline per section, with the same number of holes,** and they can't end in a point, close into a ring, follow guide curves or set tangency at the ends.
@@ -173,7 +177,7 @@ Not supported, returning an error:
 
 **How fitted blends were checked.** On edges an exact fillet also handles, a straight edge, a concave one and whole rims, the fitted route has to match it, and does to 1e-7 relative. On an elliptical rim the solid is convex, so a fillet is by definition what's within the radius of the solid shrunk by the radius, and that volume can be worked out with none of the kernel: at radius 2 it removes 71.8840 and heading for about 71.8845 as that sum gets finer, this kernel removes 71.8850, and OpenCASCADE's fillet removes 71.768. Its fillets on a tee and a drilled wall are within 0.1 of these in added or removed volume, where its Booleans alone differ by about that much. All 6 fitted parts read back valid in OpenCASCADE, and 5 of them agree on volume to 4e-8 or better. The other, on a spline, is 1.1e-4 off, the same effect as on `spline_outline`.
 
-**Fuzz** (`--example fuzz_blends`), on random curved edges of random Booleans: of 300 seeds, 210 had an edge to try, 80 blended and 130 were refused, and 0 were wrong by validity, a closed mesh, a believable change of volume, membership away from the edges, and surviving a later Boolean. Most refusals were the two corner cases above, 36 each. 9 didn't reach the fit, and 25 didn't fit at all at a radius up to 3% of the part. So a closed rim or an edge between two simple ends generally works, and an edge ending in a complicated corner often won't.
+**Fuzz** (`--example fuzz_blends`), on random curved edges of random Booleans: of 300 seeds, 210 had an edge to try, 79 blended and 131 were refused, and 0 were wrong by validity, a closed mesh, a believable change of volume, membership away from the edges, and surviving a later Boolean. Most refusals were the two corner cases above, 36 each. 9 didn't reach the fit, and 25 didn't fit at all at a radius up to 3% of the part. So a closed rim or an edge between two simple ends generally works, and an edge ending in a complicated corner often won't.
 
 Works, but differs from commercial CAD:
 
@@ -218,7 +222,7 @@ These move a body's surfaces, so they are exact.
 - **Refused on a free-form surface:** a move past a center of curvature, found by sampling, where it would fold; a surface with a sharp crease at a knot; and a pole with a point to it, like the tip of a cone, as each of those would need a gap filled. A smooth pole is fine.
 - **The never-overstating promise is weaker on a moved surface.** It holds as long as the moved surface hasn't come back near its own unmoved one, which is what a fold or a thin neck does. A search out of budget reports where it got to, rather than a lower bound, as the difference between a lower bound and the offset would look like a real gap.
 - **In a STEP file a moved free-form face is a fit, within 1e-5.** STEP has `OFFSET_SURFACE`, which this kernel reads, but OpenCASCADE refuses one on a surface that isn't C1 ("Offset with no C1 Surface"), and a circle's double knots aren't. So it's a B-spline of up to degree 9 on few pieces. A two-face vase goes from 10 KB to 185 KB, and reading that back here takes about 5 s, as closest points on degree 9 are slow to set up. The kernel's own copy stays exact.
-- **OpenCASCADE disagrees about thin moved solids.** On `thick_vase` it gets a volume of 617.12, and on `vase_hollow` 843.71. Both differ by about 1%, and the same one-dimensional integral gives 623.19315 and 836.33638, which is what this kernel gets. The gallery flags these two, with the three lofts it has flagged before, for the same reason.
+- **OpenCASCADE disagrees about thin moved solids.** On `thick_vase` it gets a volume of 617.12, on `vase_hollow` 843.71, and on the `cup` demo 4322.14. Those differ by 0.4 to 1%, and a one-dimensional integral from each one's own profile gives 623.19315, 836.33638 and 4305.74617, which is what this kernel gets. The gallery flags these three, with the three lofts it has flagged before, for the same reason: 87 of 93 pass, and those 6 are the rest.
 
 - **Faces that meet smoothly must move together.** Shelling with one of a smooth pair open is refused, as is
   drafting half of one.
@@ -325,11 +329,16 @@ slider, since the first usually affects more features. `python3 scripts/selftest
 | Crossed cylinders | 73, 7 | 11, 4 | 23, 4 |
 | Turned knob | 27, 31 | 3, 3 | 13, 12 |
 | Ring sector | 88, 93 | 4, 6 | 31, 22 |
-| Spline vase |  | 134, 102 | 195, 215 |
-| Free-form nozzle |  | 202, 227 | 434, 381 |
-| Spline cam |  | 163, 158 | 739, 621 |
+| Spline vase |  | 98, 114 | 208, 200 |
+| Filleted tee |  | 101, 88 | 366, 555 |
+| Free-form nozzle |  | 221, 202 | 498, 423 |
+| Spline cam |  | 156, 154 | 715, 675 |
+| Delete face |  | 7, 14 | 8, 14 |
+| Helical spring |  | 122, 182 | 762, 476 |
+| Shelled cup |  | 400, 513 | 969, 1378 |
+| Threaded shaft |  | 1207, 1190 | 2031, 2371 |
 
-"Before" is before the speed work, and the rest were measured again on 2026-11-08. The spline and free-form demos came later, and they're the slowest: each distance on one of those surfaces costs a search. Most of the cam's pause is its mass properties.
+"Before" is before the speed work, and the rest were measured again on 2026-11-08 or, for the spline and free-form demos, on 2026-11-09. **The threaded shaft is too slow to feel like a slider,** at over a second a step: it's a Boolean against 56 free-form faces. The spline and free-form demos came later, and they're the slowest: each distance on one of those surfaces costs a search. Most of the cam's pause is its mass properties.
 
 **How many triangles the page sends,** as these demos stand at their default sizes:
 
@@ -342,6 +351,9 @@ slider, since the first usually affects more features. `python3 scripts/selftest
 | Spline vase | 9,336 | 3,912 | 972 |
 | Free-form nozzle | 9,124 | 5,106 | 2,566 |
 | Spline cam | 9,610 | 6,014 | 2,428 |
+| Helical spring | 19,336 | 8,252 | 3,088 |
+| Shelled cup | 8,124 | 6,428 | 2,808 |
+| Threaded shaft | 2,548 | 2,148 | 1,836 |
 
 While dragging, a slider gets a light mesh, where a circle has eight sides, and volume and area wait, shown dimmed. All of the
 kernel's checks still run: skipping the slower ones was measured, and saved under 10%, so they stay on. About 140 ms after the slider stops,
@@ -352,6 +364,13 @@ The kernel itself got two to four times faster on these models:
 - **Choosing where to test a region** took about 40% of a rebuild. A quick search now settles most regions, and the old thorough search still runs
   if the quick points are too few or disagree, so it can't add a refusal. The same 258 fuzz cases are refused as before.
 - **Blends** apply tools that don't touch together, as separate shells, instead of cutting a growing body again for each.
+
+Free-form surfaces got a good deal faster for the helix demos, in ways that help every free-form part:
+
+- **Most distances are to a point on the surface,** so a few Newton steps come first, and a patch only builds its search structures if something needs them. Rebuilding the spring went from 233 ms to 20 ms.
+- **A free-form face's own cell boxes rule things out** in a point or ray test, and each chart position along an edge is only worked out once. That took cutting a thread from 2.6 s to under 1 s natively.
+- **A shell of free-form faces no longer integrates three times** to check a volume that the Boolean's own checks cover. That took the cup from 1.5 s to 0.3 s natively. A closed shell of analytic faces still checks it.
+- **A long tube gets long triangles.** The mesher stretches a free-form face's chart by how much it bends each way, which took the spring's screen mesh from 21,532 triangles to 7,948. The boundaries don't change, so neighbours still match.
 
 ## Not tested
 

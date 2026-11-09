@@ -31,6 +31,11 @@ pub struct Index<'a> {
     /// its edges, so most loops can be skipped without touching their edges.
     pub loop_boxes: Vec<Vec<(Vec2, Vec2)>>,
     pub bounds: Aabb,
+    /// Chart positions already worked out along edges, by face, edge and parameter.
+    chart_points: std::cell::RefCell<crate::hash::HashMap<(u32, u32, u64), Vec2>>,
+    /// Whether each free-form face stays on its patch, so that the patch's own boxes can rule things out. One that runs off
+    /// the end of it along its tangent, as a moved one can, doesn't.
+    on_patch: Vec<bool>,
 }
 
 /// Bounds of a loop in its face's chart, with a margin for curve between samples.
@@ -53,8 +58,10 @@ fn loop_bounds(body: &Body, f: usize, l: usize) -> (Vec2, Vec2) {
 
 /// Winding angle of an edge around a chart point, refined near the point so that
 /// the polygon approximation can never put the point on the wrong side.
-pub(crate) fn edge_winding(surface: &Surface, chart: &Chart, e: &Edge, reversed: bool, target: Vec2) -> f64 {
-    let at = |t: f64| surface.to_chart(chart, e.curve.eval(t));
+pub(crate) fn edge_winding(surface: &Surface, chart: &Chart, e: &Edge, reversed: bool, target: Vec2, memo: &mut dyn FnMut(f64, &dyn Fn(f64) -> Vec2) -> Vec2) -> f64 {
+    let exact = |t: f64| surface.to_chart(chart, e.curve.eval(t));
+    let memo = std::cell::RefCell::new(memo);
+    let at = |t: f64| (memo.borrow_mut())(t, &exact);
     fn piece(at: &impl Fn(f64) -> Vec2, ta: f64, tb: f64, a: Vec2, b: Vec2, target: Vec2, depth: u32) -> f64 {
         let tm = (ta + tb) / 2.0;
         let m = at(tm);
@@ -124,7 +131,23 @@ impl<'a> Index<'a> {
         let loop_boxes = (0..body.faces.len())
             .map(|f| (0..body.faces[f].loops.len()).map(|l| loop_bounds(body, f, l)).collect())
             .collect();
-        Index { body, edge_boxes, face_boxes, loop_boxes, bounds }
+        let on_patch = body
+            .faces
+            .iter()
+            .zip(&face_boxes)
+            .map(|(face, b)| match &face.surface {
+                Surface::Free { frame, patch } => {
+                    let room = 1e-6 * b.diagonal().max(1.0);
+                    let inside = |q: Vec3| {
+                        let l = frame.to_local(q);
+                        patch.boxes_hold(l, room)
+                    };
+                    face.loops.iter().flatten().all(|c| (0..=4).all(|k| inside(body.coedge_point(*c, k as f64 / 4.0))))
+                }
+                _ => false,
+            })
+            .collect();
+        Index { body, edge_boxes, face_boxes, loop_boxes, bounds, chart_points: Default::default(), on_patch }
     }
 
     /// Locates a point relative to a face. A point farther than `tol` from the
@@ -152,13 +175,17 @@ impl<'a> Index<'a> {
             for c in lp {
                 if self.edge_boxes[c.edge].inflated(tol).contains(p) {
                     let e = &self.body.edges[c.edge];
-                    if e.curve.closest(p, e.t0, e.t1).1 <= tol {
+                    if e.curve.could_be_within(p, e.t0, e.t1, tol) && e.curve.closest(p, e.t0, e.t1).1 <= tol {
                         return FaceLoc::Boundary;
                     }
                 }
             }
             for c in lp {
-                winding += edge_winding(&face.surface, &face.chart, &self.body.edges[c.edge], c.reversed, target);
+                // Each point of an edge is worth working out once. A curve on a free-form surface costs a search for each, and
+                // the next point looked up will want the same ones again.
+                let mut known = self.chart_points.borrow_mut();
+                let mut memo = |t: f64, exact: &dyn Fn(f64) -> Vec2| *known.entry((f as u32, c.edge as u32, t.to_bits())).or_insert_with(|| exact(t));
+                winding += edge_winding(&face.surface, &face.chart, &self.body.edges[c.edge], c.reversed, target, &mut memo);
             }
         }
         let turns = winding / TAU * if face.flipped { -1.0 } else { 1.0 };
@@ -172,9 +199,19 @@ impl<'a> Index<'a> {
     /// Locates a point relative to the whole body by casting rays. A ray is only
     /// trusted when it crosses faces cleanly. If it grazes a surface or hits an
     /// edge it is thrown away and another direction is tried.
+    /// False if a free-form face's own boxes show that a point isn't on it, which is much quicker than finding out how far
+    /// off it is. A long face's one bounding box is too big to rule out much.
+    fn could_hold(&self, f: usize, p: Vec3) -> bool {
+        match &self.body.faces[f].surface {
+            Surface::Free { frame, patch } if self.on_patch[f] => patch.boxes_hold(frame.to_local(p), TOL * 4.0),
+            _ => true,
+        }
+    }
+
     pub fn locate_in_body(&self, p: Vec3) -> BodyLoc {
         for f in 0..self.body.faces.len() {
             if self.face_boxes[f].inflated(TOL * 2.0).contains(p)
+                && self.could_hold(f, p)
                 && self.body.faces[f].surface.sdf(p).abs() <= TOL * 1.5
                 && self.locate_on_face(f, p, TOL * 1.5) != FaceLoc::Outside
             {
@@ -203,7 +240,18 @@ impl<'a> Index<'a> {
                 continue;
             }
             let surface = &self.body.faces[f].surface;
-            for t in ray_surface(surface, p, d, reach) {
+            // Only where the ray goes through a free-form face's own boxes, if it does at all.
+            let span = match surface {
+                Surface::Free { frame, patch } if self.on_patch[f] => match patch.ray_span(frame.to_local(p), v3(d.dot(frame.x), d.dot(frame.y), d.dot(frame.z)), TOL * 4.0) {
+                    Some((a, b)) => (a.max(0.0), b.min(reach)),
+                    None => continue,
+                },
+                _ => (0.0, reach),
+            };
+            if span.1 < span.0 {
+                continue;
+            }
+            for t in ray_surface_between(surface, p, d, span) {
                 if t <= 0.0 {
                     continue;
                 }
@@ -247,6 +295,18 @@ fn ray_hits_box(p: Vec3, d: Vec3, b: &Aabb) -> bool {
 }
 
 /// Distances along a ray to a surface. Closed form where that is simple.
+/// Where a ray from `p` along `d` meets a surface, looking only between these distances when that's any use.
+fn ray_surface_between(s: &Surface, p: Vec3, d: Vec3, span: (f64, f64)) -> Vec<f64> {
+    if matches!(s, Surface::Free { .. }) {
+        let ray = Curve::Line { origin: p, dir: d };
+        return match curve_surface_contact(&ray, span.0, span.1, s, 0.0) {
+            Contact::Roots(list) => list,
+            Contact::OnSurface => Vec::new(),
+        };
+    }
+    ray_surface(s, p, d, span.1)
+}
+
 fn ray_surface(s: &Surface, p: Vec3, d: Vec3, reach: f64) -> Vec<f64> {
     let quadratic = |a: f64, b: f64, c: f64| -> Vec<f64> {
         if a.abs() < 1e-300 {

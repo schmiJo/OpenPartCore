@@ -100,8 +100,14 @@ pub fn curve_surface_contact(curve: &Curve, t0: f64, t1: f64, surf: &Surface, to
             continue;
         }
         let m = (a + b) / 2.0;
-        let leaf = (0.4 * cf.min(surface_feature(surf, curve.eval(m)))).max(floor);
-        if length > leaf {
+        let feature = cf.min(surface_feature(surf, curve.eval(m)));
+        let leaf = (0.4 * feature).max(floor);
+        // A curve this close to the surface at both ends could dip through it and come back between them, by about the
+        // sagitta of something bending this tightly. The slopes below can't be counted on to show that, since past a
+        // free-form surface's edge the distance is a height above a tangent plane, whose slope isn't the normal's. So
+        // those stretches go on being halved. It's a ray only just grazing a face, and only there, so it costs little.
+        let could_dip = sa * sb > 0.0 && sa.abs().min(sb.abs()) < length * length / (4.0 * feature) && length > floor;
+        if length > leaf || could_dip {
             let sm = dist(m);
             stack.push((a, m, sa, sm));
             stack.push((m, b, sm, sb));

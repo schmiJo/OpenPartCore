@@ -355,3 +355,23 @@ fn refusals_name_what_is_wrong() {
     let holes = loft(&[(&circle_with_hole(5.0, 2.0), at(0.0)), (&circle(5.0), at(4.0))], 1).err().unwrap().to_string();
     assert!(holes.contains("holes"), "{holes}");
 }
+
+#[test]
+fn a_ray_just_grazing_a_face_is_found_however_the_search_splits() {
+    // Fuzz case 535 for lofts. This ray dips 0.009 into a side and out past the end of its patch, and whether that was
+    // found depended on where the range happened to be halved: it was missed for some ranges and found for others, and
+    // missing it puts a point on the wrong side of the part.
+    use coreshape::boolean::roots::{curve_surface_contact, Contact};
+    let (a, _, _) = fuzz::make_pair(fuzz::Category::Lofts, 535);
+    let a = a.unwrap();
+    let side = &a.faces[2].surface;
+    assert!(matches!(side, Surface::Free { .. }));
+    let p = v3(0.8812852273679779, -1.028045287957955, -3.2238168405652745);
+    let d = v3(0.18768005948148636, -0.1436767815181769, 0.9716651572046844);
+    let ray = Curve::Line { origin: p, dir: d };
+    for end in [4.0, 5.0, 6.4809294527644195, 7.0, 8.0, 10.0, 13.0, 15.0, 20.0, 26.0, 40.0] {
+        let Contact::Roots(found) = curve_surface_contact(&ray, 0.0, end, side, 0.0) else { panic!("on the surface") };
+        assert_eq!(found.len(), 2, "up to {end}: {found:?}");
+        assert!((found[0] - 2.850349337770839).abs() < 1e-9, "up to {end}: {found:?}");
+    }
+}

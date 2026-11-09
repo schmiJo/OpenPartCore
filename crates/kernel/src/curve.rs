@@ -141,6 +141,22 @@ impl Curve {
     }
 
     /// Parameter of the closest point within `[t0, t1]`, and the distance to it.
+    /// False if the curve clearly isn't within `tol` of a point. Only a traced curve has a short way of saying so, by its
+    /// chords, which matters since each of its points costs a solve. A piece of one stays within a chord's length of it.
+    pub fn could_be_within(&self, p: Vec3, t0: f64, t1: f64, tol: f64) -> bool {
+        let Curve::Sampled(c) = self else { return true };
+        let (lo, hi) = (t0.max(0.0), t1.min((c.points.len() - 1) as f64));
+        let first = lo.floor() as usize;
+        let last = (hi.ceil() as usize).min(c.points.len() - 1);
+        (first..last).any(|i| {
+            let (a, b) = (c.points[i], c.points[i + 1]);
+            let d = b - a;
+            let length2 = d.norm2();
+            let s = if length2 > 0.0 { ((p - a).dot(d) / length2).clamp(0.0, 1.0) } else { 0.0 };
+            (a + d * s).dist(p) <= tol + length2.sqrt() * 0.25
+        })
+    }
+
     pub fn closest(&self, p: Vec3, t0: f64, t1: f64) -> (f64, f64) {
         let best = |t: f64| {
             let t = t.clamp(t0, t1);
