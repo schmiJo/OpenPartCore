@@ -174,6 +174,11 @@ impl Session {
         self.active
     }
 
+    /// Whether what's selected is an assembly.
+    pub fn active_tab_is_assembly(&self) -> bool {
+        self.active_assembly().is_some()
+    }
+
     /// The selected assembly, if an assembly is what's selected.
     pub(super) fn active_assembly(&self) -> Option<TabId> {
         self.project.assembly(self.active).is_ok().then_some(self.active)
@@ -693,7 +698,9 @@ impl Session {
         if let Some(new) = args.get("name").and_then(Value::as_str) {
             m.name = new.to_string();
         }
-        self.solved_answer(tab, &first, Some(vec![("id", Value::Num(id as f64))]))
+        let solved = self.with_project(|p| p.solve_new_mate(tab, id, &first)).map_err(e)?;
+        let state = self.state(tab, &solved);
+        Ok(vec![text(answer_with(Some(vec![("id", Value::Num(id as f64))]), state).to_pretty())])
     }
 }
 
