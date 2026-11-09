@@ -206,10 +206,10 @@ fn a_constrained_sketchs_open_curves_can_sweep() {
     assert_eq!(body.shells.len(), 1);
     assert_eq!(body.boundary_edges().len(), 6);
 
-    // Take the surface away again and the sketch goes back to being refused.
+    // Take the surface away again and the sketch goes back to being refused, with what it always said.
     doc.delete(f).unwrap();
     doc.with(Op::extrude(s, 0.0, 5.0, Mode::Add));
-    assert!(fails(&mut doc).contains("isn't closed") || fails(&mut doc).contains("no closed regions"));
+    assert!(fails(&mut doc).contains("isn't closed"), "{}", fails(&mut doc));
 
     // A line drawn the other way joins up all the same.
     let mut other = Sketch::new();
@@ -245,6 +245,17 @@ fn a_constrained_sketchs_open_curves_can_sweep() {
     doc.with(surface_extrude(s, 2.0));
     let o = ok(&mut doc);
     near(area_of(&o, 0), (5.0 + 5.0 * PI / 2.0) * 2.0, "a line and an arc");
+
+    // A chain that starts with an arc and ends with a line: the line's far end is where it says, and not back at the arc's start.
+    let mut hook = Sketch::new();
+    hook.add(Geometry::Arc { center: [0.0, 5.0], radius: 5.0, start: [0.0, 0.0], end: [5.0, 5.0] });
+    hook.add(Geometry::Line { start: [5.0, 5.0], end: [5.0, 20.0] });
+    let mut doc = Document::new();
+    let s = lone(&mut doc, &hook);
+    doc.with(surface_extrude(s, 2.0));
+    let o = ok(&mut doc);
+    near(area_of(&o, 0), (5.0 * PI / 2.0 + 15.0) * 2.0, "an arc and a line");
+    assert!(o.bodies[0].body.vertices.iter().any(|p| p.y == 20.0));
 }
 
 #[test]
@@ -595,6 +606,63 @@ fn a_trim_follows_its_tool() {
     // Nothing changed, nothing rebuilt.
     let third = ok(&mut doc);
     assert_eq!(third.rebuilt_count(), 0);
+}
+
+#[test]
+fn a_trim_of_a_named_sheet_follows_a_tool_it_doesnt_name() {
+    // The tool isn't among the bodies it acts on, so it's only by being the tool that a change to it matters.
+    let mut doc = Document::new();
+    doc.set_parameter("r", 5.0).unwrap();
+    let f = wide(&mut doc);
+    let post = doc.with(Op::solid(Primitive::Cylinder { radius: "r".into(), height: 10.0.into() }, Placement::at(point3(20.0, 20.0, -5.0)), Mode::NewBody));
+    let t = doc.with(Op::Trim { tool: TrimTool::Body(BodyId { feature: post, index: 0 }), keep: TrimKeep::Outside });
+    doc.set_scope(t, vec![BodyId { feature: f, index: 0 }]).unwrap();
+    near(mass_properties(&ok(&mut doc).bodies[0].body).area, 1600.0 - PI * 25.0, "first");
+    doc.set_parameter("r", 8.0).unwrap();
+    near(mass_properties(&ok(&mut doc).bodies[0].body).area, 1600.0 - PI * 64.0, "second");
+}
+
+#[test]
+fn a_file_of_surfaces_comes_in_as_sheets_whatever_the_mode() {
+    let panel = fill(&Profile::new(Wire::rect(0.0, 0.0, 10.0, 10.0)), &Frame::WORLD, 1).unwrap();
+    let solid = box_solid(&Frame::translation(v3(100.0, 0.0, 0.0)), 2.0, 3.0, 4.0, 2).unwrap();
+    let surfaces = coreshape::export::step::write_step(&panel, "panel");
+    let both = coreshape::export::step::write_step_bodies(&[&solid, &panel], "both");
+
+    // Asked to cut, there's nothing in a surface to cut with, and it comes in beside what's there.
+    for mode in [Mode::Add, Mode::Remove, Mode::Intersect, Mode::NewBody, Mode::Surface] {
+        let mut doc = Document::new();
+        doc.with(Op::solid(Primitive::Box { dx: 20.0.into(), dy: 20.0.into(), dz: 20.0.into() }, Placement::at(point3(-5.0, -5.0, -5.0)), Mode::Add));
+        doc.with(Op::ImportStep { text: surfaces.clone(), mode });
+        let o = ok(&mut doc);
+        assert_eq!(o.bodies.len(), 2, "{mode:?}");
+        assert!(o.bodies[1].body.sheet);
+        near(mass_properties(&o.bodies[0].body).volume, 8000.0, "the solid is as it was");
+        near(area_of(&o, 1), 100.0, "the sheet");
+    }
+
+    // With solids in the file, an import means those, as it always has. The mode surface means what's beside them.
+    let mut doc = Document::new();
+    doc.with(Op::ImportStep { text: both.clone(), mode: Mode::NewBody });
+    let o = ok(&mut doc);
+    assert_eq!(o.bodies.len(), 1);
+    assert!(!o.bodies[0].body.sheet);
+    let mut doc = Document::new();
+    doc.with(Op::ImportStep { text: both, mode: Mode::Surface });
+    let o = ok(&mut doc);
+    assert_eq!(o.bodies.len(), 1);
+    assert!(o.bodies[0].body.sheet);
+    // And with none to bring in, it says so.
+    let mut doc = Document::new();
+    doc.with(Op::ImportStep { text: coreshape::export::step::write_step(&solid, "solid"), mode: Mode::Surface });
+    assert!(fails(&mut doc).contains("no surfaces"));
+
+    // A file's parts can be its sheets.
+    let mut doc = Document::new();
+    doc.with(Op::ImportStepParts { text: surfaces });
+    let o = ok(&mut doc);
+    assert_eq!(o.bodies.len(), 1);
+    assert!(o.bodies[0].body.sheet);
 }
 
 #[test]

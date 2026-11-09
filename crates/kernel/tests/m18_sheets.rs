@@ -187,18 +187,20 @@ fn a_sheet_moves_and_reflects_as_any_body_does() {
 fn what_needs_a_solid_says_so() {
     let s = plate();
     let solid = box_solid(&Frame::WORLD, 1.0, 1.0, 1.0, 2).unwrap();
-    let mut said: Vec<String> = Vec::new();
-    said.push(union(&s, &solid).unwrap_err().to_string());
-    said.push(subtract(&solid, &s).unwrap_err().to_string());
-    said.push(intersect(&s, &s).unwrap_err().to_string());
-    said.push(fillet(&s, &[0], 1.0, 3).unwrap_err().to_string());
-    said.push(chamfer(&s, &[0], 1.0, 3).unwrap_err().to_string());
-    said.push(offset(&s, 1.0).unwrap_err().to_string());
-    said.push(shell(&s, &[], 1.0, 3).unwrap_err().to_string());
-    said.push(draft(&s, &[0], Vec3::Z, Vec3::ZERO, 0.1).unwrap_err().to_string());
-    said.push(delete_faces(&s, &[0]).unwrap_err().to_string());
-    for why in said {
-        assert!(why.contains("needs a solid") && why.contains("sheet"), "{why}");
+    let said = [
+        ("a Boolean", union(&s, &solid)),
+        ("a Boolean", subtract(&solid, &s)),
+        ("a Boolean", intersect(&s, &s)),
+        ("a fillet", fillet(&s, &[0], 1.0, 3)),
+        ("a chamfer", chamfer(&s, &[0], 1.0, 3)),
+        ("an offset", offset(&s, 1.0)),
+        ("a shell", shell(&s, &[], 1.0, 3)),
+        ("a draft", draft(&s, &[0], Vec3::Z, Vec3::ZERO, 0.1)),
+        ("deleting a face", delete_faces(&s, &[0])),
+    ];
+    for (what, result) in said {
+        let why = result.unwrap_err().to_string();
+        assert!(why.contains(&format!("{what} needs a solid")) && why.contains("sheet"), "{what}: {why}");
     }
 }
 
@@ -342,6 +344,47 @@ fn an_arc_extrudes_to_a_cylinders_side() {
     let tube = extrude_open(&circle, &Frame::WORLD, 8.0, 1).unwrap();
     check_sheet(&tube, TAU * 5.0 * 8.0);
     assert_eq!(validate(&tube).unwrap().genus, vec![0]);
+    // It goes all the way round with no slit in it: only its two ends are open, of two halves each.
+    assert_eq!(tube.boundary_edges().len(), 4);
+    assert_eq!(tube.faces.len(), 2);
+}
+
+#[test]
+fn a_mesh_torn_away_from_the_boundary_is_noticed() {
+    let s = plate();
+    let whole = mesh(&s);
+    assert!(open_only_at_boundary(&s, &whole));
+    // Take a triangle out of it, which leaves a hole with edges that aren't on the boundary.
+    let mut torn = whole.clone();
+    let inner = torn
+        .triangles
+        .iter()
+        .position(|t| {
+            t.iter().all(|&v| {
+                let p = torn.positions[v as usize];
+                p.x > 0.0 && p.x < 10.0 && p.y > 0.0 && p.y < 20.0
+            })
+        })
+        .or_else(|| {
+            // A plate with no points inside it has only triangles against its edge, and any one of them will do.
+            (!torn.triangles.is_empty()).then_some(0)
+        })
+        .unwrap();
+    torn.triangles.remove(inner);
+    assert!(!open_only_at_boundary(&s, &torn));
+    // And an extra one that's just lying there.
+    let mut extra = whole.clone();
+    let n = extra.positions.len() as u32;
+    extra.positions.extend_from_slice(&[v3(50.0, 0.0, 0.0), v3(51.0, 0.0, 0.0), v3(50.0, 1.0, 0.0)]);
+    extra.normals.extend_from_slice(&[Vec3::Z, Vec3::Z, Vec3::Z]);
+    extra.triangles.push([n, n + 1, n + 2]);
+    assert!(!open_only_at_boundary(&s, &extra));
+    // A solid's boundary is nothing, so it has to be closed.
+    let solid = box_solid(&Frame::WORLD, 1.0, 1.0, 1.0, 2).unwrap();
+    let mut open = mesh(&solid);
+    assert!(open_only_at_boundary(&solid, &open));
+    open.triangles.pop();
+    assert!(!open_only_at_boundary(&solid, &open));
 }
 
 #[test]

@@ -138,6 +138,9 @@ fn solids_write_as_they_did() {
 fn a_sheet_can_be_a_part_in_an_assembly() {
     let (s, solid) = (panel(), box_solid(&Frame::WORLD, 2.0, 3.0, 4.0, 2).unwrap());
     let text = write_step_assembly(&[("Panel", &s), ("Block", &solid)], &[(0, "Panel <1>", Frame::translation(v3(0.0, 0.0, 7.0))), (1, "Block <1>", Frame::WORLD), (0, "Panel <2>", Frame::translation(v3(0.0, 0.0, 9.0)))], "Mixed");
+    // Each part in the kind of representation that can hold it.
+    assert_eq!(text.matches("MANIFOLD_SURFACE_SHAPE_REPRESENTATION").count(), 1);
+    assert_eq!(text.matches("ADVANCED_BREP_SHAPE_REPRESENTATION").count(), 1);
     let structure = read_step_structure(&text).unwrap();
     assert_eq!(structure.names, vec!["Block"], "with solids in it, its solids are its parts, as they were");
     assert_eq!(read_step(&text, 1).unwrap().len(), 1);
