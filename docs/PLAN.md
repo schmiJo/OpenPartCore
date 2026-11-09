@@ -53,9 +53,10 @@ oracle, through a neighbouring FreeCAD build, read-only.
 
 ## For code building on this repository
 
-**Getting a known-good state.** The tag `openshape-ok` marks the newest commit whose workspace tests all pass, and it moves
-forward. `main`, and so the main working copy, only advances to such commits. Work in progress happens on the `next` branch in
-`.worktrees/next`, so the main working copy never holds half-finished edits.
+**Getting a known-good state.** SchmiShape builds from the main working copy. The tag `schmishape-ok` marks the newest commit
+whose workspace tests all pass, and it moves forward. `openshape-ok` is the same tag under the name it had when OpenShape was
+what this kernel was for, and it moves with it. `main`, and so the main working copy, only advances to such commits. Work in
+progress happens on the `next` branch in `.worktrees/next`, so the main working copy never holds half-finished edits.
 
 **Kept stable:** the sketch JSON format, `profiles_from_regions`, `FaceTag` slot numbering, and the `Body` edge and face accessors.
 
@@ -95,5 +96,6 @@ From OpenShape's list, in its order. SchmiShape has since taken OpenShape's plac
 2. Solver dimensions: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 3. Ellipses and elliptical arcs in the solver, regions and kernel profiles: done, see [SKETCH_SOLVER.md](SKETCH_SOLVER.md).
 4. Splines in sketches, extruded and revolved, then lofts and free-form surfaces from imported files: done, see [NURBS_DESIGN.md](NURBS_DESIGN.md).
-5. STEP import of analytic surfaces and swept curves: done, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). It refuses anything else, naming the surface type. Assemblies come next there.
+5. STEP import of analytic surfaces and swept curves: done, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). It refuses anything else, naming the surface type. Assemblies are done there too: see the last point.
 6. Modelling: helix, delete face and thicken are done, and offset and shell work on free-form faces. Offset and shell survive faces vanishing and walls crossing, and draft survives fillets touching what it moves: see [KNOWN_LIMITS.md](KNOWN_LIMITS.md). What's left is a crossing with no feature to lift out, and draft on free-form faces.
+7. What SchmiShape asked for, and parts and assemblies as Onshape has them: done, see [FILE_FORMAT.md](FILE_FORMAT.md#projects-and-assemblies). What's left of Onshape's assemblies is listed in [KNOWN_LIMITS.md](KNOWN_LIMITS.md#what-isnt-built).

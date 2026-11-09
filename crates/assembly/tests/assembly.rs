@@ -490,6 +490,27 @@ fn a_mate_driven_past_a_stop_ends_up_at_the_stop() {
 }
 
 #[test]
+fn driving_a_mate_doesnt_break_a_gear_to_get_there() {
+    let (mut p, studio, assembly, parts) = project(vec![block("200", "10", "1"), block("10", "10", "10"), block("10", "10", "10")]);
+    let (g, a, b) = (instance(&mut p, assembly, studio, parts[0], "Ground"), instance(&mut p, assembly, studio, parts[1], "A"), instance(&mut p, assembly, studio, parts[2], "B"));
+    p.assembly_mut(assembly).unwrap().instance_mut(g).unwrap().fixed = true;
+    let g1 = at_point(&mut p, assembly, g, Vec3::ZERO, Vec3::Z, Vec3::X);
+    let g2 = at_point(&mut p, assembly, g, v3(100.0, 0.0, 0.0), Vec3::Z, Vec3::X);
+    let (ca, cb) = (at_point(&mut p, assembly, a, Vec3::ZERO, Vec3::Z, Vec3::X), at_point(&mut p, assembly, b, Vec3::ZERO, Vec3::Z, Vec3::X));
+    let (ma, mb) = (mate(&mut p, assembly, MateKind::Revolute, g1, ca), mate(&mut p, assembly, MateKind::Revolute, g2, cb));
+    p.solve(assembly).unwrap();
+    let r = p.assembly_mut(assembly).unwrap().add_relation(RelationKind::Gear { ratio: 2.0 }, ma, mb, false).unwrap();
+    p.settle_relation(assembly, r).unwrap();
+    // The first can only go 30 degrees, so through the gear the second can only go 60, however far it's asked to.
+    p.assembly_mut(assembly).unwrap().mate_mut(ma).unwrap().limits = vec![MateLimit { dof: Dof::Angle, min: -30.0, max: 30.0 }];
+    let solved = p.set_mate_value(assembly, mb, Dof::Angle, 90.0).unwrap();
+    assert!(solved.failing_relations.is_empty(), "{:?}", solved.failing_relations);
+    let (va, vb) = (value(&solved, ma, Dof::Angle), value(&solved, mb, Dof::Angle));
+    assert!((vb - 60.0).abs() < 0.01, "the second got to {vb}");
+    assert!((vb - 2.0 * va).abs() < 1e-4, "{va} and {vb}");
+}
+
+#[test]
 fn a_mate_failing_elsewhere_doesnt_stop_one_being_driven() {
     let (mut p, studio, assembly, parts) = project(vec![block("10", "10", "10"), block("100", "10", "10"), block("10", "10", "10"), block("10", "10", "10")]);
     let (a, b, c, d) = (instance(&mut p, assembly, studio, parts[0], "A"), instance(&mut p, assembly, studio, parts[1], "B"), instance(&mut p, assembly, studio, parts[2], "C"), instance(&mut p, assembly, studio, parts[3], "D"));

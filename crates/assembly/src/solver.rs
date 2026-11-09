@@ -823,6 +823,19 @@ pub fn solve(problem: &mut Problem) -> Report {
             }
         }
     }
+    // So is a relation with nothing free at either of its mates.
+    for (c, coupling) in problem.couplings.iter().enumerate() {
+        let (ja, jb) = (&problem.joints[coupling.a.0], &problem.joints[coupling.b.0]);
+        let held = [ja.a, ja.b, jb.a, jb.b].iter().all(|&t| rig.clusters[rig.cluster_of[t]].fixed);
+        if held {
+            let (a, b) = (value_row(&rig, ja, coupling.a.1), value_row(&rig, jb, coupling.b.1));
+            let scale = value_scale(&rig, coupling.a.1).max(value_scale(&rig, coupling.b.1));
+            if (b.value - coupling.ratio * a.value - coupling.offset).abs() * scale > TOLERANCE {
+                report.failing_couplings.push(c);
+                all_skip_couplings[c] = true;
+            }
+        }
+    }
     for members in &groups {
         let (skip, skip_couplings) = outside(&rig, problem, members);
         let skip: Vec<bool> = skip.iter().zip(&all_skip).map(|(a, b)| *a || *b).collect();

@@ -525,6 +525,10 @@ mod tests {
                 assert!(piston.x.dist(Vec3::X) < 1e-6 && piston.z.dist(Vec3::Z) < 1e-6, "the piston turned: {piston:?}");
                 let tip = v3(crank * angle.to_radians().cos(), crank * angle.to_radians().sin(), 8.0);
                 assert!(at("Rod").origin.dist(tip) < 1e-6, "{crank} {rod} {angle}: {:?} isn't {tip:?}", at("Rod").origin);
+                // Each pin goes through the two plates it joins, half in each.
+                assert!(at("Pin <1>").origin.dist(v3(0.0, 0.0, -8.0)) < 1e-6, "{:?}", at("Pin <1>").origin);
+                assert!(at("Pin <2>").origin.dist(v3(tip.x, tip.y, 0.0)) < 1e-6, "{:?}", at("Pin <2>").origin);
+                assert!(at("Pin <3>").origin.dist(v3(piston.origin.x, 0.0, 8.0)) < 1e-6, "{:?}", at("Pin <3>").origin);
             }
         }
         assert!(worst < 1e-6, "the piston was off by {worst}");

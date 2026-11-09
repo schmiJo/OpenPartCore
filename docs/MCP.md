@@ -46,19 +46,19 @@ A body is a part, as in Onshape: one connected solid. A feature acts on all of t
 
 The tools for features always work on a Part Studio: the last one selected, even with an assembly selected. `render` and `export` follow the selected tab, so with an assembly they draw it, with each instance its own colour, and write it as a STEP assembly, or an STL of it all. `body` still means a part of the Part Studio. `document_save`, `document_open` and `export` with `coreshape` take the whole project, which is a plain document if it's one Part Studio.
 
-Every tool that changes an assembly solves it and answers with its state: `freedom`, each instance's pose in `at`, each mate's `values`, and a `failing` on any mate that can't be met. A mate that fails isn't an error, as in Onshape, and neither is a part that's gone from its Part Studio, which comes back under `problems`.
+Every tool that changes how an assembly goes together solves it and answers with its state: `freedom`, each instance's pose in `at`, each mate's `values`, and a `failing` on any mate that can't be met. A mate that fails isn't an error, as in Onshape, and neither is a part that's gone from its Part Studio, which comes back under `problems`. `failing_relations` names any relation that can't be met, and `failing_in_sub_assemblies` any mate inside a sub-assembly. `connector_add` and `connector_delete` answer only for themselves, as a connector no mate uses changes nothing.
 
 ```
 tab_new { "type": "assembly" }
-instance_add { "part": "f1", "fixed": true, "name": "Plate" }
-instance_add { "part": "f2", "name": "Pin" }
-mate_add { "type": "revolute", "flip": true,
-           "a": { "instance": 3, "on": { "face": "f2:start" } },
-           "b": { "instance": 2, "on": { "face": "f1:end" } } }
-mate_set_value { "id": 6, "dof": "angle", "value": 400 }
+instance_add { "part": "f1", "fixed": true, "name": "Plate" }     gives id 1
+instance_add { "part": "f2", "name": "Pin" }                      gives id 2
+mate_add { "type": "revolute", "flip": true,                      gives id 5, as its two connectors are 3 and 4
+           "a": { "instance": 2, "on": { "face": "f2:start" } },
+           "b": { "instance": 1, "on": { "face": "f1:end" } } }
+mate_set_value { "id": 5, "dof": "angle", "value": 400 }
 ```
 
-An app can get the same with `Session::solved`, which gives each part's `Body` and where it goes, and `Session::with_project` for anything else. See [FILE_FORMAT.md](FILE_FORMAT.md#projects-and-assemblies) for what each thing means, and [KNOWN_LIMITS.md](KNOWN_LIMITS.md#assemblies) for how far it goes.
+An app can get the same with `Session::solved`, which gives each part's `Body` and where it goes, `Session::active_tab`, and `Session::with_project` for anything else. A mate inside a sub-assembly moves when it's dragged from above, and `mate_set_value` and `mate_edit` are for the assembly that has the mate. See [FILE_FORMAT.md](FILE_FORMAT.md#projects-and-assemblies) for what each thing means, and [KNOWN_LIMITS.md](KNOWN_LIMITS.md#assemblies) for how far it goes.
 
 ## How a session goes
 
@@ -77,8 +77,8 @@ result and the server carries on.
 ## What's been checked
 
 `crates/mcp/tests/protocol.rs` drives the real binary over its pipes: the handshake, schemas, protocol errors, a part built and
-edited through names, images decoded, and files kept inside the root. A session's STEP export opens in OpenCASCADE as one valid
-solid with the same volume to six decimals.
+edited through names, images decoded, and files kept inside the root, and assemblies built, moved, saved and opened again through
+every tool. A session's STEP export opens in OpenCASCADE as one valid solid with the same volume to six decimals.
 
 **It has not yet been connected to a real MCP client.** It follows the specification, with protocol versions 2024-11-05 to
 2025-11-25 accepted, but the only client so far is the test suite.

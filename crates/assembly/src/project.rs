@@ -544,8 +544,10 @@ impl Project {
         // Steps of a twelfth of a turn, or the same share of the distance's own size.
         let span = (want - start).abs();
         let count = if dof == Dof::Angle { (span / (TAU / 24.0)).ceil() } else { (span / (solver::problem_size(&problem) / 24.0).max(1e-9)).ceil() }.clamp(1.0, 2000.0) as usize;
-        // A mate that was failing already, elsewhere, says nothing about whether this one can go on.
-        let known = first.failing.clone();
+        // A mate that was failing already, elsewhere, says nothing about whether this one can go on. One that starts to, or a
+        // relation that does, is what stops it: left to itself the solver would drop a gear to get where it's told.
+        let (known, known_relations) = (first.failing.clone(), first.failing_couplings.clone());
+        let holds = |step: &Report| step.failing.iter().all(|f| known.contains(f)) && step.failing_couplings.iter().all(|f| known_relations.contains(f));
         let mut report = first;
         let mut reached = start;
         for k in 1..=count {
@@ -554,7 +556,7 @@ impl Project {
             problem.drives = vec![Drive { joint, dof, value: at }];
             let step = solver::solve(&mut problem);
             problem.drives.clear();
-            if step.failing.iter().all(|f| known.contains(f)) {
+            if holds(&step) {
                 report = step;
                 reached = at;
                 continue;
@@ -568,7 +570,7 @@ impl Project {
                 problem.drives = vec![Drive { joint, dof, value: middle }];
                 let step = solver::solve(&mut problem);
                 problem.drives.clear();
-                if step.failing.iter().all(|f| known.contains(f)) {
+                if holds(&step) {
                     report = step;
                     good = middle;
                 } else {
