@@ -446,7 +446,7 @@ fn revolved(point: (f64, f64), direction: (f64, f64), degrees: f64) -> std::resu
     let mut doc = Document::new();
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(10.0, 0.0, 4.0, 6.0))]));
     let axis = RevolveAxis { point: coreshape_document::point(point.0, point.1), direction: coreshape_document::point(direction.0, direction.1) };
-    doc.with(Op::Revolve { sketch: s, degrees: degrees.into(), mode: Mode::Add, axis: Some(axis) });
+    doc.with(Op::Revolve { sketch: s, degrees: degrees.into(), mode: Mode::Add, axis: Some(axis), regions: Vec::new() });
     let o = doc.rebuild(None);
     match o.failed {
         Some(i) => match &o.steps[i].state {
@@ -497,7 +497,7 @@ fn a_revolve_can_go_around_any_line_in_its_sketch() {
 fn a_revolves_axis_is_saved_and_a_plain_one_is_as_it_was() {
     let mut doc = Document::new();
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(10.0, 0.0, 4.0, 6.0))]));
-    doc.with(Op::Revolve { sketch: s, degrees: 360.0.into(), mode: Mode::Add, axis: Some(RevolveAxis { point: point(0.0, 0.0), direction: point(0.0, 1.0) }) });
+    doc.with(Op::Revolve { sketch: s, degrees: 360.0.into(), mode: Mode::Add, axis: Some(RevolveAxis { point: point(0.0, 0.0), direction: point(0.0, 1.0) }), regions: Vec::new() });
     let text = doc.save_text();
     assert!(text.contains("\"axis\""), "{text}");
     let mut back = Document::load_text(&text).unwrap();

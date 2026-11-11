@@ -73,8 +73,8 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 |---|---|
 | `sketch` | `plane` (default XY, and with `"on_face": "f2:end"` it follows that flat face), `regions` |
 | `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
-| `loft` | `sections`: a list of sketch ids, in order, each holding one outline, and `mode`. Straight between two, and a smooth cubic through three or more |
-| `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. |
+| `loft` | `sections`, in order, each a sketch id, for a sketch holding one outline, or a region `{"sketch": 2, "region": "r..."}`, so that one sketch with several outlines can feed it, and `mode`. Straight between two, and a smooth cubic through three or more. A region that has gone fails the feature, saying what's there |
+| `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. Optionally `regions`, as an extrude has them: see [below](#extrude-regions-and-ends) |
 | `sweep` | `sketch`, `path`, `mode`: see below |
 | `helix` | `sketch`, `pitch` (how far along the axis one turn goes), `turns`, `point` (default origin) and `axis` (default +z) for the axis, `left_handed` (default false), `mode`. The sketch can hold the axis, for a spring or a thread, or lie across it, for a twisted bar |
 | `solid` | `shape`, its dimensions, `at` (default XY), `mode` |
@@ -192,6 +192,8 @@ An extrude can choose what it takes and where it stops, as Onshape's can. These 
 ```
 
 A plain id is from `sketch`, and `{"sketch", "region"}` is from any constrained sketch before it, in which case `sketch` can be left out. Each goes along its own sketch's normal, and regions that touch become one part. A region that has gone fails the feature, saying what's there, and so does a sketch that's suppressed.
+
+**A revolve takes `regions` the same way.** With an `axis`, the axis is drawn in the revolve's `sketch`, or the first region's sketch if that's left out, and a region from another sketch has to lie in the same plane, facing either way. One that doesn't is refused, saying how far off it is. Without an `axis`, each region goes around its own sketch's Z axis. A second sketch's faces are named `f5:region.1.side.N`, as an extrude's are.
 
 **`end`** says where it stops, in place of `length`. If there's a `length` as well, it's kept, unused, for going back to it.
 

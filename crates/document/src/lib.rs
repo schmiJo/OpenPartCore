@@ -699,7 +699,9 @@ pub enum Op {
     Extrude { sketch: Option<FeatureId>, start: Expr, length: Expr, mode: Mode, regions: Vec<RegionPick>, faces: Vec<FaceKey>, end: ExtrudeEnd, opposite: bool },
     /// Revolves a sketch. With an `axis`, about that line in the sketch's plane, as drawn, turning right-handed around its
     /// direction. Without one, about the sketch's Z axis, with profile x the distance from the axis and y the height along it.
-    Revolve { sketch: FeatureId, degrees: Expr, mode: Mode, axis: Option<RevolveAxis> },
+    /// With `regions` it takes those, from any sketches, and otherwise whatever `sketch` gives. With an `axis`, a region from
+    /// another sketch has to be in the same plane as `sketch`, and without one it goes around its own sketch's Z axis.
+    Revolve { sketch: FeatureId, degrees: Expr, mode: Mode, axis: Option<RevolveAxis>, regions: Vec<RegionPick> },
     Solid { primitive: Primitive, at: Placement, mode: Mode },
     /// The solids in a STEP file, kept here in full so that the document stands alone. Their faces are named by their
     /// place in the file: `f3:side.0` is the first. A piece cut from a wide face keeps that face's name.
@@ -710,9 +712,9 @@ pub enum Op {
     /// A fillet with more than one radius: on different edges, which can meet at a corner, or varying along a chain.
     FilletRadii { sets: Vec<RadiusSet> },
     Chamfer { edges: EdgeSelect, distance: Expr, propagate: bool },
-    /// A solid through sketches in order, each holding one outline, with free-form sides. Straight between
-    /// two sections, and a smooth cubic through three or more. Sides are named from the first section.
-    Loft { sections: Vec<FeatureId>, mode: Mode },
+    /// A solid through sections in order, each a sketch holding one outline or one region of a sketch, with free-form sides.
+    /// Straight between two sections, and a smooth cubic through three or more. Sides are named from the first section.
+    Loft { sections: Vec<LoftSection>, mode: Mode },
     /// Sweeps a sketch along a smooth path of lines and arcs, starting at the sketch plane and
     /// heading along its normal.
     Sweep { sketch: FeatureId, path: Vec<SweepStep>, mode: Mode },
@@ -797,6 +799,26 @@ pub struct RegionPick {
     pub region: coreshape_sketch::RegionId,
 }
 
+/// One section of a loft: a sketch, which has to hold one outline, or one region of a constrained sketch, so that a sketch
+/// with several outlines can feed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoftSection {
+    pub sketch: FeatureId,
+    pub region: Option<coreshape_sketch::RegionId>,
+}
+
+impl From<FeatureId> for LoftSection {
+    fn from(sketch: FeatureId) -> LoftSection {
+        LoftSection { sketch, region: None }
+    }
+}
+
+impl From<RegionPick> for LoftSection {
+    fn from(pick: RegionPick) -> LoftSection {
+        LoftSection { sketch: pick.sketch, region: Some(pick.region) }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Motion {
     Translate { by: Point3 },
@@ -846,7 +868,7 @@ impl Op {
     }
 
     pub fn revolve(sketch: FeatureId, degrees: impl Into<Expr>, mode: Mode) -> Op {
-        Op::Revolve { sketch, degrees: degrees.into(), mode, axis: None }
+        Op::Revolve { sketch, degrees: degrees.into(), mode, axis: None, regions: Vec::new() }
     }
 
     pub fn solid(primitive: Primitive, at: Placement, mode: Mode) -> Op {
@@ -981,8 +1003,12 @@ impl Op {
                     _ => {}
                 }
             }
-            Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } => out.push(*sketch),
-            Op::Loft { sections, .. } => out.extend_from_slice(sections),
+            Op::Revolve { sketch, regions, .. } => {
+                out.push(*sketch);
+                out.extend(regions.iter().map(|r| r.sketch));
+            }
+            Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } => out.push(*sketch),
+            Op::Loft { sections, .. } => out.extend(sections.iter().map(|s| s.sketch)),
             Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
             Op::Trim { tool: TrimTool::Body(body), .. } => out.push(body.feature),
             Op::Trim { tool: TrimTool::Sketch(sketch), .. } => out.push(*sketch),
@@ -1574,6 +1600,19 @@ fn trim_parts(
 /// Profiles and a frame for revolving about a line in a sketch's plane, in the terms the kernel's revolve takes: distance
 /// from its frame's Z axis, and height along it. That's the same plane turned, with the profile on the +x side, so the
 /// axis has to point whichever way leaves it there. Going the other way round needs starting from the far end.
+/// Profiles drawn in `from`'s plane, in `to`'s coordinates. The planes have to be the same, facing either way.
+fn into_plane(list: &[Profile], from: &Frame, to: &Frame) -> std::result::Result<Vec<Profile>, String> {
+    let along = from.z.dot(to.z);
+    let gap = (from.origin - to.origin).dot(to.z);
+    let size = list.iter().flat_map(|p| p.outer.segs.iter().map(|s| s.start())).fold(1.0f64, |m, q| m.max(q.x.abs()).max(q.y.abs()));
+    if (along.abs() - 1.0).abs() > 1e-9 || gap.abs() > 1e-9 * (size + (from.origin - to.origin).norm()) {
+        return Err(format!("isn't in the plane ({:.3} degrees and {gap:.3e} off it)", along.abs().min(1.0).acos().to_degrees()));
+    }
+    let o = to.to_local(from.origin);
+    let m = [[from.x.dot(to.x), from.y.dot(to.x)], [from.x.dot(to.y), from.y.dot(to.y)]];
+    Ok(list.iter().map(|p| coreshape::multi::mapped_profile(p, m, v2(o.x, o.y))).collect())
+}
+
 fn revolve_frame(axis: &RevolveAxis, frame: &Frame, list: &[Profile], angle: f64, env: &Env) -> Result<(Frame, Vec<Profile>)> {
     let (point, along) = (v2(num(&axis.point[0], env)?, num(&axis.point[1], env)?), v2(num(&axis.direction[0], env)?, num(&axis.direction[1], env)?));
     let length = along.x.hypot(along.y);
@@ -1933,8 +1972,9 @@ impl Document {
     fn check_sketch_refs(op: &Op, before: &[Feature]) -> Result<()> {
         let list: Vec<FeatureId> = match op {
             Op::Extrude { sketch, regions, .. } => sketch.iter().copied().chain(regions.iter().map(|r| r.sketch)).collect(),
-            Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } => vec![*sketch],
-            Op::Loft { sections, .. } => sections.clone(),
+            Op::Revolve { sketch, regions, .. } => std::iter::once(*sketch).chain(regions.iter().map(|r| r.sketch)).collect(),
+            Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } => vec![*sketch],
+            Op::Loft { sections, .. } => sections.iter().map(|s| s.sketch).collect(),
             _ => Vec::new(),
         };
         for sketch in &list {
@@ -2144,8 +2184,12 @@ impl Document {
                     let sketches: Vec<FeatureId> = sketch.iter().copied().chain(regions.iter().map(|r| r.sketch)).collect();
                     hash_text(body_key ^ mixed(&sketches), &own)
                 }
-                Op::Revolve { sketch, .. } | Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
-                Op::Loft { sections, .. } => hash_text(body_key ^ mixed(sections), &own),
+                Op::Revolve { sketch, regions, .. } => {
+                    let sketches: Vec<FeatureId> = std::iter::once(*sketch).chain(regions.iter().map(|r| r.sketch)).collect();
+                    hash_text(body_key ^ mixed(&sketches), &own)
+                }
+                Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
+                Op::Loft { sections, .. } => hash_text(body_key ^ mixed(&sections.iter().map(|s| s.sketch).collect::<Vec<_>>()), &own),
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
                 _ => hash_text(body_key, &own),
             };
@@ -2340,43 +2384,80 @@ impl Document {
                 }
                 applied(tools, *mode)
             }
-            Op::Revolve { sketch, degrees, mode, axis } => {
-                let SketchOutput { frame, profiles, by_entity, open, .. } = sketch_output(sketch)?;
+            Op::Revolve { sketch, degrees, mode, axis, regions } => {
                 let a = num(degrees, env)?.to_radians();
-                if *mode == Mode::Surface {
-                    // An open curve goes around the axis as a region's outline would, and comes off the end of the list after.
-                    let mut all_curves: Vec<Profile> = profiles.to_vec();
-                    all_curves.extend(open.iter().map(|w| Profile { outer: w.clone(), holes: Vec::new() }));
-                    let (frame, moved): (Frame, Vec<Profile>) = match axis {
-                        Some(axis) => revolve_frame(axis, &frame, &all_curves, a, env)?,
-                        None => (frame, all_curves),
-                    };
-                    let (regions, curves) = moved.split_at(profiles.len());
-                    let closed = regions.iter().map(|p| revolve(p, &frame, a, tag).and_then(|b| sides_of(&b))).collect::<Result<Vec<Body>>>()?;
-                    let curves = curves.iter().map(|p| revolve_open(&p.outer, &frame, a, tag)).collect::<Result<Vec<Body>>>()?;
-                    return sheets(named_by_region(closed, curves, by_entity));
+                let surface = *mode == Mode::Surface;
+                // Each sketch it takes from, in the order they first come up.
+                let mut sketches: Vec<FeatureId> = Vec::new();
+                for id in regions.iter().map(|r| r.sketch) {
+                    if !sketches.contains(&id) {
+                        sketches.push(id);
+                    }
                 }
-                let (frame, list): (Frame, Vec<Profile>) = match axis {
-                    Some(axis) => revolve_frame(axis, &frame, &profiles, a, env)?,
-                    None => (frame, profiles.to_vec()),
-                };
-                let tools = list
-                    .iter()
-                    .enumerate()
-                    .map(|(k, p)| Ok(with_region(revolve(p, &frame, a, tag)?, if by_entity { 0 } else { k as u32 })))
-                    .collect::<Result<Vec<Body>>>()?;
+                if sketches.is_empty() {
+                    sketches.push(*sketch);
+                }
+                // An axis is drawn in the revolve's own sketch.
+                let own = sketch_output(sketch)?;
+                let mut tools = Vec::new();
+                for (order, id) in sketches.iter().enumerate() {
+                    let out = sketch_output(id)?;
+                    let list: Vec<Profile> = if regions.is_empty() { out.profiles.to_vec() } else { picked_profiles(*id, &out, regions)? };
+                    // A whole sketch as a surface takes its open curves too, which go around as a region's outline would.
+                    let whole_surface = surface && regions.is_empty();
+                    let mut all_curves = list;
+                    let closed_count = all_curves.len();
+                    if whole_surface {
+                        all_curves.extend(out.open.iter().map(|w| Profile { outer: w.clone(), holes: Vec::new() }));
+                    }
+                    let (frame, moved): (Frame, Vec<Profile>) = match axis {
+                        Some(axis) => {
+                            let here = if *id == *sketch { all_curves } else { into_plane(&all_curves, &out.frame, &own.frame).map_err(|why| Error::InvalidInput(format!("a region from sketch f{} {why} of f{}, whose axis it turns around", id.0, sketch.0)))? };
+                            revolve_frame(axis, &own.frame, &here, a, env)?
+                        }
+                        None => (out.frame, all_curves),
+                    };
+                    let (closed, curves) = moved.split_at(closed_count);
+                    if whole_surface {
+                        let closed = closed.iter().map(|p| revolve(p, &frame, a, tag).and_then(|b| sides_of(&b))).collect::<Result<Vec<Body>>>()?;
+                        let curves = curves.iter().map(|p| revolve_open(&p.outer, &frame, a, tag)).collect::<Result<Vec<Body>>>()?;
+                        tools.extend(named_by_region(closed, curves, out.by_entity));
+                        continue;
+                    }
+                    for (k, p) in closed.iter().enumerate() {
+                        // Entities are unique within a sketch, so another sketch's faces need telling apart from these.
+                        let region = if out.by_entity { order as u32 } else { k as u32 };
+                        let made = revolve(p, &frame, a, tag)?;
+                        tools.push(with_region(if surface { sides_of(&made)? } else { made }, region));
+                    }
+                }
+                if surface {
+                    return sheets(tools);
+                }
                 applied(tools, *mode)
             }
             Op::Loft { sections, mode } => {
-                let outputs = sections.iter().map(&sketch_output).collect::<Result<Vec<_>>>()?;
-                let mut list = Vec::with_capacity(outputs.len());
-                for (id, out) in sections.iter().zip(&outputs) {
-                    match out.profiles.as_slice() {
-                        [one] => list.push((one, out.frame)),
-                        many => return Err(Error::InvalidInput(format!("a loft's section f{} must hold one outline, not {}", id.0, many.len()))),
-                    }
+                let mut list: Vec<(Profile, Frame)> = Vec::with_capacity(sections.len());
+                for section in sections {
+                    let out = sketch_output(&section.sketch)?;
+                    let profile = match section.region {
+                        Some(region) => picked_profiles(section.sketch, &out, &[RegionPick { sketch: section.sketch, region }])?.remove(0),
+                        None => match out.profiles.as_slice() {
+                            [one] => one.clone(),
+                            many => {
+                                return Err(Error::InvalidInput(format!(
+                                    "a loft's section f{} must hold one outline, not {}, or name one of its regions: {{\"sketch\": {}, \"region\": \"r...\"}}",
+                                    section.sketch.0,
+                                    many.len(),
+                                    section.sketch.0
+                                )))
+                            }
+                        },
+                    };
+                    list.push((profile, out.frame));
                 }
-                applied(vec![coreshape::loft::loft(&list, tag)?], *mode)
+                let refs: Vec<(&Profile, Frame)> = list.iter().map(|(p, f)| (p, *f)).collect();
+                applied(vec![coreshape::loft::loft(&refs, tag)?], *mode)
             }
             Op::Sweep { sketch, path, mode } => {
                 let SketchOutput { frame, profiles: list, by_entity, .. } = sketch_output(sketch)?;
@@ -3238,22 +3319,45 @@ fn read_extrude_end(v: &Value) -> Result<ExtrudeEnd> {
     })
 }
 
-/// An extrude's picks: each a region's id, from `sketch`, or `{"sketch": 4, "region": "r..."}`.
-fn read_region_picks(v: &Value, sketch: Option<FeatureId>) -> Result<Vec<RegionPick>> {
+/// An extrude's or a revolve's picks: each a region's id, from `sketch`, or `{"sketch": 4, "region": "r..."}`. `what` is
+/// the feature, "an extrude".
+fn read_region_picks(v: &Value, sketch: Option<FeatureId>, what: &str) -> Result<Vec<RegionPick>> {
     let Some(list) = v.get("regions") else { return Ok(Vec::new()) };
-    let list = list.as_array().ok_or_else(|| Error::InvalidInput("an extrude's \"regions\" must be a list of region ids".into()))?;
-    let parse = |t: &str| coreshape_sketch::RegionId::parse(t).map_err(Error::InvalidInput);
+    let list = list.as_array().ok_or_else(|| Error::InvalidInput(format!("{what}'s \"regions\" must be a list of region ids")))?;
     let mut out = Vec::with_capacity(list.len());
     for item in list {
-        out.push(if let Some(id) = item.as_str() {
-            let sketch = sketch.ok_or_else(|| Error::InvalidInput("a region named by its id alone needs the extrude's \"sketch\". From several sketches, each is {\"sketch\": 4, \"region\": \"r...\"}".into()))?;
-            RegionPick { sketch, region: parse(id)? }
-        } else {
-            let id = item.get("region").and_then(Value::as_str).ok_or_else(|| Error::InvalidInput("a picked region is an id, or {\"sketch\": 4, \"region\": \"r...\"}".into()))?;
-            RegionPick { sketch: read_sketch_id(item)?, region: parse(id)? }
+        out.push(match item.as_str() {
+            Some(id) => {
+                let sketch = sketch.ok_or_else(|| Error::InvalidInput(format!("a region named by its id alone needs {what}'s \"sketch\". From several sketches, each is {{\"sketch\": 4, \"region\": \"r...\"}}")))?;
+                RegionPick { sketch, region: coreshape_sketch::RegionId::parse(id).map_err(Error::InvalidInput)? }
+            }
+            None => read_region_pick(item)?,
         });
     }
     Ok(out)
+}
+
+/// `{"sketch": 4, "region": "r..."}`.
+fn read_region_pick(item: &Value) -> Result<RegionPick> {
+    known_keys(item, &["sketch", "region"])?;
+    let id = item.get("region").and_then(Value::as_str).ok_or_else(|| Error::InvalidInput("a picked region is an id, or {\"sketch\": 4, \"region\": \"r...\"}".into()))?;
+    Ok(RegionPick { sketch: read_sketch_id(item)?, region: coreshape_sketch::RegionId::parse(id).map_err(Error::InvalidInput)? })
+}
+
+/// Picked regions, each as its id alone when it's from `sketch`.
+fn region_picks_value(regions: &[RegionPick], sketch: Option<FeatureId>) -> Value {
+    Value::Arr(
+        regions
+            .iter()
+            .map(|r| {
+                if Some(r.sketch) == sketch {
+                    Value::str(r.region.name())
+                } else {
+                    Value::obj(vec![("sketch", Value::Num(r.sketch.0 as f64)), ("region", Value::str(r.region.name()))])
+                }
+            })
+            .collect(),
+    )
 }
 
 fn expr_field(v: &Value, key: &str, what: &str) -> Result<Expr> {
@@ -3670,14 +3774,7 @@ pub fn op_value(op: &Op) -> Value {
             }
             items.push(("mode", mode_value(*mode)));
             if !regions.is_empty() {
-                let picks = regions.iter().map(|r| {
-                    if Some(r.sketch) == *sketch {
-                        Value::str(r.region.name())
-                    } else {
-                        Value::obj(vec![("sketch", Value::Num(r.sketch.0 as f64)), ("region", Value::str(r.region.name()))])
-                    }
-                });
-                items.push(("regions", Value::Arr(picks.collect())));
+                items.push(("regions", region_picks_value(regions, *sketch)));
             }
             if !faces.is_empty() {
                 items.push(("faces", key_list_value(faces)));
@@ -3690,10 +3787,13 @@ pub fn op_value(op: &Op) -> Value {
             }
             Value::obj(items)
         }
-        Op::Revolve { sketch, degrees, mode, axis } => {
+        Op::Revolve { sketch, degrees, mode, axis, regions } => {
             let mut items = vec![("type", Value::str("revolve")), ("sketch", Value::Num(sketch.0 as f64)), ("degrees", expr_value(degrees)), ("mode", mode_value(*mode))];
             if let Some(axis) = axis {
                 items.push(("axis", Value::obj(vec![("point", point2_value(&axis.point)), ("direction", point2_value(&axis.direction))])));
+            }
+            if !regions.is_empty() {
+                items.push(("regions", region_picks_value(regions, Some(*sketch))));
             }
             Value::obj(items)
         }
@@ -3786,7 +3886,18 @@ pub fn op_value(op: &Op) -> Value {
         }
         Op::Loft { sections, mode } => Value::obj(vec![
             ("type", Value::str("loft")),
-            ("sections", Value::Arr(sections.iter().map(|s| Value::Num(s.0 as f64)).collect())),
+            (
+                "sections",
+                Value::Arr(
+                    sections
+                        .iter()
+                        .map(|s| match s.region {
+                            None => Value::Num(s.sketch.0 as f64),
+                            Some(region) => Value::obj(vec![("sketch", Value::Num(s.sketch.0 as f64)), ("region", Value::str(region.name()))]),
+                        })
+                        .collect(),
+                ),
+            ),
             ("mode", mode_value(*mode)),
         ]),
         Op::Sweep { sketch, path, mode } => Value::obj(vec![
@@ -3997,7 +4108,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
         "extrude" => {
             with(&["type", "sketch", "start", "length", "mode", "regions", "faces", "end", "opposite"])?;
             let named = v.get("sketch").map(|_| read_sketch_id(v)).transpose()?;
-            let regions = read_region_picks(v, named)?;
+            let regions = read_region_picks(v, named, "an extrude")?;
             let faces = read_key_list(v, "faces")?;
             let sketch = match (named, regions.first()) {
                 (Some(id), _) => Some(id),
@@ -4018,7 +4129,14 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::Extrude { sketch, start: v.get("start").map(read_expr).transpose()?.unwrap_or(Expr::number(0.0)), length, mode: read_mode(v)?, regions, faces, end, opposite })
         }
         "revolve" => {
-            with(&["type", "sketch", "degrees", "mode", "axis"])?;
+            with(&["type", "sketch", "degrees", "mode", "axis", "regions"])?;
+            let named = v.get("sketch").map(|_| read_sketch_id(v)).transpose()?;
+            let regions = read_region_picks(v, named, "a revolve")?;
+            let sketch = match (named, regions.first()) {
+                (Some(id), _) => id,
+                (None, Some(first)) => first.sketch,
+                (None, None) => read_sketch_id(v)?,
+            };
             let axis = match v.get("axis") {
                 None => None,
                 Some(a) => {
@@ -4027,12 +4145,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                     Some(RevolveAxis { point: read_point2(need("point")?)?, direction: read_point2(need("direction")?)? })
                 }
             };
-            Ok(Op::Revolve {
-                sketch: read_sketch_id(v)?,
-                degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)),
-                mode: read_mode(v)?,
-                axis,
-            })
+            Ok(Op::Revolve { sketch, degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)), mode: read_mode(v)?, axis, regions })
         }
         "transform" => {
             with(&["type", "motion", "copy"])?;
@@ -4156,12 +4269,16 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
         }
         "loft" => {
             with(&["type", "sections", "mode"])?;
-            let bad = || Error::InvalidInput("\"sections\" must be a list of feature ids".into());
+            let bad = || Error::InvalidInput("\"sections\" must be a list of sketch ids, or of {\"sketch\": 4, \"region\": \"r...\"}".into());
             let sections = field(v, "sections", "a loft")?
                 .as_array()
                 .ok_or_else(bad)?
                 .iter()
-                .map(|x| x.as_f64().filter(|n| n.fract() == 0.0 && *n >= 1.0 && *n < u32::MAX as f64).map(|n| FeatureId(n as u32)).ok_or_else(bad))
+                .map(|x| match x.as_f64() {
+                    Some(n) => Some(n).filter(|n| n.fract() == 0.0 && *n >= 1.0 && *n < u32::MAX as f64).map(|n| LoftSection::from(FeatureId(n as u32))).ok_or_else(bad),
+                    None if x.get("region").is_some() => read_region_pick(x).map(LoftSection::from),
+                    None => Err(bad()),
+                })
                 .collect::<Result<Vec<_>>>()?;
             Ok(Op::Loft { sections, mode: read_mode(v)? })
         }

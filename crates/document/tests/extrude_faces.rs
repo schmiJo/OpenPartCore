@@ -307,7 +307,7 @@ fn a_face_bounded_by_a_sampled_curve_is_refused_saying_which() {
     let mut doc = Document::new();
     let a = doc.add(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::Circle { cx: 0.0.into(), cy: 0.0.into(), r: 10.0.into() })])).unwrap();
     let b = doc.add(Op::sketch(Placement::xy(20.0), vec![Region::new(Shape::Rect { x: (-6.0).into(), y: (-6.0).into(), w: 12.0.into(), h: 12.0.into() })])).unwrap();
-    doc.add(Op::Loft { sections: vec![a, b], mode: Mode::Add }).unwrap();
+    doc.add(Op::Loft { sections: vec![a.into(), b.into()], mode: Mode::Add }).unwrap();
     let cut = doc.add(Op::sketch(Placement::new(point3(0.0, 0.0, 10.0), point3(0.3, 0.0, 1.0), point3(1.0, 0.0, -0.3)), vec![Region::new(Shape::Rect { x: (-30.0).into(), y: (-30.0).into(), w: 60.0.into(), h: 60.0.into() })])).unwrap();
     doc.add(Op::extrude(cut, 0.0, 30.0, Mode::Remove)).unwrap();
     let o = ok(&mut doc);

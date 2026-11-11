@@ -44,7 +44,7 @@ A body is a part, as in Onshape: one connected solid. A feature acts on all of t
 
 ## Extrude ends
 
-`feature_add` takes an extrude's `regions` from `sketch_arrangement`, its `faces` of parts, its `end` and `opposite`: see [FILE_FORMAT.md](FILE_FORMAT.md#extrude-regions-and-ends). `edges_list` names each edge's ends as `start_vertex` and `end_vertex`, ready for `up_to_vertex`, and `faces_list` gives a cylinder, cone or torus its `axis`, with a `point` and a `direction`, and a cone its `half_angle` in degrees.
+`feature_add` takes an extrude's `regions` from `sketch_arrangement`, its `faces` of parts, its `end` and `opposite`, a revolve's `regions` and a loft's sections as regions: see [FILE_FORMAT.md](FILE_FORMAT.md#extrude-regions-and-ends). `edges_list` names each edge's ends as `start_vertex` and `end_vertex`, ready for `up_to_vertex`, and `faces_list` gives a cylinder, cone or torus its `axis`, with a `point` and a `direction`, and a cone its `half_angle` in degrees.
 
 ## Meshes for an app
 

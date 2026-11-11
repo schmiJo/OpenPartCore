@@ -184,7 +184,7 @@ fn nozzle(doc: &mut Document, _: usize) {
         Placement::xy("height"),
         vec![Region::new(Shape::Ellipse { cx: 0.0.into(), cy: 0.0.into(), rx: "lip".into(), ry: "lip * 0.7".into(), degrees: 0.0.into() })],
     ));
-    doc.with(Op::Loft { sections: vec![base, waist, lip], mode: Mode::Add });
+    doc.with(Op::Loft { sections: vec![base.into(), waist.into(), lip.into()], mode: Mode::Add });
     let across = doc.with(Op::sketch(
         Placement::new(point3("-width", 0.0, "height * 0.3"), point3(1.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)),
         vec![Region::new(Shape::circle(0.0, 0.0, "pin / 2"))],
@@ -236,7 +236,7 @@ fn cup(doc: &mut Document, _: usize) {
     let base = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle(0.0, 0.0, "foot"))]));
     let waist = doc.with(Op::sketch(Placement::xy("height * 0.5"), vec![Region::new(Shape::circle(0.0, 0.0, "waist"))]));
     let lip = doc.with(Op::sketch(Placement::xy("height"), vec![Region::new(Shape::circle(0.0, 0.0, "lip"))]));
-    let body = doc.with(Op::Loft { sections: vec![base, waist, lip], mode: Mode::Add });
+    let body = doc.with(Op::Loft { sections: vec![base.into(), waist.into(), lip.into()], mode: Mode::Add });
     doc.with(Op::Shell { open: vec![body.end_cap()], thickness: "wall".into() });
 }
 

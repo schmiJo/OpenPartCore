@@ -184,7 +184,7 @@ fn mapped(wire: &Wire, m: [[f64; 2]; 2], offset: Vec2) -> Wire {
 }
 
 /// A profile under a rigid 2D map, with its wires put back in their proper directions and ids kept.
-fn mapped_profile(p: &Profile, m: [[f64; 2]; 2], offset: Vec2) -> Profile {
+pub fn mapped_profile(p: &Profile, m: [[f64; 2]; 2], offset: Vec2) -> Profile {
     let outer = mapped(&p.outer, m, offset);
     let outer = if outer.signed_area() < 0.0 { outer.reversed() } else { outer };
     let holes = p

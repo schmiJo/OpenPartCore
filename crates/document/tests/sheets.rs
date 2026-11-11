@@ -132,7 +132,7 @@ fn a_surface_revolve_sweeps_open_curves_around_either_kind_of_axis() {
     let mut doc = Document::new();
     let path = Shape::OpenPath { start: point(5.0, 0.0), moves: vec![Move::Line { to: point(5.0, 8.0) }] };
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(path)]));
-    doc.with(Op::Revolve { sketch: s, degrees: 90.0.into(), mode: Mode::Surface, axis: Some(RevolveAxis { point: point(2.0, 0.0), direction: point(0.0, 1.0) }) });
+    doc.with(Op::Revolve { sketch: s, degrees: 90.0.into(), mode: Mode::Surface, axis: Some(RevolveAxis { point: point(2.0, 0.0), direction: point(0.0, 1.0) }), regions: Vec::new() });
     near(area_of(&ok(&mut doc), 0), (PI / 2.0) * 3.0 * 8.0, "around a line");
 
     // And a closed region's outline: a rectangle gives a surface with no end caps, which a full turn doesn't have anyway.
@@ -159,7 +159,7 @@ fn a_sweep_a_loft_and_a_helix_make_sides_without_ends() {
     let mut doc = Document::new();
     let a = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 4.0, 4.0))]));
     let b = doc.with(Op::sketch(Placement::xy(6.0), vec![Region::new(Shape::rect(0.0, 0.0, 4.0, 4.0))]));
-    doc.with(Op::Loft { sections: vec![a, b], mode: Mode::Surface });
+    doc.with(Op::Loft { sections: vec![a.into(), b.into()], mode: Mode::Surface });
     let o = ok(&mut doc);
     assert!(o.bodies[0].body.sheet);
     assert!(!o.bodies[0].body.boundary_edges().is_empty());

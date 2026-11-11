@@ -10,7 +10,7 @@ fn circles() -> (Document, FeatureId, FeatureId, FeatureId) {
     doc.set_parameter("top", 5.0).unwrap();
     let a = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, "bottom"))]));
     let b = doc.with(Op::sketch(Placement::xy(20.0), vec![Region::new(Shape::circle(0.0, 0.0, "top"))]));
-    let l = doc.with(Op::Loft { sections: vec![a, b], mode: Mode::Add });
+    let l = doc.with(Op::Loft { sections: vec![a.into(), b.into()], mode: Mode::Add });
     (doc, a, b, l)
 }
 
@@ -74,12 +74,12 @@ fn it_counts_as_using_its_sections_and_can_be_cut_and_copied() {
 #[test]
 fn a_section_has_to_be_one_outline_of_a_sketch() {
     let (mut doc, _, _, l) = circles();
-    assert!(doc.add(Op::Loft { sections: vec![l, l], mode: Mode::Add }).is_err());
+    assert!(doc.add(Op::Loft { sections: vec![l.into(), l.into()], mode: Mode::Add }).is_err());
 
     let mut doc = Document::new();
     let two = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(-9.0, 0.0, 3.0)), Region::new(Shape::circle(9.0, 0.0, 3.0))]));
     let one = doc.with(Op::sketch(Placement::xy(9.0), vec![Region::new(Shape::circle(0.0, 0.0, 3.0))]));
-    doc.with(Op::Loft { sections: vec![two, one], mode: Mode::Add });
+    doc.with(Op::Loft { sections: vec![two.into(), one.into()], mode: Mode::Add });
     let o = doc.rebuild(None);
     let failed = o.failed.expect("two outlines in one section");
     assert!(matches!(&o.steps[failed].state, StepState::Failed(why) if why.contains("one outline")), "{:?}", o.steps[failed]);
