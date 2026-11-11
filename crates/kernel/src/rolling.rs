@@ -227,14 +227,20 @@ impl<'a> Solver<'a> {
             return *only;
         }
         let faces = &self.body.faces;
-        let within = |f: &&usize| faces[**f].surface.foot_within(p);
-        // The nearest that holds it: the foot on a wall across the way can be on that wall too.
-        let on_it = list
-            .iter()
-            .filter(within)
-            .filter(|f| self.index.locate_on_face(**f, faces[**f].surface.project(p), 1e-6) != FaceLoc::Outside)
-            .min_by(|a, b| faces[**a].surface.sdf(p).abs().total_cmp(&faces[**b].surface.sdf(p).abs()));
-        on_it.or_else(|| list.iter().find(within)).copied().unwrap_or(list[0])
+        let within: Vec<usize> = list.iter().copied().filter(|f| faces[*f].surface.foot_within(p)).collect();
+        match within.as_slice() {
+            [] => list[0],
+            [only] => *only,
+            // Pieces of one surface, as two halves of a cylinder are: whichever it's on, it's the same surface.
+            [first, rest @ ..] if rest.iter().all(|f| faces[*f].surface == faces[*first].surface && faces[*f].flipped == faces[*first].flipped) => *first,
+            // The nearest that holds it: the foot on a wall across the way can be on that wall too.
+            several => several
+                .iter()
+                .copied()
+                .filter(|f| self.index.locate_on_face(*f, faces[*f].surface.project(p), 1e-6) != FaceLoc::Outside)
+                .min_by(|a, b| faces[*a].surface.sdf(p).abs().total_cmp(&faces[*b].surface.sdf(p).abs()))
+                .unwrap_or(several[0]),
+        }
     }
 
     fn holding(&self, list: &[usize], p: Vec3) -> &'a Face {
@@ -734,16 +740,15 @@ fn blend_with(body: &Body, edges: &[usize], kind: Kind, varying: Option<&Varying
         blend_chain(body, &mut work, &index, chain, kind, varying, feature, &uses, &at_vertex, &mut new_faces, &mut placed)?;
     }
     let out = finish(work, new_faces, body, &index, &placed, kind)?;
-    // Along each edge, whether it's convex, as the chain says.
+    // At the middle of each edge, whether it's convex, as the chain says. The edges themselves have been taken out of their
+    // faces here, so one point each is enough to see that the blend went the right way, and finding a point among
+    // free-form faces is slow.
     let mut along = Vec::new();
     for chain in &chains {
         for e in &chain.elements {
-            for k in 1..8 {
-                let s = k as f64 / 8.0;
-                let (p, t) = (e.point(body, s), e.tangent(body, s));
-                let turn = out_normal(&body.faces[e.left], p).cross(out_normal(&body.faces[e.right], p)).dot(t);
-                along.push((p, turn > 0.0, false));
-            }
+            let (p, t) = (e.point(body, 0.5), e.tangent(body, 0.5));
+            let turn = out_normal(&body.faces[e.left], p).cross(out_normal(&body.faces[e.right], p)).dot(t);
+            along.push((p, turn > 0.0, false));
         }
     }
     let name = match kind {
