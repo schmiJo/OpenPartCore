@@ -43,6 +43,7 @@ are named by the feature that made them:
 | `f2:side.3` | Swept from segment 3 of the outer wire |
 | `f2:hole.1.side.0` | Swept from segment 0 of hole 1 |
 | `f2:region.2.side.0` | Swept from segment 0 of the outer wire of region 2 |
+| `f2:wall.0` | The walls an extrude swept from the edges of the first face in its `faces`: see [below](#extruding-faces) |
 
 Segments number from 0 in drawing order. A rectangle runs bottom, right, top, left. Both halves of a
 circle are segment 0. Primitives are built by the same sweeps, so `f2:end` is the top of a box.
@@ -71,7 +72,7 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `type` | Fields |
 |---|---|
 | `sketch` | `plane` (default XY, and with `"on_face": "f2:end"` it follows that flat face), `regions` |
-| `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
+| `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
 | `loft` | `sections`: a list of sketch ids, in order, each holding one outline, and `mode`. Straight between two, and a smooth cubic through three or more |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. |
 | `sweep` | `sketch`, `path`, `mode`: see below |
@@ -123,6 +124,8 @@ A name can cover several faces. A key adds what tells them apart, and each part 
 | `f2:end@f5.1@f7.0` | A copy of a copy: copy 1 of `f5`, in the original of `f7` |
 | `f3:side.1[f2:end\|f2:side.0]` | The fillet or chamfer face that replaced the edge between those two faces |
 | `f4:side.1[f2:side.1]` | A shell's inner wall following `f2:side.1` |
+| `f5:wall.0[f2:side.3]` | The wall an extrude swept from the edge of its first face that's against `f2:side.3` |
+| `f5:end[f2:end]` | The far end of the extrude of face `f2:end` |
 | `f4:side.0#1` | Piece 1, counting faces that agree on everything else |
 
 `face_keys(body)` gives each face a key that picks only that face, and `find_faces(body, key)` goes the other way. `{"on_face": key}` and `{"between": [key, key]}` take keys, so a
@@ -203,6 +206,27 @@ A plain id is from `sketch`, and `{"sketch", "region"}` is from any constrained 
 | `{"type": "up_to_vertex", "vertex": {"point": [x, y, z]}}` | The same, through a place |
 
 **`"opposite": true`** goes the other way. An end behind the sketch is refused, and the message says so. The far end is named as a blind extrude's is, however it's shaped: `f5:end` going forward, and `f5:start` in the opposite direction, as the kernel names caps by where they are.
+
+### Extruding faces
+
+**`faces`** takes flat faces of parts, by name or [key](#face-keys), as Onshape's extrude takes faces as well as sketch regions. It can be on its own, with no `sketch`, or with `regions` or a `sketch`, whose regions go as they always did. Each face goes along its own outward normal, holes and all, so the top of a block goes up and its side goes sideways. `start`, `end` and `opposite` work as they do for a sketch, with the face where the sketch would be: `"opposite": true` and `"mode": "remove"` cut into the part.
+
+```json
+{ "id": 6, "type": "extrude", "faces": ["f2:end", "f3:side.1"], "length": 5, "mode": "add" }
+```
+
+The new faces are named by this feature, as a sketch's are, and their keys say where each came from:
+
+| Name | Key | Face |
+|---|---|---|
+| `f6:end`, `f6:start` | `f6:end[f2:end]` | The far end and the near one, holding the face they came from |
+| `f6:wall.0` | `f6:wall.0[f1:side.3]` | A wall swept from an edge of the faces picked by the first entry in `faces`, holding the face across that edge. `wall.1` is for the second entry, and so on |
+
+A name that picks several faces, such as a patterned boss's top, extrudes them all, and their walls share the entry's `wall.N`. A face two entries pick goes once, named for the first. A whole circle's edge gives two half walls under one key, as a whole circle always gives two half faces, and they're told apart by `#0` and `#1`.
+
+With `"mode": "add"`, a wall that carries straight on from a face of the part, as the walls over a block's top do, becomes part of that face, which keeps its name. So `f6:wall.0` names only the walls that stand out on their own, and with `new_body` or `surface` it names them all.
+
+A face has to be flat, and bounded by edges with an exact form: lines, arcs, ellipses and splines. An edge that's an intersection curve held as samples, such as where a plane cuts a free-form face, is refused, saying which face. So is a curved face, and a face that has gone.
 
 ## Sheets
 

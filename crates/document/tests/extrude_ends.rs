@@ -72,16 +72,16 @@ fn region_of_area(doc: &Document, sketch: FeatureId, area: f64) -> RegionId {
 
 fn extrude_regions(sketch: FeatureId, picks: &[(FeatureId, RegionId)], length: f64, mode: Mode) -> Op {
     let regions = picks.iter().map(|(sketch, region)| RegionPick { sketch: *sketch, region: *region }).collect();
-    Op::Extrude { sketch, start: 0.0.into(), length: length.into(), mode, regions, end: ExtrudeEnd::Blind, opposite: false }
+    Op::Extrude { sketch: Some(sketch), start: 0.0.into(), length: length.into(), mode, regions, faces: Vec::new(), end: ExtrudeEnd::Blind, opposite: false }
 }
 
 fn extrude_to(sketch: FeatureId, end: ExtrudeEnd, mode: Mode) -> Op {
-    Op::Extrude { sketch, start: 0.0.into(), length: 0.0.into(), mode, regions: Vec::new(), end, opposite: false }
+    Op::Extrude { sketch: Some(sketch), start: 0.0.into(), length: 0.0.into(), mode, regions: Vec::new(), faces: Vec::new(), end, opposite: false }
 }
 
 fn backward(op: Op) -> Op {
     match op {
-        Op::Extrude { sketch, start, length, mode, regions, end, .. } => Op::Extrude { sketch, start, length, mode, regions, end, opposite: true },
+        Op::Extrude { sketch, start, length, mode, regions, faces, end, .. } => Op::Extrude { sketch, start, length, mode, regions, faces, end, opposite: true },
         other => other,
     }
 }
@@ -751,7 +751,7 @@ fn regions_and_an_end_work_together_and_start_counts() {
     let plate = doc.add(solid(100.0, 100.0, 2.0, [0.0, 0.0, 30.0])).unwrap();
     let s = sketch_on(&mut doc, Placement::xy(0.0), three_regions());
     let circle = region_of_area(&doc, s, PI * 25.0);
-    let op = Op::Extrude { sketch: s, start: 10.0.into(), length: 0.0.into(), mode: Mode::NewBody, regions: vec![RegionPick { sketch: s, region: circle }], end: ExtrudeEnd::UpToFace(FaceKey::plain(plate.start_cap())), opposite: false };
+    let op = Op::Extrude { sketch: Some(s), start: 10.0.into(), length: 0.0.into(), mode: Mode::NewBody, regions: vec![RegionPick { sketch: s, region: circle }], faces: Vec::new(), end: ExtrudeEnd::UpToFace(FaceKey::plain(plate.start_cap())), opposite: false };
     doc.add(op).unwrap();
     near(vol(&ok(&mut doc).bodies[1].body), PI * 25.0 * 20.0, 1e-6, "from 10 up to 30");
 }
@@ -835,7 +835,7 @@ fn every_kind_of_end_comes_back_from_a_file() {
     for end in ends {
         let mut d = doc.clone();
         let regions = vec![RegionPick { sketch: a, region: ra }, RegionPick { sketch: b, region: rb }];
-        d.add(Op::Extrude { sketch: a, start: 0.0.into(), length: 5.0.into(), mode: Mode::NewBody, regions, end: end.clone(), opposite: true }).unwrap();
+        d.add(Op::Extrude { sketch: Some(a), start: 0.0.into(), length: 5.0.into(), mode: Mode::NewBody, regions, faces: Vec::new(), end: end.clone(), opposite: true }).unwrap();
         let text = d.save_text();
         let back = Document::load_text(&text).unwrap_or_else(|e| panic!("{end:?}: {e}\n{text}"));
         assert_eq!(back.features().last().unwrap().op, d.features().last().unwrap().op, "{end:?}");
@@ -859,8 +859,8 @@ fn a_plain_extrude_is_written_as_it_always_was() {
     let e = doc.add(extrude_to(s, ExtrudeEnd::ThroughAll, Mode::Add)).unwrap();
     let text = doc.save_text();
     assert!(!text[text.find("\"extrude\"").unwrap()..].contains("\"length\""), "{text}");
-    let Op::Extrude { sketch, start, mode, regions, end, opposite, .. } = doc.feature(e).unwrap().op.clone() else { panic!() };
-    doc.edit(e, Op::Extrude { sketch, start, length: 12.0.into(), mode, regions, end, opposite }).unwrap();
+    let Op::Extrude { sketch, start, mode, regions, faces, end, opposite, .. } = doc.feature(e).unwrap().op.clone() else { panic!() };
+    doc.edit(e, Op::Extrude { sketch, start, length: 12.0.into(), mode, regions, faces, end, opposite }).unwrap();
     let text = doc.save_text();
     let back = Document::load_text(&text).unwrap();
     assert!(matches!(&back.feature(e).unwrap().op, Op::Extrude { length, .. } if *length == Expr::number(12.0)), "{text}");
@@ -894,7 +894,7 @@ fn a_file_with_a_bad_end_or_pick_is_refused_and_says_why() {
 
 fn surface_of(sketch: FeatureId, picks: &[(FeatureId, RegionId)], length: f64, opposite: bool) -> Op {
     let regions = picks.iter().map(|(sketch, region)| RegionPick { sketch: *sketch, region: *region }).collect();
-    Op::Extrude { sketch, start: 0.0.into(), length: length.into(), mode: Mode::Surface, regions, end: ExtrudeEnd::Blind, opposite }
+    Op::Extrude { sketch: Some(sketch), start: 0.0.into(), length: length.into(), mode: Mode::Surface, regions, faces: Vec::new(), end: ExtrudeEnd::Blind, opposite }
 }
 
 #[test]
@@ -935,7 +935,7 @@ fn a_surface_extrude_goes_the_other_way_and_refuses_an_end() {
     let mut doc = Document::new();
     let plate = doc.add(solid(10.0, 10.0, 2.0, [0.0, 0.0, 30.0])).unwrap();
     let s = sketch_on(&mut doc, Placement::xy(0.0), circle_sketch(0.0, 0.0, 5.0));
-    doc.add(Op::Extrude { sketch: s, start: 0.0.into(), length: 0.0.into(), mode: Mode::Surface, regions: Vec::new(), end: ExtrudeEnd::UpToFace(FaceKey::plain(plate.start_cap())), opposite: false }).unwrap();
+    doc.add(Op::Extrude { sketch: Some(s), start: 0.0.into(), length: 0.0.into(), mode: Mode::Surface, regions: Vec::new(), faces: Vec::new(), end: ExtrudeEnd::UpToFace(FaceKey::plain(plate.start_cap())), opposite: false }).unwrap();
     let why = failure(&mut doc);
     assert!(why.contains("surface") && why.contains("length"), "{why}");
 }

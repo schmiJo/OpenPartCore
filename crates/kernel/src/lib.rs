@@ -15,6 +15,7 @@ pub mod curve;
 pub mod delete;
 pub mod error;
 pub mod export;
+pub mod flat;
 pub mod fuzz;
 pub mod hash;
 pub mod helix;
@@ -42,6 +43,7 @@ pub use build::{box_solid, cone_frustum, cylinder, extrude, revolve, sphere, tor
 pub use curve::Curve;
 pub use delete::delete_faces;
 pub use error::{Error, Result};
+pub use flat::flat_face_profile;
 pub use helix::{helix, Helix};
 pub use loft::loft;
 pub use mass::{mass_properties, MassProps};
