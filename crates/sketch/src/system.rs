@@ -508,8 +508,14 @@ impl System {
             if values.iter().any(|v| !v.is_finite() || v.abs() > 1e12) {
                 return Err(invalid(None, format!("entity {} has a coordinate that isn't a sensible number", e.id.0)));
             }
+            // Geometry projected from a part is where the part puts it, and nothing here moves it.
+            if let Some(p) = &e.projection {
+                if !p.placed {
+                    return Err(invalid(None, format!("entity {} is projected from a part, and has no place until its document works it out: give the sketch tools a \"context\"", e.id.0)));
+                }
+            }
             sys.x0.extend_from_slice(&values);
-            sys.frozen.resize(sys.x0.len(), false);
+            sys.frozen.resize(sys.x0.len(), e.projection.is_some());
         }
         // Reference geometry, after everything else.
         for (id, values) in [

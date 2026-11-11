@@ -175,6 +175,19 @@ pub struct Entity {
     pub geometry: Geometry,
     /// Construction geometry helps constrain a sketch but is left out of its regions.
     pub construction: bool,
+    /// Set for geometry projected from a part, as Onshape's Use makes: see `Projection`.
+    pub projection: Option<Projection>,
+}
+
+/// Where a projected entity comes from: part geometry that the document projects onto the sketch's plane at each rebuild,
+/// from the model as it stands just before the sketch. Its `geometry` is where it was last worked out, and it's fixed: it
+/// takes no freedom, nothing moves it, and dragging it is refused. The sketch keeps `from` as it was given, as only the
+/// document can read it: `{"vertex": {"faces": [...], "near": [x, y, z]}}` or `{"edge": <edge selection>}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Projection {
+    pub from: crate::json::Value,
+    /// Whether `geometry` holds where it was worked out. A new one has no place until its document places it.
+    pub placed: bool,
 }
 
 /// What a constraint requires. Dimensions hold expressions, which may name parameters.
@@ -358,8 +371,31 @@ impl Sketch {
     pub fn add(&mut self, geometry: Geometry) -> EntityId {
         let id = EntityId(self.next_entity);
         self.next_entity += 1;
-        self.entities.push(Entity { id, geometry, construction: false });
+        self.entities.push(Entity { id, geometry, construction: false, projection: None });
         id
+    }
+
+    /// Adds geometry projected from a part, as construction geometry with no place yet. The document places it: see
+    /// `Projection`.
+    pub fn project(&mut self, from: crate::json::Value) -> EntityId {
+        let id = EntityId(self.next_entity);
+        self.next_entity += 1;
+        self.entities.push(Entity { id, geometry: Geometry::Point { at: [0.0, 0.0] }, construction: true, projection: Some(Projection { from, placed: false }) });
+        id
+    }
+
+    /// Puts a projected entity where its document worked out it is now.
+    pub fn place_projected(&mut self, id: EntityId, geometry: Geometry) -> Result<(), String> {
+        let e = self.entities.iter_mut().find(|e| e.id == id).ok_or_else(|| format!("there is no entity {}", id.0))?;
+        let p = e.projection.as_mut().ok_or_else(|| format!("entity {} isn't projected from a part", id.0))?;
+        p.placed = true;
+        e.geometry = geometry;
+        Ok(())
+    }
+
+    /// The projected entities, in order.
+    pub fn projected(&self) -> impl Iterator<Item = &Entity> {
+        self.entities.iter().filter(|e| e.projection.is_some())
     }
 
     pub fn point(&mut self, x: f64, y: f64) -> EntityId {

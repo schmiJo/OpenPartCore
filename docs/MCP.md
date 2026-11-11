@@ -25,7 +25,8 @@ under the root, which is the current folder unless given. A path that leaves it,
 | `edges_list` | Stable names, curve type, length and ends, a selection ready to use in a fillet or chamfer, and each end named as `up_to_vertex` takes it. `body` keeps to one |
 | `export` | STEP, STL or the native format. Every body, or the one `body` names |
 | `render` | A PNG: iso, front, back, left, right, top, bottom, four views at once, or any angle. Optional face labels, one tint per face, and highlighted faces and edges |
-| `sketch_solve`, `sketch_drag`, `sketch_regions`, `sketch_arrangement` | The sketch solver, without changing the document. `sketch_arrangement` lists every closed region with its id, and the curves that make none |
+| `sketch_solve`, `sketch_drag`, `sketch_regions`, `sketch_arrangement` | The sketch solver, without changing the document. `sketch_arrangement` lists every closed region with its id, and the curves that make none. A sketch with [projected](FILE_FORMAT.md#projected-geometry) entities takes `"context": {"plane": placement, "position": n}`, `n` being where the sketch is or will go in the history, and they're put where the parts made by the features before `n` put them. `plane` defaults to XY and `position` to the end |
+| `vertices_list` | Each corner: where it is, the edges that meet there, and the `vertex` that picks it, `{"faces": [...], "near": [x, y, z]}`, ready for a projected entity or `up_to_vertex`. `body` keeps to one |
 
 | `tab_list`, `tab_new`, `tab_select`, `tab_rename`, `tab_delete`, `project_show` | Tabs of Part Studios and assemblies |
 | `instance_add`, `instance_edit`, `instance_delete` | Parts and whole assemblies in the selected assembly |

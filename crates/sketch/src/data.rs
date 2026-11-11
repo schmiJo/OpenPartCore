@@ -425,9 +425,24 @@ impl Sketch {
             .iter()
             .map(|e| {
                 let mut items = vec![("id", Value::Num(e.id.0 as f64))];
-                items.extend(geometry_value(&e.geometry));
-                if e.construction {
-                    items.push(("construction", Value::Bool(true)));
+                match &e.projection {
+                    // Projected geometry is construction unless it says it isn't, and keeps where it last was.
+                    Some(p) => {
+                        items.push(("type", Value::str("projected")));
+                        items.push(("from", p.from.clone()));
+                        if p.placed {
+                            items.push(("geometry", Value::obj(geometry_value(&e.geometry))));
+                        }
+                        if !e.construction {
+                            items.push(("construction", Value::Bool(false)));
+                        }
+                    }
+                    None => {
+                        items.extend(geometry_value(&e.geometry));
+                        if e.construction {
+                            items.push(("construction", Value::Bool(true)));
+                        }
+                    }
                 }
                 Value::obj(items)
             })
@@ -489,13 +504,26 @@ impl Sketch {
             if s.entities.iter().any(|e| e.id == id) {
                 return Err(format!("entity id {} appears twice", id.0));
             }
-            let geometry = read_geometry(item, &["id", "construction"])?;
+            let projected = item.get("type").and_then(Value::as_str) == Some("projected");
+            let (geometry, projection) = if projected {
+                known(item, &["id", "type", "from", "geometry", "construction"])?;
+                let from = field(item, "from", "a projected entity")?;
+                if !matches!(from, Value::Obj(_)) {
+                    return Err(format!("projected entity {}'s \"from\" is {{\"vertex\": ...}} or {{\"edge\": ...}}", id.0));
+                }
+                match item.get("geometry") {
+                    Some(g) => (read_geometry(g, &[])?, Some(Projection { from: from.clone(), placed: true })),
+                    None => (Geometry::Point { at: [0.0, 0.0] }, Some(Projection { from: from.clone(), placed: false })),
+                }
+            } else {
+                (read_geometry(item, &["id", "construction"])?, None)
+            };
             let construction = match item.get("construction") {
-                None => false,
+                None => projected,
                 Some(c) => c.as_bool().ok_or("\"construction\" must be true or false")?,
             };
             s.next_entity = s.next_entity.max(id.0 + 1);
-            s.entities.push(Entity { id, geometry, construction });
+            s.entities.push(Entity { id, geometry, construction, projection });
         }
         for item in v.get("constraints").and_then(Value::as_array).unwrap_or(&[]) {
             let id = ConstraintId(id_field(item, "a constraint")?);

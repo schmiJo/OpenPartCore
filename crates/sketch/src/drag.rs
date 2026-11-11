@@ -82,6 +82,13 @@ impl DragSession {
         let mut soft_vars: Vec<u32> = Vec::new();
         let mut targets: Vec<Target> = Vec::new();
         let x = sys.x0.clone();
+        let grabbed = match grab {
+            Grab::Point(r) => r.entity,
+            Grab::Edge { entity, .. } => entity,
+        };
+        if base.entity(grabbed).is_some_and(|e| e.projection.is_some()) {
+            return Err(bad(format!("entity {} is projected from a part, which is what moves it, so it can't be dragged", grabbed.0)));
+        }
         let point_vars = |r: Ref| -> Result<[u32; 2], SketchError> {
             let b = base_var(r.entity)?;
             let e = base.entity(r.entity).ok_or_else(|| bad(format!("{} can't be moved", r.name())))?;

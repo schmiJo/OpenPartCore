@@ -1050,6 +1050,14 @@ impl Op {
             }
             Op::Pattern { of, .. } | Op::Mirror { of, .. } => out.extend_from_slice(of),
             Op::Shell { open: faces, .. } | Op::Draft { faces, .. } => out.extend(faces.iter().map(|f| f.feature)),
+            // What its projected entities come from.
+            Op::ConstrainedSketch { sketch, .. } => {
+                for e in sketch.projected() {
+                    if let Some(Ok(from)) = e.projection.as_ref().map(|p| read_projection(&p.from)) {
+                        from.references(&mut out);
+                    }
+                }
+            }
             _ => {}
         }
         out.sort();
@@ -1416,6 +1424,141 @@ fn plane_frame(plane: &Placement, env: &Env, all: &[Held]) -> Result<Frame> {
     // Tipped so far that its x axis now runs along the normal, any direction in the plane will do.
     let x = if normal.cross(frame.x).norm() > 1e-9 { frame.x } else { normal.any_perpendicular() };
     Ok(Frame::new(origin, normal, x))
+}
+
+/// What a sketch's projected entity comes from.
+enum ProjectFrom {
+    Vertex(VertexRef),
+    Edge(EdgeSelect),
+}
+
+impl ProjectFrom {
+    fn references(&self, out: &mut Vec<FeatureId>) {
+        match self {
+            ProjectFrom::Vertex(VertexRef::Faces { faces, .. }) => {
+                for key in faces {
+                    key.references(out);
+                }
+            }
+            ProjectFrom::Vertex(VertexRef::Point(_)) => {}
+            ProjectFrom::Edge(edges) => edges.references(out),
+        }
+    }
+}
+
+/// `{"vertex": <vertex>}`, as an extrude's up_to_vertex takes it, or `{"edge": <edge selection>}` picking one edge.
+fn read_projection(from: &Value) -> Result<ProjectFrom> {
+    if let Some(v) = from.get("vertex") {
+        known_keys(from, &["vertex"])?;
+        Ok(ProjectFrom::Vertex(read_vertex_ref(v)?))
+    } else if let Some(e) = from.get("edge") {
+        known_keys(from, &["edge"])?;
+        Ok(ProjectFrom::Edge(read_edge_select(e)?))
+    } else {
+        Err(Error::InvalidInput("a projection is from {\"vertex\": {\"faces\": [...], \"near\": [x, y, z]}} or {\"edge\": <edge selection>}".into()))
+    }
+}
+
+/// A sketch with each projected entity put where the parts now put it, seen along the sketch's normal from `frame`.
+fn placed_sketch(sketch: &coreshape_sketch::Sketch, frame: &Frame, all: &[Held], env: &Env) -> Result<coreshape_sketch::Sketch> {
+    let mut out = sketch.clone();
+    let mut everything: Option<Arc<Body>> = None;
+    for e in sketch.projected() {
+        let from = &e.projection.as_ref().expect("projected").from;
+        let fail = |why: String| Error::InvalidProfile(format!("entity {} is projected from {}, and {why}", e.id.0, from.to_text()));
+        let geometry = match read_projection(from).map_err(|why| fail(why.to_string()))? {
+            ProjectFrom::Vertex(vertex) => {
+                let at = up_to::vertex_at(&vertex, all, env).map_err(|why| fail(why.to_string()))?;
+                let q = frame.to_local(at);
+                coreshape_sketch::Geometry::Point { at: [q.x, q.y] }
+            }
+            ProjectFrom::Edge(query) => {
+                if everything.is_none() {
+                    everything = whole_of(all);
+                }
+                let body = everything.as_ref().ok_or_else(|| fail("there's no part before the sketch".into()))?;
+                let edges = select_edges(&query, body, env).map_err(|why| fail(why.to_string()))?;
+                let [one] = edges.as_slice() else {
+                    return Err(fail(format!("that picks {} edges, where a projection takes one", edges.len())));
+                };
+                project_edge(body, *one, frame).map_err(|why| fail(why.to_string()))?
+            }
+        };
+        out.place_projected(e.id, geometry).map_err(Error::InvalidInput)?;
+    }
+    Ok(out)
+}
+
+/// An edge seen along a plane's normal, in the plane's coordinates: a line, arc, circle, ellipse, elliptical arc or
+/// spline, or a point if it's seen end on, or a line if a curve is seen edge on.
+fn project_edge(body: &Body, e: usize, frame: &Frame) -> Result<coreshape_sketch::Geometry> {
+    use coreshape_sketch::Geometry as G;
+    let edge = &body.edges[e];
+    let flat = |p: Vec3| {
+        let q = frame.to_local(p);
+        [q.x, q.y]
+    };
+    let flat_dir = |d: Vec3| v2(d.dot(frame.x), d.dot(frame.y));
+    let (a, b) = (body.vertices[edge.v0], body.vertices[edge.v1]);
+    let tiny = 1e-9 * body.aabb().diagonal().max(1.0);
+    let gap = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).hypot(p[1] - q[1]);
+    // The ends are where the vertices are, so that they meet projected vertices exactly.
+    let (start, end) = (flat(a), flat(b));
+    // A circle or ellipse: center plus u cos t plus v sin t, from t0 to t1.
+    let conic = |center: Vec3, u: Vec3, v: Vec3| -> Result<G> {
+        let c = flat(center);
+        let (pu, pv) = (flat_dir(u), flat_dir(v));
+        // Its own axes: the longest and shortest of pu cos t + pv sin t, at t = t_major and a quarter turn on.
+        let t_major = 0.5 * (2.0 * pu.dot(pv)).atan2(pu.dot(pu) - pv.dot(pv));
+        let (s, k) = t_major.sin_cos();
+        let major = pu * k + pv * s;
+        let minor = pv * k - pu * s;
+        let along = |t: f64| major.dot(major).sqrt() * (t - t_major).cos();
+        let whole = edge.t1 - edge.t0 >= TAU - 1e-9;
+        if minor.norm() <= tiny {
+            // Seen edge on: a line over as far as it reaches either way.
+            if major.norm() <= tiny {
+                return Ok(G::Point { at: c });
+            }
+            let mut reach = vec![along(edge.t0), along(edge.t1)];
+            for k in -2..=3 {
+                let t = t_major + k as f64 * PI;
+                if t > edge.t0 && t < edge.t1 {
+                    reach.push(along(t));
+                }
+            }
+            let (lo, hi) = reach.iter().fold((f64::MAX, f64::MIN), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+            let d = major * (1.0 / major.norm());
+            let (p, q) = ([c[0] + d.x * lo, c[1] + d.y * lo], [c[0] + d.x * hi, c[1] + d.y * hi]);
+            return Ok(if gap(p, q) <= tiny { G::Point { at: p } } else { G::Line { start: p, end: q } });
+        }
+        // Counter-clockwise in the sketch as t grows, or the other way.
+        let ccw = pu.x * pv.y - pu.y * pv.x > 0.0;
+        let (from, to) = if ccw { (start, end) } else { (end, start) };
+        if (major.norm() - minor.norm()).abs() <= 1e-9 * major.norm() {
+            let radius = major.norm();
+            return Ok(if whole { G::Circle { center: c, radius } } else { G::Arc { center: c, radius, start: from, end: to } });
+        }
+        let tip = [c[0] + major.x, c[1] + major.y];
+        Ok(if whole { G::Ellipse { center: c, major: tip, minor: minor.norm() } } else { G::EllipticalArc { center: c, major: tip, minor: minor.norm(), start: from, end: to } })
+    };
+    match &edge.curve {
+        Curve::Line { .. } => Ok(if gap(start, end) <= tiny { G::Point { at: start } } else { G::Line { start, end } }),
+        Curve::Circle { frame: around, radius } => conic(around.origin, around.x * *radius, around.y * *radius),
+        Curve::Ellipse { frame: around, major, minor } => conic(around.origin, around.x * *major, around.y * *minor),
+        Curve::Spline(s) => {
+            let (u0, u1) = s.domain();
+            let part = if edge.t0 > u0 || edge.t1 < u1 { s.sub(edge.t0.max(u0), edge.t1.min(u1))? } else { (**s).clone() };
+            let points: Vec<[f64; 2]> = part.points().iter().map(|p| flat(*p)).collect();
+            if points.iter().all(|p| gap(*p, points[0]) <= tiny) {
+                return Ok(G::Point { at: points[0] });
+            }
+            let shape = coreshape_sketch::SplineShape::new(part.degree(), part.knots().to_vec(), points, part.weights().to_vec())
+                .map_err(|why| Error::InvalidInput(format!("its projection isn't a spline a sketch can hold: {why}")))?;
+            Ok(G::Spline(Arc::new(shape)))
+        }
+        Curve::Sampled(_) => Err(Error::InvalidInput("it's an intersection curve the kernel holds as samples, with no exact form to project".into())),
+    }
 }
 
 /// Indices into everything side by side, as a list for each body in scope that has any. Those outside it are dropped.
@@ -1846,8 +1989,37 @@ impl Document {
             return Err(Error::InvalidInput(format!("f{} isn't a constrained sketch", id.0)));
         };
         let env = self.environment()?;
-        let solved = sketch.solve_with(&env).map_err(|e| Error::InvalidProfile(e.message))?;
+        let solved = self.as_last_placed(id, sketch).solve_with(&env).map_err(|e| Error::InvalidProfile(e.message))?;
         Ok(solved.sketch.arrangement())
+    }
+
+    /// A sketch with its projected entities where the last rebuild put them, if it got that far.
+    fn as_last_placed(&self, id: FeatureId, sketch: &coreshape_sketch::Sketch) -> coreshape_sketch::Sketch {
+        let mut out = sketch.clone();
+        let last = self.cache.get(&id).and_then(|c| c.sketch.as_ref()).and_then(|s| s.solved.clone());
+        if let Some(last) = last {
+            for e in sketch.projected() {
+                if let Some(there) = last.entity(e.id).filter(|t| t.projection.as_ref().is_some_and(|p| p.placed)) {
+                    let _ = out.place_projected(e.id, there.geometry.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// A sketch with its projected entities put where the parts put them now, as the sketch tools need it to solve: on
+    /// `plane`, and at `position` in the history, which is where the sketch is or will go. The parts are those the
+    /// features before that position make.
+    pub fn sketch_in_context(&mut self, sketch: &coreshape_sketch::Sketch, plane: &Placement, position: usize) -> Result<coreshape_sketch::Sketch> {
+        let env = self.environment()?;
+        let held: Vec<Held> = if position == 0 {
+            Vec::new()
+        } else {
+            let o = self.rebuild(Some(position - 1));
+            o.bodies.iter().map(|b| Held { id: b.id, body: b.body.clone(), key: 0 }).collect()
+        };
+        let frame = plane_frame(plane, &env, &held)?;
+        placed_sketch(sketch, &frame, &held, &env)
     }
 
     pub fn feature(&self, id: FeatureId) -> Option<&Feature> {
@@ -2154,6 +2326,23 @@ impl Document {
                     }
                 }
             }
+            // Geometry projected from parts depends on where those parts are now, and on nothing else about the bodies.
+            if let Op::ConstrainedSketch { plane, sketch } = &feature.op {
+                if sketch.projected().next().is_some() {
+                    match plane_frame(plane, &env, &held).and_then(|frame| placed_sketch(sketch, &frame, &held, &env)) {
+                        Ok(placed) => {
+                            for e in placed.projected() {
+                                own.push_str(&format!(" {:?}", e.geometry));
+                            }
+                        }
+                        Err(e) => {
+                            failed = Some(i);
+                            steps.push(step(StepState::Failed(e.to_string())));
+                            continue;
+                        }
+                    }
+                }
+            }
             // A constrained sketch's open curves are refused unless a surface is what they're for.
             if matches!(feature.op, Op::ConstrainedSketch { .. }) && self.features.iter().any(|f| f.op.uses_open_curves_of(feature.id)) {
                 own.push_str(" for a surface");
@@ -2313,6 +2502,14 @@ impl Document {
                 Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: false, solved: None, open: Arc::new(open) }))
             }
             Op::ConstrainedSketch { plane, sketch } => {
+                let frame = plane_frame(plane, env, all)?;
+                let placed;
+                let sketch = if sketch.projected().next().is_some() {
+                    placed = placed_sketch(sketch, &frame, all, env)?;
+                    &placed
+                } else {
+                    sketch
+                };
                 let solved = sketch.solve_with(env).map_err(|e| Error::InvalidProfile(e.message))?;
                 // Curves that close nothing are refused, unless a surface is going to sweep them.
                 let open = if self.features.iter().any(|f| f.op.uses_open_curves_of(feature.id)) { open_chains(&solved.sketch.arrangement()) } else { Vec::new() };
@@ -2328,7 +2525,7 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: true, solved: Some(Arc::new(solved.sketch)), open: Arc::new(open) }))
+                Ok(sketched(SketchOutput { frame, profiles: Arc::new(list), by_entity: true, solved: Some(Arc::new(solved.sketch)), open: Arc::new(open) }))
             }
             Op::Extrude { sketch, start, length, mode, regions, faces, end, opposite } => {
                 // Each sketch it takes from, in the order they first come up.
@@ -2993,9 +3190,20 @@ impl Document {
                         .collect(),
                 ),
             ),
-            ("features", Value::Arr(self.features.iter().map(feature_value).collect())),
+            ("features", Value::Arr(self.features.iter().map(|f| feature_value(&self.as_saved(f))).collect())),
         ]);
         with_app(doc, self.app.as_ref())
+    }
+
+    /// A feature as it's saved: a sketch's projected entities are where they last were.
+    fn as_saved(&self, f: &Feature) -> Feature {
+        let mut out = f.clone();
+        if let Op::ConstrainedSketch { sketch, .. } = &mut out.op {
+            if sketch.projected().next().is_some() {
+                *sketch = self.as_last_placed(f.id, sketch);
+            }
+        }
+        out
     }
 
     /// The document as the text of a file.
@@ -3411,16 +3619,23 @@ fn read_extrude_end(v: &Value) -> Result<ExtrudeEnd> {
         "up_to_part" => ExtrudeEnd::UpToPart(BodyId::parse(text("part")?)?),
         "up_to_vertex" => {
             let on = end.get("vertex").ok_or_else(|| Error::InvalidInput("an extrude's up_to_vertex end needs \"vertex\"".into()))?;
-            if let Some(point) = on.get("point") {
-                ExtrudeEnd::UpToVertex(VertexRef::Point(read_point3(point)?))
-            } else {
-                let list = on.get("faces").and_then(Value::as_array).filter(|l| !l.is_empty()).ok_or_else(|| Error::InvalidInput("a vertex is {\"faces\": [...]} with the faces it's on, or {\"point\": [x, y, z]}".into()))?;
-                let faces = list.iter().map(|k| FaceKey::parse(k.as_str().ok_or_else(|| Error::InvalidInput("a vertex's \"faces\" are the names of faces".into()))?)).collect::<Result<Vec<_>>>()?;
-                ExtrudeEnd::UpToVertex(VertexRef::Faces { faces, near: on.get("near").map(read_point3).transpose()? })
-            }
+            ExtrudeEnd::UpToVertex(read_vertex_ref(on)?)
         }
         other => return Err(Error::InvalidInput(format!("unknown extrude end \"{other}\"; expected blind, through_all, up_to_next, up_to_face, up_to_part or up_to_vertex"))),
     })
+}
+
+/// A vertex: `{"faces": [...], "near": [x, y, z]}`, the one those faces share, nearest `near` if they share several, or
+/// `{"point": [x, y, z]}`.
+fn read_vertex_ref(on: &Value) -> Result<VertexRef> {
+    if let Some(point) = on.get("point") {
+        known_keys(on, &["point"])?;
+        return Ok(VertexRef::Point(read_point3(point)?));
+    }
+    known_keys(on, &["faces", "near"])?;
+    let list = on.get("faces").and_then(Value::as_array).filter(|l| !l.is_empty()).ok_or_else(|| Error::InvalidInput("a vertex is {\"faces\": [...]} with the faces it's on, or {\"point\": [x, y, z]}".into()))?;
+    let faces = list.iter().map(|k| FaceKey::parse(k.as_str().ok_or_else(|| Error::InvalidInput("a vertex's \"faces\" are the names of faces".into()))?)).collect::<Result<Vec<_>>>()?;
+    Ok(VertexRef::Faces { faces, near: on.get("near").map(read_point3).transpose()? })
 }
 
 /// An extrude's or a revolve's picks: each a region's id, from `sketch`, or `{"sketch": 4, "region": "r..."}`. `what` is
@@ -3521,7 +3736,8 @@ pub fn read_body_list(v: &Value, key: &str) -> Result<Vec<BodyId>> {
     }
 }
 
-fn read_placement(v: &Value) -> Result<Placement> {
+/// A placement as files write it: `{"origin": [x, y, z], "z": [x, y, z], "x": [x, y, z]}`, each part with a default.
+pub fn read_placement(v: &Value) -> Result<Placement> {
     known_keys(v, &["origin", "z", "x", "on_face"])?;
     let dir = |key: &str, fallback: [f64; 3]| -> Result<Point3> {
         match v.get(key) {
@@ -4212,6 +4428,9 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             };
             let sketch = coreshape_sketch::Sketch::from_json(field(v, "sketch", "a constrained sketch")?)
                 .map_err(|e| Error::InvalidInput(e.message))?;
+            for e in sketch.projected() {
+                read_projection(&e.projection.as_ref().expect("projected").from).map_err(|why| Error::InvalidInput(format!("projected entity {}: {why}", e.id.0)))?;
+            }
             Ok(Op::ConstrainedSketch { plane, sketch })
         }
         "extrude" => {

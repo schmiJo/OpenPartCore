@@ -449,6 +449,15 @@ An extrude can pick regions from any constrained sketches, and end through all, 
 - **Regions from a plain `sketch` feature can't be picked,** as only constrained sketches have stable region ids. A sketch with no closed region at all still fails as a feature, whatever is picked from it, as it always has.
 - **Every part is looked at to decide where it ends,** so a change to any part reruns an extrude that ends anywhere but at a length. It's still only done when something changed.
 
+## Sketch links to parts
+
+A sketch can project a part's corners and edges onto its plane, worked out again at every rebuild: see [FILE_FORMAT.md](FILE_FORMAT.md#projected-geometry). `crates/document/tests/projected.rs` checks each kind of edge against where the part puts it, seen square on, end on, edge on and at a slant, and that a circle on a corner and a region closed by a part's edge follow the part when it changes.
+
+- **A hole's rim comes in as two arcs,** one for each of the kernel's half edges, each projected on its own. Onshape's Use gives the whole circle.
+- **An edge held as samples is refused,** such as where a plane cuts a free-form face, as there's no exact curve to project. Onshape fits one.
+- **Only edges and vertices project.** Onshape's Use also takes a whole face's outline, and its intersection takes where a part cuts the sketch plane. Neither is built.
+- **A projection follows its edge or vertex by name,** so it lasts as long as the names do: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys). An edge selection by place, `near`, picks whatever is there after a change.
+
 ## Sweeps
 
 A sweep goes along steps, a sketch's curves or a part's edges: see [FILE_FORMAT.md](FILE_FORMAT.md#features). `crates/document/tests/sweep_paths.rs` holds each against Pappus: the profile's area times how far its centroid goes.

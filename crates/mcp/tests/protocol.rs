@@ -1290,3 +1290,49 @@ fn an_open_curve_and_a_sew_through_the_tools() {
     assert!(failed);
     assert!(content[0].get("text").and_then(Value::as_str).unwrap().contains("middle"));
 }
+
+/// A sketch linked to a part's corner, as an app sketching on a part makes one: the sketch tools place it from a context,
+/// vertices_list names the corner, and the feature follows the part.
+#[test]
+fn sketch_tools_place_projected_geometry_from_a_context() {
+    let root = folder("projected");
+    let mut c = Client::start(&root);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":10,"dy":20,"dz":30,"mode":"new_body"}}"#);
+    let corners = parsed(&c.ok("vertices_list", "{}"));
+    let corners = corners.as_array().unwrap();
+    assert_eq!(corners.len(), 8);
+    assert!(corners.iter().all(|v| v.get("edges").unwrap().as_array().unwrap().len() == 3 && v.get("body").and_then(Value::as_str).is_none()));
+    let top = corners.iter().find(|v| numbers(v.get("at").unwrap()) == vec![10.0, 20.0, 30.0]).unwrap().get("vertex").unwrap().to_text();
+    let sketch = format!(
+        r#"{{"entities":[{{"id":1,"type":"projected","from":{{"vertex":{top}}}}},{{"id":2,"type":"circle","center":[5,5],"radius":2}}],"constraints":[{{"id":1,"type":"coincident","a":"2.center","b":"1"}}],"next_entity":3,"next_constraint":2}}"#
+    );
+    // Without a context it has no place.
+    let why = c.refused("sketch_solve", &format!(r#"{{"sketch":{sketch}}}"#));
+    assert!(why.contains("entity 1 is projected") && why.contains("context"), "{why}");
+    let context = r#"{"plane":{"origin":[0,0,30]},"position":1}"#;
+    let solved = parsed(&c.ok("sketch_solve", &format!(r#"{{"sketch":{sketch},"context":{context}}}"#)));
+    let circle = solved.get("sketch").unwrap().get("entities").unwrap().as_array().unwrap().iter().find(|e| e.get("id").and_then(Value::as_f64) == Some(2.0)).unwrap().clone();
+    assert_eq!(numbers(circle.get("center").unwrap()), vec![10.0, 20.0], "{}", circle.to_text());
+    // It's saved with where it is, and as construction it bounds nothing.
+    let projected = solved.get("sketch").unwrap().get("entities").unwrap().as_array().unwrap()[0].clone();
+    assert_eq!(numbers(projected.get("geometry").unwrap().get("at").unwrap()), vec![10.0, 20.0], "{}", projected.to_text());
+    let regions = parsed(&c.ok("sketch_regions", &format!(r#"{{"sketch":{sketch},"context":{context}}}"#)));
+    assert_eq!(regions.as_array().unwrap().len(), 1);
+    c.ok("sketch_arrangement", &format!(r#"{{"sketch":{sketch},"context":{context}}}"#));
+    let why = c.refused("sketch_drag", &format!(r#"{{"sketch":{sketch},"context":{context},"grab":"1","to":[0,0]}}"#));
+    assert!(why.contains("can't be dragged"), "{why}");
+    c.refused("sketch_solve", &format!(r#"{{"sketch":{sketch},"context":{{"plane":{{"origin":[0,0,30]}},"where":1}}}}"#));
+
+    // As features, and following the box when it grows.
+    let full = sketch.replacen('{', r#"{"format":"coreshape-sketch","version":1,"#, 1);
+    c.ok("feature_add", &format!(r#"{{"feature":{{"type":"constrained_sketch","plane":{{"origin":[0,0,30]}},"sketch":{full}}}}}"#));
+    c.ok("feature_add", r#"{"feature":{"type":"extrude","sketch":2,"length":5,"mode":"new_body"}}"#);
+    let axis_x = |c: &mut Client| -> Vec<f64> {
+        let faces = parsed(&c.ok("faces_list", r#"{"body":"f3"}"#));
+        let side = faces.as_array().unwrap().iter().find(|f| f.get("surface").and_then(Value::as_str) == Some("cylinder")).unwrap().clone();
+        numbers(side.get("axis").unwrap().get("point").unwrap())
+    };
+    assert_eq!(axis_x(&mut c)[..2], [10.0, 20.0]);
+    c.ok("feature_edit", r#"{"id":1,"feature":{"type":"solid","shape":"box","dx":15,"dy":20,"dz":30,"mode":"new_body"}}"#);
+    assert_eq!(axis_x(&mut c)[..2], [15.0, 20.0]);
+}

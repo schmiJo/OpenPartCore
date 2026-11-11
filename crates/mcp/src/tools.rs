@@ -41,10 +41,11 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("edges_list", "The solid's edges with their stable names, curve type, length and ends, a selection for each, ready to use in a fillet or chamfer, and each end named as an extrude's up_to_vertex takes it.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
     ("export", "Exports the solid. STEP and the native format can come back as text; STL needs a path. Paths are under the server's root folder.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}, "format": {"type": "string", "enum": ["step", "stl", "coreshape"]}, "path": {"type": "string"}}"#, r#"["format"]"#),
     ("render", "Draws the solid and returns a PNG. Views: iso, front, back, left, right, top, bottom or four (top, iso, front and right together), or an azimuth and elevation in degrees.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}, "view": {"type": "string"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "labels": {"type": "boolean", "description": "Write each visible face's name on it."}, "colors": {"type": "string", "enum": ["plain", "faces"], "description": "faces gives each face its own tint."}, "highlight_faces": {"type": "array", "items": {"type": "string"}, "description": "Face names to pick out."}, "highlight_edges": {"description": "An edge selection to pick out, as in a fillet."}, "path": {"type": "string", "description": "Also save the PNG here, under the server's root folder."}}"#, "[]"),
-    ("sketch_solve", "Solves a sketch without changing the document. Gives the solved sketch, remaining freedom, what's still free and what's redundant, or the constraints that can't all hold.", r#"{"sketch": {"type": "object", "description": "A sketch in the format in format_guide."}, "parameters": {"type": "object", "description": "Values for names used in its dimensions."}}"#, r#"["sketch"]"#),
-    ("sketch_drag", "Moves a point or edge of a sketch toward a target, disturbing the rest as little as possible, and gives the new sketch.", r#"{"sketch": {"type": "object"}, "grab": {"description": "A point, such as \"7.end\", or an edge and where it was grabbed: {\"edge\": 7, \"at\": [x, y]}."}, "to": {"type": "array", "items": {"type": "number"}}, "parameters": {"type": "object"}}"#, r#"["sketch", "grab", "to"]"#),
-    ("sketch_regions", "The closed regions a sketch would use: those picked, or by default every other level of nesting, so a loop in a loop is a hole. Says which entity leaves a gap if there aren't any.", r#"{"sketch": {"type": "object"}}"#, r#"["sketch"]"#),
-    ("sketch_arrangement", "Every closed region a sketch's curves make, split at crossings and T-junctions, each with a stable id, plus the curves that make none and why.", r#"{"sketch": {"type": "object"}}"#, r#"["sketch"]"#),
+    ("sketch_solve", "Solves a sketch without changing the document. Gives the solved sketch, remaining freedom, what's still free and what's redundant, or the constraints that can't all hold. With a context, projected entities are put where the parts put them first.", r#"{"sketch": {"type": "object", "description": "A sketch in the format in format_guide."}, "parameters": {"type": "object", "description": "Values for names used in its dimensions."}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
+    ("sketch_drag", "Moves a point or edge of a sketch toward a target, disturbing the rest as little as possible, and gives the new sketch.", r#"{"sketch": {"type": "object"}, "grab": {"description": "A point, such as \"7.end\", or an edge and where it was grabbed: {\"edge\": 7, \"at\": [x, y]}."}, "to": {"type": "array", "items": {"type": "number"}}, "parameters": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch", "grab", "to"]"#),
+    ("sketch_regions", "The closed regions a sketch would use: those picked, or by default every other level of nesting, so a loop in a loop is a hole. Says which entity leaves a gap if there aren't any.", r#"{"sketch": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
+    ("sketch_arrangement", "Every closed region a sketch's curves make, split at crossings and T-junctions, each with a stable id, plus the curves that make none and why.", r#"{"sketch": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
+    ("vertices_list", "The solid's corners: where each is, the edges that meet there, and the vertex that picks it, {\"faces\": [...], \"near\": [x, y, z]}, as an extrude's up_to_vertex and a sketch's projected vertex take it.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
 ];
 
 pub fn exists(name: &str) -> bool {
@@ -303,10 +304,14 @@ impl Session {
                 let scope = self.scope(args)?;
                 Ok(vec![text(edges_value(&scope.body, &scope.of_edge)?.to_pretty())])
             }
+            "vertices_list" => {
+                let scope = self.scope(args)?;
+                Ok(vec![text(corners_value(&scope.body, &scope.of_edge).to_pretty())])
+            }
             "export" => self.export(args),
             "render" => self.render(args),
             "sketch_solve" => {
-                let sketch = read_sketch(args)?;
+                let sketch = self.sketch_arg(args)?;
                 let env = read_env(args)?;
                 match sketch.solve_with(&env) {
                     Ok(solved) => Ok(vec![text(solved.to_json().to_text())]),
@@ -314,7 +319,7 @@ impl Session {
                 }
             }
             "sketch_drag" => {
-                let sketch = read_sketch(args)?;
+                let sketch = self.sketch_arg(args)?;
                 let env = read_env(args)?;
                 let grab = read_grab(args.get("grab").ok_or("\"grab\" is needed")?)?;
                 let to = read_point(args.get("to").ok_or("\"to\" is needed")?)?;
@@ -330,13 +335,32 @@ impl Session {
                     Err(why) => Err(why.to_json().to_text()),
                 }
             }
-            "sketch_regions" => match read_sketch(args)?.regions() {
+            "sketch_regions" => match self.sketch_arg(args)?.regions() {
                 Ok(regions) => Ok(vec![text(Value::Arr(regions.iter().map(sk::Region::to_json).collect()).to_text())]),
                 Err(why) => Err(why.to_json().to_text()),
             },
-            "sketch_arrangement" => Ok(vec![text(read_sketch(args)?.arrangement().to_json().to_text())]),
+            "sketch_arrangement" => Ok(vec![text(self.sketch_arg(args)?.arrangement().to_json().to_text())]),
             other => self.call_assembly(other, args).unwrap_or_else(|| Err(format!("there is no tool named \"{other}\""))),
         }
+    }
+
+    /// The sketch a sketch tool is given, with its projected entities placed if there's a context.
+    fn sketch_arg(&mut self, args: &Value) -> R<sk::Sketch> {
+        let sketch = read_sketch(args)?;
+        let Some(context) = args.get("context") else { return Ok(sketch) };
+        let Value::Obj(fields) = context else { return Err("\"context\" is {\"plane\": placement, \"position\": n}".into()) };
+        for (key, _) in fields {
+            if key != "plane" && key != "position" {
+                return Err(format!("\"context\" has \"{key}\", and takes only \"plane\" and \"position\""));
+            }
+        }
+        let plane = match context.get("plane") {
+            Some(p) => coreshape_document::read_placement(p).map_err(|x| x.to_string())?,
+            None => Placement::xy(0.0),
+        };
+        let end = self.doc.features().len();
+        let position = position_arg(context, "position")?.unwrap_or(end).min(end);
+        self.doc.sketch_in_context(&sketch, &plane, position).map_err(|x| x.to_string())
     }
 
     /// The current body, rebuilding if nothing has yet.
@@ -744,6 +768,35 @@ fn vertices_value(body: &Body, keys: &[FaceKey]) -> Vec<Value> {
             Value::obj(items)
         })
         .collect()
+}
+
+/// Each corner: where it is, the edges that meet there, and the vertex that picks it.
+fn corners_value(body: &Body, of_edge: &[String]) -> Value {
+    let keys = face_keys(body);
+    let vertices = vertices_value(body, &keys);
+    let uses = body.edge_uses();
+    let mut meeting: Vec<Vec<usize>> = vec![Vec::new(); body.vertices.len()];
+    for (e, edge) in body.edges.iter().enumerate() {
+        meeting[edge.v0].push(e);
+        if edge.v1 != edge.v0 {
+            meeting[edge.v1].push(e);
+        }
+    }
+    let list = (0..body.vertices.len())
+        .filter(|&v| !meeting[v].is_empty())
+        .map(|v| {
+            let mut items = vec![
+                ("vertex", vertices[v].clone()),
+                ("at", vec3(body.vertices[v])),
+                ("edges", Value::Arr(meeting[v].iter().map(|&e| Value::str(edge_name(body, e, &uses))).collect())),
+            ];
+            if let Some(owner) = of_edge.get(meeting[v][0]) {
+                items.push(("body", Value::str(owner)));
+            }
+            Value::obj(items)
+        })
+        .collect();
+    Value::Arr(list)
 }
 
 fn faces_value(body: &Body, of_face: &[String]) -> R<Value> {

@@ -370,11 +370,40 @@ A `spline` has `points` (its control points), with optional `degree` (default 3)
 (default all 1). By hand, `{"type": "spline", "through": [[0, 0], [5, 4], [10, 0]]}` makes the smooth curve through those points, and it's saved as
 control points after that. `"7.p2"` is control point 2, and `"7.start"` and `"7.end"` are the first and last.
 
+### Projected geometry
+
+A `projected` entity is part geometry seen along the sketch's normal, as Onshape's links to a part and its Use make: a point on a
+part's corner, or a part's edge brought in as a curve. It's worked out again at every rebuild, from the model as it stands just
+before the sketch, so whatever holds to it follows the part when the part changes.
+
+```json
+{"id": 9, "type": "projected", "from": {"vertex": {"faces": ["f2:end", "f2:side.0", "f2:side.1"], "near": [x, y, z]}}}
+{"id": 10, "type": "projected", "from": {"edge": {"between": ["f2:end", "f2:side.0"]}}, "construction": false,
+ "geometry": {"type": "line", "start": [0, 0], "end": [40, 0]}}
+```
+
+- **`from`** is a vertex, as `vertices_list` gives it and an extrude's `up_to_vertex` takes it, or an edge selection that picks
+  one edge, as `edges_list` gives it in `select`.
+- **What it becomes:** a vertex is a `point`. An edge is whatever its projection is: a `line`, an `arc` or `circle`, an `ellipse`
+  or `elliptical_arc`, or a `spline`. An edge seen end on is a `point`, and a round edge seen edge on is a `line` over as far as
+  it reaches. A round edge is never a whole circle, as the kernel splits one into halves, so a hole's rim is two arcs, each
+  projected on its own. An intersection curve the kernel only holds as samples is refused, as it has no exact form.
+- **It's fixed.** It takes no freedom, nothing in the sketch moves it, and `sketch_drag` refuses to drag it. A constraint between
+  two of them that doesn't already hold can't be met, and says so.
+- **Constraints use it like anything else,** with its parts: `"10"`, `"10.start"`, `"10.end"`, `"10.center"`. So a point
+  coincident with a corner or on an edge, tangent to a rim, and dimensions to a part all work.
+- **It's construction unless `"construction": false`.** Then it's one of the sketch's curves and can bound regions, as Onshape's
+  Use does, and a face swept from it is named for it: `f5:side.10`.
+- **`geometry`** is where it last was, which a saved file keeps, so it reads sensibly on its own. One without it has no place
+  until its document works it out, and solving it alone says to give the sketch tools a `"context"`.
+- **If what it comes from has gone,** or an edge selection picks no edge or several, the sketch fails and says which entity, as a
+  gone region does. Deleting the features it projects from is refused while the sketch is there.
+
 **Reference dimensions.** Any dimension can carry `"reference": true`. It then reports what the geometry measures and takes no
 part in solving. Solving writes the measured value into it, and a file may leave `value` out.
 
 **References.** `"7"` is a whole entity. `"7.start"`, `"7.end"`, `"7.center"`, `"7.major"` and `"7.p2"` are its parts. `"origin"`,
-`"x_axis"` and `"y_axis"` are fixed reference geometry.
+`"x_axis"` and `"y_axis"` are fixed reference geometry, and so is anything [projected](#projected-geometry) from a part.
 
 | Constraint `type` | Fields | Meaning |
 |---|---|---|

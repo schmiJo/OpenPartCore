@@ -107,13 +107,18 @@ fn through_all(profile: &Profile, way: &Way, reach: &Reach) -> Result<Vec<Body>>
 }
 
 fn vertex_of(vertex: &VertexRef, reach: &Reach) -> Result<Vec3> {
-    let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], reach.env)?, num(&p[1], reach.env)?, num(&p[2], reach.env)?)) };
+    vertex_at(vertex, reach.all, reach.env)
+}
+
+/// Where a vertex is among the bodies there are.
+pub(super) fn vertex_at(vertex: &VertexRef, all: &[Held], env: &Env) -> Result<Vec3> {
+    let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
     let (faces, near) = match vertex {
         VertexRef::Point(p) => return at(p),
         VertexRef::Faces { faces, near } => (faces, near),
     };
     let mut found: Vec<Vec3> = Vec::new();
-    for held in reach.all {
+    for held in all {
         let body = &held.body;
         let mut common: Option<Vec<usize>> = None;
         for key in faces {
