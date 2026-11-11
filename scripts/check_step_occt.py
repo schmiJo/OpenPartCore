@@ -21,8 +21,9 @@ for row in rows:
     shape = Part.read(path)
     v, a = float(row["volume"]), float(row["area"])
     ok = shape.isValid()
-    # Solids from a file are valid only if they are closed and correctly oriented.
-    dv = abs(shape.Volume - v) / abs(v)
+    # Solids from a file are valid only if they are closed and correctly oriented. A sheet has no volume, so only its
+    # area counts here: scripts/check_step_sheets.sh checks sheets more closely.
+    dv = abs(shape.Volume - v) / abs(v) if v != 0.0 else 0.0
     da = abs(shape.Area - a) / abs(a)
     bad = (not ok) or dv > 1e-3 or da > 1e-3
     failures += bad
