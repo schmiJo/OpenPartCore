@@ -1,0 +1,22 @@
+{
+  "name": "Waffle plate",
+  "kind": "plate",
+  "parameters": {"L": 200, "W": 150, "T": 12, "skin": 3, "pw": 30, "pitch": 36, "rc": 3, "rf": 1.5, "hole": 4, "c": 0.3},
+  "steps": [
+    {"id": 1, "name": "Outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-L / 2", "y": "-W / 2", "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Pockets", "type": "sketch", "plane": {"origin": [0, 0, "skin"]}, "regions": [{"outer": {"type": "rounded_rect", "cx": "-2 * pitch", "cy": "-1.5 * pitch", "w": "pw", "h": "pw", "r": "rc"}, "repeat": {"type": "grid", "nx": 5, "ny": 4, "dx": "pitch", "dy": "pitch"}}]},
+    {"id": 4, "name": "Cut them", "type": "extrude", "sketch": 3, "length": "T", "mode": "remove"},
+    {"expect": {"volume": "L * W * T - 20 * (pw^2 - (4 - pi) * rc^2) * (T - skin)", "genus": [0]}},
+    {"id": 5, "name": "Pocket floors", "type": "fillet", "edges": {"on_face": "f4:start"}, "radius": "rf"},
+    {"id": 6, "name": "Holes where the ribs cross", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "cx": "-1.5 * pitch", "cy": "-pitch", "r": "hole / 2"}, "repeat": {"type": "grid", "nx": 4, "ny": 3, "dx": "pitch", "dy": "pitch"}}]},
+    {"id": 7, "name": "Drill them", "type": "extrude", "sketch": 6, "length": "T + 2", "mode": "remove"},
+    {"id": 8, "name": "Holes' top edges", "type": "chamfer", "edges": {"both": [{"radius": "hole / 2"}, {"in_box": [["-L", "-W", "T - 0.01"], ["L", "W", "T + 0.01"]]}]}, "distance": "c"}
+  ],
+  "always": {
+    "volume": "L * W * T - 20 * (pw^2 - (4 - pi) * rc^2) * (T - skin) + 20 * ((1 - pi / 4) * rf^2 * 4 * (pw - 2 * rc) + 2 * pi * (rc - rf * (10 - 3 * pi) / (12 - 3 * pi)) * (1 - pi / 4) * rf^2) - 12 * pi * (hole / 2)^2 * T - 12 * 2 * pi * (hole / 2 + c / 3) * c^2 / 2",
+    "genus": [12],
+    "bounds": [["-L / 2", "-W / 2", 0], ["L / 2", "W / 2", "T"]]
+  },
+  "changes": [{"set": {"T": 16}}, {"set": {"skin": 4}}]
+}

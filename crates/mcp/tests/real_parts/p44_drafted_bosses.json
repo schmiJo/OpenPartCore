@@ -1,0 +1,21 @@
+{
+  "name": "Plate with drafted bosses and a rib",
+  "kind": "moulded",
+  "parameters": {"L": 120, "W": 80, "T": 6, "R": 12, "h": 20, "a": 2, "x0": 30, "g": 3, "rh": 12, "hole": 5},
+  "steps": [
+    {"id": 1, "name": "Plate outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-L / 2", "y": "-W / 2", "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Bosses", "type": "sketch", "plane": {"origin": [0, 0, "T"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "circle", "cx": "x0", "cy": 0, "r": "R"}}, {"outer": {"type": "circle", "cx": "-x0", "cy": 0, "r": "R"}}]},
+    {"id": 4, "name": "Boss solids", "type": "extrude", "sketch": 3, "length": "h"},
+    {"expect": {"volume": "L * W * T + 2 * pi * R^2 * h"}},
+    {"id": 5, "name": "Draft them", "type": "draft", "faces": ["f4:side.0", "f4:region.1.side.0"], "degrees": "a", "neutral": [0, 0, "T"]},
+    {"expect": {"volume": "L * W * T + 2 * pi * h / 3 * (R^2 + R * (R - h * tan(a)) + (R - h * tan(a))^2)"}},
+    {"id": 6, "name": "Rib between them", "type": "sketch", "plane": {"origin": [0, 0, "T"]}, "regions": [{"outer": {"type": "rect", "x": "-x0", "y": "-g / 2", "w": "2 * x0", "h": "g"}}]},
+    {"id": 7, "name": "Rib", "type": "extrude", "sketch": 6, "length": "rh"},
+    {"id": 8, "name": "Holes", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "cx": "x0", "cy": 0, "r": "hole"}}, {"outer": {"type": "circle", "cx": "-x0", "cy": 0, "r": "hole"}}]},
+    {"id": 9, "name": "Drill them", "type": "extrude", "sketch": 8, "length": "T + h + 2", "mode": "remove"},
+    {"id": 10, "name": "Boss roots", "type": "fillet", "edges": {"any": [{"between": ["f4:side.0", "f2:end"]}, {"between": ["f4:region.1.side.0", "f2:end"]}]}, "radius": 2}
+  ],
+  "always": {"genus": [2], "bounds": [["-L / 2", "-W / 2", 0], ["L / 2", "W / 2", "T + h"]]},
+  "changes": [{"set": {"h": 25}}, {"set": {"x0": 35}}, {"set": {"a": 3}}]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "Finned heat sink",
+  "kind": "thermal",
+  "parameters": {"L": 80, "W": 60, "base": 6, "h": 30, "ft": 2, "n": 9, "pitch": 7, "r": 0.5, "c": 0.4},
+  "steps": [
+    {"id": 1, "name": "Base outline", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-L / 2", "y": "-W / 2", "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Base", "type": "extrude", "sketch": 1, "length": "base"},
+    {"id": 3, "name": "Fins", "type": "sketch", "plane": {"origin": [0, 0, "base"], "on_face": "f2:end"},
+     "regions": [{"outer": {"type": "rect", "x": "-(n - 1) * pitch / 2 - ft / 2", "y": "-W / 2", "w": "ft", "h": "W"}, "repeat": {"type": "grid", "nx": "n", "ny": 1, "dx": "pitch", "dy": 0}}]},
+    {"id": 4, "name": "Fin solids", "type": "extrude", "sketch": 3, "length": "h"},
+    {"expect": {"volume": "L * W * base + n * ft * W * h", "genus": [0]}},
+    {"id": 5, "name": "Fin roots", "type": "fillet", "edges": {"both": [{"in_box": [["-L / 2 + 1", "-W / 2", "base - 0.01"], ["L / 2 - 1", "W / 2", "base + 0.01"]]}, {"parallel": [0, 1, 0]}]}, "radius": "r"},
+    {"id": 6, "name": "Fin tips", "type": "chamfer", "edges": {"both": [{"in_box": [["-L / 2", "-W / 2", "base + h - 0.01"], ["L / 2", "W / 2", "base + h + 0.01"]]}, {"parallel": [0, 1, 0]}]}, "distance": "c"},
+    {"id": 7, "name": "Mounting holes", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "cx": "6 - L / 2", "cy": "6 - W / 2", "r": 2}, "repeat": {"type": "grid", "nx": 2, "ny": 2, "dx": "L - 12", "dy": "W - 12"}}]},
+    {"id": 8, "name": "Cut them", "type": "extrude", "sketch": 7, "length": "base + 2", "mode": "remove"}
+  ],
+  "always": {
+    "volume": "L * W * base + n * ft * W * h + n * 2 * (1 - pi / 4) * r^2 * W - n * 2 * (c^2 / 2) * W - 4 * pi * 4 * base",
+    "genus": [4],
+    "bounds": [["-L / 2", "-W / 2", 0], ["L / 2", "W / 2", "base + h"]]
+  },
+  "changes": [{"set": {"h": 40}}, {"set": {"n": 7}}, {"set": {"W": 80}}]
+}

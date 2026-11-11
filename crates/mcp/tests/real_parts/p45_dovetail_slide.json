@@ -1,0 +1,23 @@
+{
+  "name": "Dovetail slide, base and carriage",
+  "kind": "slide",
+  "parameters": {"L": 100, "cl": 50, "cy": 10},
+  "steps": [
+    {"id": 1, "name": "Base section", "type": "sketch", "plane": {"z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "polygon", "points": [[-40, 0], [40, 0], [40, 12], [15, 12], [20, 24], [-20, 24], [-15, 12], [-40, 12]]}}]},
+    {"id": 2, "name": "Base", "type": "extrude", "sketch": 1, "length": "L", "mode": "new_body"},
+    {"id": 3, "name": "Carriage outline", "type": "sketch", "plane": {"origin": [0, 0, 12]}, "regions": [{"outer": {"type": "rect", "x": -30, "y": "-cy - cl", "w": 60, "h": "cl"}}]},
+    {"id": 4, "name": "Carriage", "type": "extrude", "sketch": 3, "length": 28, "mode": "new_body"},
+    {"id": 5, "name": "Way", "type": "sketch", "plane": {"origin": [0, 1, 0], "z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "polygon", "points": [[15, 12], [20, 24], [-20, 24], [-15, 12]]}}]},
+    {"id": 6, "name": "Cut the way through the carriage", "type": "extrude", "sketch": 5, "length": "L + 2", "mode": "remove", "bodies": ["f4"]},
+    {"expect": {"parts": 2, "volume": "1380 * L + (60 * 28 - 420) * cl"}},
+    {"id": 7, "name": "Gib screw", "type": "sketch", "plane": {"origin": [-31, 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": "-cy - cl / 2", "cy": 32, "r": 3}}]},
+    {"id": 8, "name": "Drill it", "type": "extrude", "sketch": 7, "length": 62, "mode": "remove", "bodies": ["f4"]},
+    {"id": 9, "name": "Carriage's top edges", "type": "chamfer", "edges": {"any": [{"between": ["f4:end", "f4:side.1"]}, {"between": ["f4:end", "f4:side.3"]}]}, "distance": 1}
+  ],
+  "always": {
+    "parts": 2,
+    "volume": "1380 * L + (60 * 28 - 420) * cl - pi * 9 * 60 - 2 * (1 / 2) * cl",
+    "genus": [0, 1]
+  },
+  "changes": []
+}

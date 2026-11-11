@@ -563,3 +563,38 @@ fn a_drag_moves_what_it_prefers_and_leaves_the_rest_if_it_can() {
     assert_eq!(p.poses[0], Frame::WORLD);
     assert!(d.remaining < 1e-6, "{d:?}");
 }
+
+#[test]
+fn a_part_going_to_a_mate_doesnt_turn_however_far_its_origin_is_from_the_mate() {
+    // Modelled off to one side, as parts in one Part Studio are. Its connector is far from its own origin, and the revolute
+    // leaves it free to turn, so nothing but this says it shouldn't. It's already square, so it has no need to.
+    let on_b = Frame::translation(v3(100.0, 32.0, 4.0));
+    let on_a = Frame::translation(v3(0.0, 16.0, 4.0));
+    let mut p = Problem { poses: vec![Frame::WORLD, Frame::WORLD], fixed: vec![true, false], joints: vec![Joint { on_a, on_b, ..joint(0, 1, MateKind::Revolute) }], ..Problem::default() };
+    let r = solve(&mut p);
+    assert!(r.failing.is_empty());
+    assert!(p.poses[1].x.dist(Vec3::X) < 1e-9 && p.poses[1].z.dist(Vec3::Z) < 1e-9, "{:?}", p.poses[1]);
+    assert!(p.poses[1].origin.dist(v3(-100.0, -16.0, 0.0)) < 1e-7, "{:?}", p.poses[1].origin);
+    assert!(joint_value(&p, 0, Dof::Angle).abs() < 1e-9);
+}
+
+#[test]
+fn a_free_part_dragged_by_its_origin_has_nothing_to_turn_for() {
+    let mut p = Problem { poses: vec![Frame::translation(v3(10.0, 0.0, 0.0))], fixed: vec![false], ..Problem::default() };
+    let d = drag(&mut p, &Goal::Point { thing: 0, local: Vec3::ZERO, to: v3(10.0, 50.0, 0.0) });
+    assert!(d.remaining < 1e-7);
+    assert!(p.poses[0].x.dist(Vec3::X) < 1e-9, "{:?}", p.poses[0]);
+}
+
+#[test]
+fn a_part_that_has_to_turn_turns_about_where_its_held() {
+    // A parallel mate only asks for the axes to line up, and its connector is far from the part's origin. So all that has to
+    // happen is a turn, and the connector stays where it is.
+    let on_b = Frame::new(v3(100.0, 50.0, 0.0), v3(0.3, 0.8, 0.5), Vec3::X);
+    let mut p = Problem { poses: vec![Frame::WORLD, Frame::WORLD], fixed: vec![true, false], joints: vec![Joint { on_b, ..joint(0, 1, MateKind::Parallel) }], ..Problem::default() };
+    let r = solve(&mut p);
+    assert!(r.failing.is_empty());
+    let held = p.poses[1].to_world(v3(100.0, 50.0, 0.0));
+    assert!(held.dist(v3(100.0, 50.0, 0.0)) < 1e-6, "{held:?}");
+    assert!(p.poses[1].compose(&on_b).z.dist(Vec3::Z) < 1e-7);
+}

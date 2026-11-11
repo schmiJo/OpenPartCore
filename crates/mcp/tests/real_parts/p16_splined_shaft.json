@@ -1,0 +1,18 @@
+{
+  "name": "Splined shaft",
+  "kind": "shaft",
+  "parameters": {"R": 20, "root": 17, "g": 5, "n": 8, "L": 100, "spline": 40},
+  "steps": [
+    {"id": 1, "name": "Circle", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "R"}}]},
+    {"id": 2, "name": "Bar", "type": "extrude", "sketch": 1, "length": "L"},
+    {"id": 3, "name": "Groove", "type": "sketch", "plane": {"origin": [0, 0, "L + 1"], "z": [0, 0, -1], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "rect", "x": "root", "y": "-g / 2", "w": "R - root + 2", "h": "g"}}]},
+    {"id": 4, "name": "Cut groove", "type": "extrude", "sketch": 3, "length": "spline + 1", "mode": "remove"},
+    {"id": 5, "name": "All the grooves", "type": "pattern", "of": [4], "count": "n"},
+    {"id": 6, "name": "Relief groove", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["root", "L - spline - 5"], ["R + 1", "L - spline - 5"], ["R + 1", "L - spline"], ["root", "L - spline"]]}}]},
+    {"id": 7, "name": "Turn the relief", "type": "revolve", "sketch": 6, "mode": "remove"},
+    {"id": 8, "name": "Plain end", "type": "chamfer", "edges": {"between": ["f2:start", "f2:side.0"]}, "distance": 1}
+  ],
+  "always": {"genus": [0], "bounds": [["-R", "-R", 0], ["R", "R", "L"]]},
+  "changes": [{"set": {"n": 6}}, {"set": {"spline": 50}}, {"set": {"g": 4}}]
+}

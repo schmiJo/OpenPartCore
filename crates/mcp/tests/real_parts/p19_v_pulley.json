@@ -1,0 +1,19 @@
+{
+  "name": "Two-groove V-belt pulley",
+  "kind": "pulley",
+  "parameters": {"r": 3, "n": 6, "hole": 6},
+  "steps": [
+    {"id": 1, "name": "Half section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [
+      [10, 0], [25, 0], [25, 17.5], [45, 17.5], [45, 5.5], [60, 5.5], [60, 8.5], [48, 12], [48, 16], [60, 19.5], [60, 25.5], [48, 29], [48, 33], [60, 36.5], [60, 39.5], [45, 39.5], [45, 27.5], [25, 27.5], [25, 45], [10, 45]]}}]},
+    {"id": 2, "name": "Turned", "type": "revolve", "sketch": 1},
+    {"id": 3, "name": "Web to hub and rim", "type": "fillet", "edges": {"any": [
+      {"between": ["f2:side.1", "f2:side.2"]}, {"between": ["f2:side.2", "f2:side.3"]}, {"between": ["f2:side.15", "f2:side.16"]}, {"between": ["f2:side.16", "f2:side.17"]}]}, "radius": "r"},
+    {"id": 4, "name": "Lightening holes", "type": "sketch", "plane": {"origin": [0, 0, 16.5]}, "regions": [{"outer": {"type": "circle", "r": "hole"}, "repeat": {"type": "circular", "count": "n", "radius": 35}}]},
+    {"id": 5, "name": "Cut them", "type": "extrude", "sketch": 4, "length": 12, "mode": "remove"},
+    {"id": 6, "name": "Keyway", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "rect", "x": 8, "y": -2.5, "w": 5.3, "h": 5}}]},
+    {"id": 7, "name": "Cut keyway", "type": "extrude", "sketch": 6, "length": 47, "mode": "remove"},
+    {"id": 8, "name": "Groove tips", "type": "chamfer", "edges": {"any": [{"between": ["f2:side.5", "f2:side.6"]}, {"between": ["f2:side.8", "f2:side.9"]}, {"between": ["f2:side.9", "f2:side.10"]}, {"between": ["f2:side.12", "f2:side.13"]}]}, "distance": 0.5}
+  ],
+  "always": {"genus": ["n + 1"], "bounds": [[-60, -60, 0], [60, 60, 45]]},
+  "changes": [{"set": {"n": 5}}, {"set": {"r": 2}}]
+}

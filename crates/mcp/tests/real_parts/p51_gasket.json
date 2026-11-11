@@ -1,0 +1,19 @@
+{
+  "name": "Flange and its gasket",
+  "kind": "flange",
+  "parameters": {"R": 50, "bore": 20, "T": 10, "g": 1.5, "hole": 4, "pcd": 37},
+  "steps": [
+    {"id": 1, "name": "Outline", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "R"}, "holes": [{"type": "circle", "r": "bore"}]}]},
+    {"id": 2, "name": "Flange", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Bolt holes", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "r": "hole"}, "repeat": {"type": "circular", "count": 4, "radius": "pcd"}}]},
+    {"id": 4, "name": "Cut them", "type": "extrude", "sketch": 3, "length": "T + 2", "mode": "remove"},
+    {"id": 5, "name": "Gasket, from the face", "type": "thicken", "faces": ["f2:end"], "thickness": "g", "mode": "new_body"}
+  ],
+  "always": {
+    "parts": 2,
+    "volume": "(pi * (R^2 - bore^2) - 4 * pi * hole^2) * (T + g)",
+    "genus": [5, 5],
+    "bounds": [["-R", "-R", 0], ["R", "R", "T + g"]]
+  },
+  "changes": [{"set": {"g": 2}}, {"set": {"T": 14}}]
+}

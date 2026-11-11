@@ -1,0 +1,20 @@
+{
+  "name": "Flanged bearing housing",
+  "kind": "housing",
+  "parameters": {"Ro": 60, "T": 12, "Rh": 45, "H": 50, "Rs": 36, "sd": 20, "Rb": 28, "g": 6, "hole": 10, "r": 3},
+  "steps": [
+    {"id": 1, "name": "Section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["Rb", 0], ["Ro", 0], ["Ro", "T"], ["Rh", "T"], ["Rh", "H"], ["Rs", "H"], ["Rs", "H - sd"], ["Rb", "H - sd"]]}}]},
+    {"id": 2, "name": "Turned", "type": "revolve", "sketch": 1},
+    {"expect": {"volume": "pi * (Ro^2 * T + Rh^2 * (H - T) - Rb^2 * (H - sd) - Rs^2 * sd)", "genus": [1]}},
+    {"id": 3, "name": "Mounting holes", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "hole / 2"}, "repeat": {"type": "circular", "count": 4, "radius": "(Ro + Rh) / 2", "start_degrees": 45}}]},
+    {"id": 4, "name": "Cut them", "type": "extrude", "sketch": 3, "start": -1, "length": "T + 2", "mode": "remove"},
+    {"id": 5, "name": "Hub's root", "type": "fillet", "edges": {"between": ["f2:side.2", "f2:side.3"]}, "radius": "r"},
+    {"id": 6, "name": "Rib outline", "type": "sketch", "plane": {"origin": [0, "g / 2", 0], "z": [0, -1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "polygon", "points": [["Rh - 3", "T"], ["Ro - 3", "T"], ["Rh - 3", "T + 30"]]}}]},
+    {"id": 7, "name": "Rib", "type": "extrude", "sketch": 6, "length": "g"},
+    {"id": 8, "name": "All the ribs", "type": "pattern", "of": [7], "count": 4},
+    {"id": 9, "name": "Seat's mouth", "type": "chamfer", "edges": {"between": ["f2:side.4", "f2:side.5"]}, "distance": 1.5}
+  ],
+  "always": {"genus": [5], "bounds": [["-Ro", "-Ro", 0], ["Ro", "Ro", "H"]]},
+  "changes": [{"set": {"H": 60}}, {"set": {"g": 8}}, {"set": {"Rs": 34}}]
+}

@@ -77,7 +77,7 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `sweep` | `sketch`, `path`, `mode`: see below |
 | `helix` | `sketch`, `pitch` (how far along the axis one turn goes), `turns`, `point` (default origin) and `axis` (default +z) for the axis, `left_handed` (default false), `mode`. The sketch can hold the axis, for a spring or a thread, or lie across it, for a twisted bar |
 | `solid` | `shape`, its dimensions, `at` (default XY), `mode` |
-| `pattern` | `of` (feature ids; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. |
+| `pattern` | `of` (feature ids, which can be other patterns and mirrors; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. |
 | `mirror` | `of` (as above), `point` (default origin), `normal` |
 | `fillet` | `edges`, `radius`, `propagate` (default true: follow tangent neighbours) |
 | `chamfer` | `edges`, `distance`, `propagate` (default true: follow tangent neighbours) |
@@ -141,7 +141,7 @@ fillet can round one copy. `shell` and `draft` still take plain names, and refus
 | Shape `type` | Fields |
 |---|---|
 | `rect` | `x y` (default 0), `w h` |
-| `rounded_rect` | `cx cy` (default 0), `w h r` |
+| `rounded_rect` | `cx cy` (default 0), `w h r`. With `r` half of `w` or `h` it's a slot, and each side that's left keeps its number |
 | `circle` | `cx cy` (default 0), `r` |
 | `polygon` | `points`: a list of `[x, y]` |
 | `path` | `start`, `moves`: `{"line_to": [x, y]}`, `{"arc_to": [x, y], "center": [x, y], "ccw": true}`, or `{"spline_through": [[x, y], ...]}`, a smooth curve on from where the path is. Closes itself with a line if needed. |

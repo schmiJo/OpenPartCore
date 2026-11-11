@@ -1,0 +1,20 @@
+{
+  "name": "Handwheel",
+  "kind": "wheel",
+  "parameters": {"major": 90, "minor": 8, "hub": 18, "hh": 30, "spoke": 5, "n": 3, "bore": 14},
+  "steps": [
+    {"id": 1, "name": "Rim", "type": "solid", "shape": "torus", "major": "major", "minor": "minor"},
+    {"id": 2, "name": "Hub outline", "type": "sketch", "plane": {"origin": [0, 0, "-hh / 2"]}, "regions": [{"outer": {"type": "circle", "r": "hub"}}]},
+    {"id": 3, "name": "Hub", "type": "extrude", "sketch": 2, "length": "hh", "mode": "new_body"},
+    {"id": 4, "name": "Spoke", "type": "solid", "shape": "cylinder", "radius": "spoke", "height": "major - 5", "at": {"origin": [5, 0, 0], "z": [1, 0, 0]}, "mode": "new_body"},
+    {"id": 5, "name": "Other spokes", "type": "pattern", "of": [4], "count": "n"},
+    {"expect": {"parts": "n + 2"}},
+    {"id": 6, "name": "Weld it all", "type": "boolean", "operation": "union", "bodies": ["f1"], "tools": ["f3", "f4", "f5", "f5.1"]},
+    {"expect": {"parts": 1, "genus": [3]}},
+    {"id": 7, "name": "Bore", "type": "sketch", "plane": {"origin": [0, 0, "-hh / 2 - 1"]}, "regions": [{"outer": {"type": "circle", "r": "bore / 2"}}]},
+    {"id": 8, "name": "Cut bore", "type": "extrude", "sketch": 7, "length": "hh + 2", "mode": "remove"},
+    {"id": 9, "name": "Spoke roots", "type": "fillet", "edges": {"between": ["f4:side.0", "f3:side.0"]}, "radius": 3}
+  ],
+  "always": {"genus": [4], "bounds": [["-major - minor", "-major - minor", "-hh / 2"], ["major + minor", "major + minor", "hh / 2"]]},
+  "changes": [{"set": {"hh": 36}}, {"set": {"major": 100}}]
+}

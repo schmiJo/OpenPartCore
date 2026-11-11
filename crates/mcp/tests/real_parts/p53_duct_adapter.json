@@ -1,0 +1,18 @@
+{
+  "name": "Square-to-round duct adapter",
+  "kind": "pipe",
+  "parameters": {"a": 120, "b": 80, "R": 40, "H": 100, "t": 3, "fl": 10, "ft": 5},
+  "steps": [
+    {"id": 1, "name": "Square end", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-a / 2", "y": "-b / 2", "w": "a", "h": "b"}}]},
+    {"id": 2, "name": "Round end", "type": "sketch", "plane": {"origin": [0, 0, "H"]}, "regions": [{"outer": {"type": "circle", "r": "R"}}]},
+    {"id": 3, "name": "Transition", "type": "loft", "sections": [1, 2]},
+    {"id": 4, "name": "Hollow, open at both ends", "type": "shell", "open": ["f3:start", "f3:end"], "thickness": "t"},
+    {"expect": {"genus": [1]}},
+    {"id": 5, "name": "Square flange", "type": "sketch", "plane": {"origin": [0, 0, "-ft"]}, "regions": [{"outer": {"type": "rect", "x": "-a / 2 - fl", "y": "-b / 2 - fl", "w": "a + 2 * fl", "h": "b + 2 * fl"}, "holes": [{"type": "rect", "x": "-a / 2 + t", "y": "-b / 2 + t", "w": "a - 2 * t", "h": "b - 2 * t"}]}]},
+    {"id": 6, "name": "Square flange solid", "type": "extrude", "sketch": 5, "length": "ft"},
+    {"id": 7, "name": "Round flange", "type": "sketch", "plane": {"origin": [0, 0, "H"]}, "regions": [{"outer": {"type": "circle", "r": "R + fl"}, "holes": [{"type": "circle", "r": "R - t"}]}]},
+    {"id": 8, "name": "Round flange solid", "type": "extrude", "sketch": 7, "length": "ft"}
+  ],
+  "always": {"genus": [1], "bounds": [["-a / 2 - fl", "-b / 2 - fl", "-ft"], ["a / 2 + fl", "b / 2 + fl", "H + ft"]]},
+  "changes": [{"set": {"H": 120}}, {"set": {"t": 4}}]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "Weld neck flange",
+  "kind": "flange",
+  "parameters": {"OD": 150, "ID": 60, "T": 18, "hub": 45, "neck": 38, "H": 60, "n": 8, "PCD": 115, "hd": 14, "r": 4, "c": 2},
+  "steps": [
+    {"id": 1, "name": "Section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["ID / 2", 0], ["OD / 2", 0], ["OD / 2", "T"], ["hub", "T"], ["neck", "H"], ["ID / 2", "H"]]}}]},
+    {"id": 2, "name": "Turned", "type": "revolve", "sketch": 1},
+    {"expect": {"volume": "pi * ((OD / 2)^2 - (ID / 2)^2) * T + pi * (H - T) / 3 * (hub^2 + hub * neck + neck^2) - pi * (ID / 2)^2 * (H - T)", "genus": [1]}},
+    {"id": 3, "name": "Bolt circle", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "hd / 2"}, "repeat": {"type": "circular", "count": "n", "radius": "PCD / 2"}}]},
+    {"id": 4, "name": "Cut bolt holes", "type": "extrude", "sketch": 3, "start": -1, "length": "T + 2", "mode": "remove"},
+    {"expect": {"volume": "pi * ((OD / 2)^2 - (ID / 2)^2) * T + pi * (H - T) / 3 * (hub^2 + hub * neck + neck^2) - pi * (ID / 2)^2 * (H - T) - n * pi * (hd / 2)^2 * T", "genus": ["n + 1"]}},
+    {"id": 5, "name": "Hub's root", "type": "fillet", "edges": {"between": ["f2:side.2", "f2:side.3"]}, "radius": "r"},
+    {"id": 6, "name": "Bore's ends", "type": "chamfer", "edges": {"any": [{"between": ["f2:side.4", "f2:side.5"]}, {"between": ["f2:side.0", "f2:side.5"]}]}, "distance": "c"},
+    {"id": 7, "name": "Rim", "type": "chamfer", "edges": {"any": [{"between": ["f2:side.0", "f2:side.1"]}, {"between": ["f2:side.1", "f2:side.2"]}]}, "distance": 1.5}
+  ],
+  "always": {"genus": ["n + 1"], "bounds": [["-OD / 2", "-OD / 2", 0], ["OD / 2", "OD / 2", "H"]]},
+  "changes": [{"set": {"n": 12}}, {"set": {"T": 22}}, {"set": {"PCD": 120}}]
+}

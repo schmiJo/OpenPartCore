@@ -504,6 +504,36 @@ impl Project {
         self.finish(id, flat, &problem, report, None)
     }
 
+    /// Solves after adding a mate. Its first end does the moving if there's a choice. A mate that leaves a turn free doesn't
+    /// say where it should stop, so a part that this is the only mate of comes to rest with the mate at zero, its connectors
+    /// lined up, and not at some angle left over from how it got there. Anything else stays where solving puts it.
+    pub fn solve_new_mate(&mut self, id: TabId, mate: u32, prefer: &[u32]) -> Result<Solved> {
+        let solved = self.solve_preferring(id, prefer)?;
+        let flat = self.flatten(id)?;
+        let Some(joint) = flat.joint_mates.iter().position(|(m, p)| *m == mate && p.is_empty()) else { return Ok(solved) };
+        let (a, b) = (flat.joints[joint].a, flat.joints[joint].b);
+        if !flat.joints[joint].kind.values().contains(&Dof::Angle) {
+            return Ok(solved);
+        }
+        // Only the end that moves, with nothing else holding it, and nothing moving with it that isn't free to.
+        let mover = if prefer.contains(&flat.placed[a].path[0]) { a } else { b };
+        let alone = flat.joints.iter().filter(|j| j.a == mover || j.b == mover).count() == 1 && !flat.groups.iter().any(|g| g.contains(&mover)) && !flat.fixed[mover];
+        if !alone {
+            return Ok(solved);
+        }
+        let mut problem = Self::problem_of(&flat);
+        problem.prefer = vec![mover];
+        problem.drives = vec![Drive { joint, dof: Dof::Angle, value: 0.0 }];
+        let report = solver::solve(&mut problem);
+        if !report.failing.is_empty() {
+            return Ok(solved);
+        }
+        problem.drives.clear();
+        problem.joints[joint].turned = 0.0;
+        let report = solver::solve(&mut problem);
+        self.finish(id, flat, &problem, report, None)
+    }
+
     /// Moves an instance's part toward where it's wanted, as far as the mates let it. `path` says which, and a point on
     /// it, in its part's coordinates, is what goes to `to`.
     pub fn drag_point(&mut self, id: TabId, path: &[u32], local: Vec3, to: Vec3) -> Result<Solved> {

@@ -1,0 +1,19 @@
+{
+  "name": "Compression spring with ground ends",
+  "kind": "spring",
+  "parameters": {"R": 12, "w": 1.5, "p": 8, "n": 6, "ground": 2},
+  "steps": [
+    {"id": 1, "name": "Wire section", "type": "sketch", "plane": {"z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "cx": "R", "cy": 0, "r": "w"}}]},
+    {"id": 2, "name": "Coil", "type": "helix", "sketch": 1, "pitch": "p", "turns": "n"},
+    {"expect": {"volume": "pi * w^2 * 2 * pi * R * n", "volume_tolerance": 1e-4}},
+    {"id": 3, "name": "Below the ground end", "type": "solid", "shape": "box", "dx": 60, "dy": 60, "dz": 20, "at": {"origin": [-30, -30, "ground - 20"]}, "mode": "remove"},
+    {"id": 4, "name": "Above the ground end", "type": "solid", "shape": "box", "dx": 60, "dy": 60, "dz": 20, "at": {"origin": [-30, -30, "n * p - ground"]}, "mode": "remove"}
+  ],
+  "always": {
+    "volume": "pi * w^2 * R * (n * p - 2 * ground) * 2 * pi / p",
+    "volume_tolerance": 1e-5,
+    "bounds": [["-R - w", "-R - w", "ground"], ["R + w", "R + w", "n * p - ground"]]
+  },
+  "occt_note": "Each point of the wire's section goes round for the same height, so a section's area, its radius and that height give the volume exactly, and this kernel matches it to 1e-5. OpenCASCADE reads 1.6% less, as it has before on round wire: see Helix in docs/KNOWN_LIMITS.md.",
+  "changes": [{"set": {"n": 8}}, {"set": {"R": 14}}]
+}

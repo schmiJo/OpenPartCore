@@ -1,0 +1,51 @@
+{
+  "name": "Pillow block",
+  "kind": "housing",
+  "parameters": {"L": 40, "W": 80, "bt": 12, "H": 35, "R": 22, "bore": 25, "seat": 30, "seat_d": 5, "slot": 9, "r": 2},
+  "steps": [
+    {"id": 1, "name": "Base outline", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]},
+     "regions": [{"outer": {"type": "rect", "x": "-W / 2", "y": 0, "w": "W", "h": "bt"}}]},
+    {"id": 2, "name": "Base", "type": "extrude", "sketch": 1, "length": "L"},
+    {"id": 3, "name": "Tower", "type": "constrained_sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]}, "sketch": {
+      "format": "coreshape-sketch", "version": 1,
+      "entities": [
+        {"id": 1, "type": "line", "start": [-22, 0], "end": [22, 0]},
+        {"id": 2, "type": "line", "start": [22, 0], "end": [22, 35]},
+        {"id": 3, "type": "arc", "center": [0, 35], "radius": 22, "start": [22, 35], "end": [-22, 35]},
+        {"id": 4, "type": "line", "start": [-22, 35], "end": [-22, 0]}
+      ],
+      "constraints": [
+        {"id": 1, "type": "coincident", "a": "1.end", "b": "2.start"},
+        {"id": 2, "type": "coincident", "a": "2.end", "b": "3.start"},
+        {"id": 3, "type": "coincident", "a": "3.end", "b": "4.start"},
+        {"id": 4, "type": "coincident", "a": "4.end", "b": "1.start"},
+        {"id": 5, "type": "horizontal", "a": "1"},
+        {"id": 6, "type": "tangent", "a": "2", "b": "3"},
+        {"id": 7, "type": "tangent", "a": "3", "b": "4"},
+        {"id": 8, "type": "coincident", "a": "3.center", "b": "y_axis"},
+        {"id": 9, "type": "radius", "of": "3", "value": "R"},
+        {"id": 10, "type": "vertical_distance", "a": "origin", "b": "3.center", "value": "H"},
+        {"id": 11, "type": "coincident", "a": "1.start", "b": "x_axis"},
+        {"id": 12, "type": "vertical", "a": "2"},
+        {"id": 13, "type": "vertical", "a": "4"}
+      ]
+    }},
+    {"id": 4, "name": "Tower solid", "type": "extrude", "sketch": 3, "length": "L"},
+    {"expect": {"volume": "L * (W * bt + 2 * R * (H - bt) + pi * R^2 / 2)", "genus": [0]}},
+    {"id": 5, "name": "Bore", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "H", "r": "bore / 2"}}]},
+    {"id": 6, "name": "Cut bore", "type": "extrude", "sketch": 5, "start": -1, "length": "L + 2", "mode": "remove"},
+    {"id": 7, "name": "Bearing seat", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "H", "r": "seat / 2"}}]},
+    {"id": 8, "name": "Cut seat", "type": "extrude", "sketch": 7, "start": -1, "length": "seat_d + 1", "mode": "remove"},
+    {"id": 9, "name": "Seat at the other end", "type": "mirror", "of": [8], "point": ["L / 2", 0, 0], "normal": [1, 0, 0]},
+    {"id": 10, "name": "Foot slots", "type": "sketch", "plane": {"origin": [0, 0, "bt"], "on_face": "f2:side.2"},
+     "regions": [{"outer": {"type": "rounded_rect", "cx": "L / 2", "cy": "W / 2 - 10", "w": 20, "h": "slot", "r": "slot / 2"}}, {"outer": {"type": "rounded_rect", "cx": "L / 2", "cy": "10 - W / 2", "w": 20, "h": "slot", "r": "slot / 2"}}]},
+    {"id": 11, "name": "Cut slots", "type": "extrude", "sketch": 10, "start": "-bt - 1", "length": "bt + 2", "mode": "remove"},
+    {"id": 12, "name": "Tower's roots", "type": "fillet", "edges": {"any": [{"between": ["f4:side.2", "f2:side.2"]}, {"between": ["f4:side.4", "f2:side.2"]}]}, "radius": "r"}
+  ],
+  "always": {
+    "volume": "L * (W * bt + 2 * R * (H - bt) + pi * R^2 / 2) + 2 * (1 - pi / 4) * r^2 * L - pi * (bore / 2)^2 * L - 2 * pi * ((seat / 2)^2 - (bore / 2)^2) * seat_d - 2 * bt * (20 * slot - (4 - pi) * (slot / 2)^2)",
+    "genus": [3],
+    "bounds": [[0, "-W / 2", 0], ["L", "W / 2", "H + R"]]
+  },
+  "changes": [{"set": {"H": 40}}, {"set": {"R": 23}}, {"set": {"L": 50}}]
+}

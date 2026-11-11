@@ -1,0 +1,21 @@
+{
+  "name": "Hex bolt M10",
+  "kind": "fastener",
+  "parameters": {"d": 10, "L": 40, "AF": 16, "H": 6.4, "p": 1.5, "tl": 25},
+  "steps": [
+    {"id": 1, "name": "Shank outline", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "d / 2"}}]},
+    {"id": 2, "name": "Shank", "type": "extrude", "sketch": 1, "length": "L"},
+    {"id": 3, "name": "Hexagon", "type": "sketch", "plane": {"origin": [0, 0, "L"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "polygon", "points": [
+      ["AF / sqrt(3) * cos(0)", "AF / sqrt(3) * sin(0)"], ["AF / sqrt(3) * cos(60)", "AF / sqrt(3) * sin(60)"], ["AF / sqrt(3) * cos(120)", "AF / sqrt(3) * sin(120)"],
+      ["AF / sqrt(3) * cos(180)", "AF / sqrt(3) * sin(180)"], ["AF / sqrt(3) * cos(240)", "AF / sqrt(3) * sin(240)"], ["AF / sqrt(3) * cos(300)", "AF / sqrt(3) * sin(300)"]]}}]},
+    {"id": 4, "name": "Head", "type": "extrude", "sketch": 3, "length": "H"},
+    {"expect": {"volume": "pi * (d / 2)^2 * L + sqrt(3) / 2 * AF^2 * H", "genus": [0]}},
+    {"id": 5, "name": "Head's chamfer", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["0.95 * AF / 2", "L + H"], ["AF / sqrt(3) + 1", "L + H"], ["AF / sqrt(3) + 1", "L + H - (AF / sqrt(3) + 1 - 0.95 * AF / 2) * tan(30)"]]}}]},
+    {"id": 6, "name": "Turn it off", "type": "revolve", "sketch": 5, "mode": "remove"},
+    {"id": 7, "name": "Lead-in", "type": "chamfer", "edges": {"between": ["f2:start", "f2:side.0"]}, "distance": 1},
+    {"id": 8, "name": "Thread groove", "type": "sketch", "plane": {"z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "polygon", "points": [["d / 2 + 0.1", "-p - 0.45 * p"], ["d / 2 + 0.1", "-p + 0.45 * p"], ["d / 2 - 0.61 * p", "-p"]]}}]},
+    {"id": 9, "name": "Cut the thread", "type": "helix", "sketch": 8, "pitch": "p", "turns": "(tl + p) / p", "mode": "remove"}
+  ],
+  "always": {"genus": [0], "bounds": [["-AF / sqrt(3)", "-AF / 2", 0], ["AF / sqrt(3)", "AF / 2", "L + H"]], "bounds_tolerance": 0.8},
+  "changes": [{"set": {"L": 50}}, {"set": {"tl": 20}}]
+}

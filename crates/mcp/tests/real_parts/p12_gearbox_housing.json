@@ -1,0 +1,27 @@
+{
+  "name": "Gearbox housing",
+  "kind": "housing",
+  "parameters": {"L": 160, "W": 100, "H": 80, "t": 6, "rc": 10, "rb": 8, "fl": 12, "ft": 8, "bore": 42, "boss": 34, "bl": 10},
+  "steps": [
+    {"id": 1, "name": "Footprint", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-L / 2", "y": "-W / 2", "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Block", "type": "extrude", "sketch": 1, "length": "H"},
+    {"id": 3, "name": "Corners", "type": "fillet", "edges": {"any": [{"between": ["f2:side.0", "f2:side.1"]}, {"between": ["f2:side.1", "f2:side.2"]}, {"between": ["f2:side.2", "f2:side.3"]}, {"between": ["f2:side.3", "f2:side.0"]}]}, "radius": "rc"},
+    {"id": 4, "name": "Bottom edge", "type": "fillet", "edges": {"on_face": "f2:start"}, "radius": "rb"},
+    {"id": 5, "name": "Hollow", "type": "shell", "open": ["f2:end"], "thickness": "t"},
+    {"id": 6, "name": "Rim outline", "type": "sketch", "plane": {"origin": [0, 0, "H - ft"]},
+     "regions": [{"outer": {"type": "rounded_rect", "w": "L + 2 * fl", "h": "W + 2 * fl", "r": "rc + fl"}, "holes": [{"type": "rounded_rect", "w": "L - 2 * t", "h": "W - 2 * t", "r": "rc - t"}]}]},
+    {"id": 7, "name": "Rim", "type": "extrude", "sketch": 6, "length": "ft"},
+    {"id": 8, "name": "Bosses", "type": "sketch", "plane": {"origin": [0, "W / 2 + bl", 0], "z": [0, -1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "circle", "cx": -35, "cy": "H / 2", "r": "boss"}}]},
+    {"id": 9, "name": "Boss", "type": "extrude", "sketch": 8, "length": "bl + t"},
+    {"id": 10, "name": "Boss on the far side", "type": "mirror", "of": [9], "normal": [0, 1, 0]},
+    {"id": 11, "name": "Bearing bore", "type": "sketch", "plane": {"origin": [0, "W / 2 + bl", 0], "z": [0, -1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "circle", "cx": -35, "cy": "H / 2", "r": "bore / 2"}}]},
+    {"id": 12, "name": "Cut bore", "type": "extrude", "sketch": 11, "start": -1, "length": "W + 2 * bl + 2", "mode": "remove"},
+    {"id": 13, "name": "Rim holes", "type": "sketch", "plane": {"origin": [0, 0, "H"], "on_face": "f7:end"},
+     "regions": [{"outer": {"type": "circle", "cx": -60, "cy": "W / 2 + fl / 2", "r": 3.2}, "repeat": {"type": "grid", "nx": 3, "ny": 1, "dx": 60, "dy": 0}}, {"outer": {"type": "circle", "cx": -60, "cy": "-W / 2 - fl / 2", "r": 3.2}, "repeat": {"type": "grid", "nx": 3, "ny": 1, "dx": 60, "dy": 0}}]},
+    {"id": 14, "name": "Cut them", "type": "extrude", "sketch": 13, "start": "-ft - 1", "length": "ft + 2", "mode": "remove"}
+  ],
+  "always": {"genus": [8], "bounds": [["-L / 2 - fl", "-W / 2 - bl", 0], ["L / 2 + fl", "W / 2 + bl", "H"]]},
+  "changes": [{"set": {"H": 90}}, {"set": {"L": 180}}, {"set": {"t": 5}}]
+}

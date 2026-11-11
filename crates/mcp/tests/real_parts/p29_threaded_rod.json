@@ -1,0 +1,15 @@
+{
+  "name": "Threaded rod M8",
+  "kind": "fastener",
+  "parameters": {"d": 8, "L": 30, "p": 1.25, "c": 0.8},
+  "steps": [
+    {"id": 1, "name": "Circle", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "d / 2"}}]},
+    {"id": 2, "name": "Rod", "type": "extrude", "sketch": 1, "length": "L"},
+    {"id": 3, "name": "Ends", "type": "chamfer", "edges": {"any": [{"between": ["f2:start", "f2:side.0"]}, {"between": ["f2:end", "f2:side.0"]}]}, "distance": "c"},
+    {"expect": {"volume": "pi * (d / 2)^2 * L - 2 * 2 * pi * (d / 2 - c / 3) * c^2 / 2"}},
+    {"id": 4, "name": "Thread groove", "type": "sketch", "plane": {"z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "polygon", "points": [["d / 2 + 0.1", "-p - 0.45 * p"], ["d / 2 + 0.1", "-p + 0.45 * p"], ["d / 2 - 0.61 * p", "-p"]]}}]},
+    {"id": 5, "name": "Cut the thread", "type": "helix", "sketch": 4, "pitch": "p", "turns": "(L + 2 * p) / p", "mode": "remove"}
+  ],
+  "always": {"genus": [0], "bounds": [["-d / 2", "-d / 2", 0], ["d / 2", "d / 2", "L"]], "bounds_tolerance": 0.5},
+  "changes": [{"set": {"L": 40}}]
+}

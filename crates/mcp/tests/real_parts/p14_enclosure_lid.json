@@ -1,0 +1,23 @@
+{
+  "name": "Enclosure lid",
+  "kind": "enclosure",
+  "parameters": {"L": 120, "W": 80, "T": 3, "rc": 8, "wall": 1.3, "lh": 2, "lt": 1.2, "hole": 3.2, "cs": 6, "c": 1},
+  "steps": [
+    {"id": 1, "name": "Outline", "type": "sketch", "regions": [{"outer": {"type": "rounded_rect", "w": "L", "h": "W", "r": "rc"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "T"},
+    {"id": 3, "name": "Lip", "type": "sketch", "plane": {"z": [0, 0, -1], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "rounded_rect", "w": "L - 2 * wall", "h": "W - 2 * wall", "r": "rc - wall"}, "holes": [{"type": "rounded_rect", "w": "L - 2 * wall - 2 * lt", "h": "W - 2 * wall - 2 * lt", "r": "rc - wall - lt"}]}]},
+    {"id": 4, "name": "Lip solid", "type": "extrude", "sketch": 3, "length": "lh"},
+    {"id": 5, "name": "Top edge", "type": "chamfer", "edges": {"on_face": "f2:end"}, "distance": "c"},
+    {"id": 6, "name": "Screw holes", "type": "sketch", "plane": {"origin": [0, 0, "T"], "on_face": "f2:end"},
+     "regions": [{"outer": {"type": "circle", "cx": "9 - L / 2", "cy": "9 - W / 2", "r": "hole / 2"}, "repeat": {"type": "grid", "nx": 2, "ny": 2, "dx": "L - 18", "dy": "W - 18"}}]},
+    {"id": 7, "name": "Cut them", "type": "extrude", "sketch": 6, "start": "-T - 1", "length": "T + 2", "mode": "remove"},
+    {"id": 8, "name": "Countersinks", "type": "chamfer", "edges": {"both": [{"on_face": "f2:end"}, {"radius": "hole / 2"}]}, "distance": "(cs - hole) / 2"}
+  ],
+  "always": {
+    "volume": "(L * W - (4 - pi) * rc^2) * T + lh * ((L - 2 * wall) * (W - 2 * wall) - (4 - pi) * (rc - wall)^2 - (L - 2 * wall - 2 * lt) * (W - 2 * wall - 2 * lt) + (4 - pi) * (rc - wall - lt)^2) - c^2 / 2 * (2 * (L - 2 * rc) + 2 * (W - 2 * rc)) - 2 * pi * (rc - c / 3) * c^2 / 2 - 4 * pi * (hole / 2)^2 * T - 4 * 2 * pi * (hole / 2 + (cs - hole) / 6) * ((cs - hole) / 2)^2 / 2",
+    "genus": [4],
+    "bounds": [["-L / 2", "-W / 2", "-lh"], ["L / 2", "W / 2", "T"]]
+  },
+  "changes": [{"set": {"T": 4}}, {"set": {"L": 140}}, {"set": {"lt": 1.5}}]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "Chain sprocket",
+  "scan_fixed": ["OD", "pitch", "roller"],
+  "kind": "gear",
+  "parameters": {"n": 16, "pitch": 40.7, "roller": 4, "OD": 44, "F": 7, "bore": 15, "hub": 14, "hh": 10},
+  "steps": [
+    {"id": 1, "name": "Blank", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "OD"}}]},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "F"},
+    {"id": 3, "name": "Roller seats", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "r": "roller"}, "repeat": {"type": "circular", "count": "n", "radius": "pitch"}}]},
+    {"id": 4, "name": "Cut them", "type": "extrude", "sketch": 3, "length": "F + 2", "mode": "remove"},
+    {"id": 5, "name": "Hub", "type": "sketch", "plane": {"origin": [0, 0, "F"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "circle", "r": "hub"}}]},
+    {"id": 6, "name": "Hub solid", "type": "extrude", "sketch": 5, "length": "hh"},
+    {"id": 7, "name": "Bore", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "bore / 2"}}]},
+    {"id": 8, "name": "Cut bore", "type": "extrude", "sketch": 7, "start": -1, "length": "F + hh + 2", "mode": "remove"},
+    {"id": 9, "name": "Lightening holes", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": 4}, "repeat": {"type": "circular", "count": 5, "radius": 25}}]},
+    {"id": 10, "name": "Cut them", "type": "extrude", "sketch": 9, "start": -1, "length": "F + 2", "mode": "remove"},
+    {"id": 11, "name": "Tooth tips", "type": "chamfer", "edges": {"both": [{"radius": "OD"}, {"any": [{"on_face": "f2:start"}, {"on_face": "f2:end"}]}]}, "distance": 0.8},
+    {"id": 12, "name": "Hub's root", "type": "fillet", "edges": {"between": ["f6:side.0", "f2:end"]}, "radius": 2}
+  ],
+  "always": {"genus": [6], "bounds": [["-OD", "-OD", 0], ["OD", "OD", "F + hh"]]},
+  "changes": [{"set": {"F": 9}}, {"set": {"hub": 15}}]
+}

@@ -158,6 +158,9 @@ struct Rig {
     size: f64,
     /// Joints that have nothing left to say, as what they join now moves as one.
     settled: Vec<bool>,
+    /// What each cluster turns about, in its own coordinates. It's where it's held, so that a part going to a mate only
+    /// turns if it has to, however far from its own origin that mate is.
+    centers: Vec<Vec3>,
 }
 
 /// Whether a fastened mate already holds, so that what it joins can simply move as one.
@@ -248,7 +251,25 @@ impl Rig {
             }
         }
         let size = bounds.diagonal().max(problem.extent).clamp(1.0, 1e7);
-        Rig { clusters, cluster_of, within, size, settled }
+        // The middle of what holds each cluster. With nothing holding it, its own origin.
+        let mut held = vec![(Vec3::ZERO, 0usize); clusters.len()];
+        for (j, joint) in problem.joints.iter().enumerate() {
+            if settled[j] || joint.a >= n || joint.b >= n {
+                continue;
+            }
+            for (thing, on) in [(joint.a, &joint.on_a), (joint.b, &joint.on_b)] {
+                let entry = &mut held[cluster_of[thing]];
+                entry.0 = entry.0 + problem.poses[thing].to_world(on.origin);
+                entry.1 += 1;
+            }
+        }
+        let centers = held.iter().zip(&clusters).map(|((sum, count), c)| if *count == 0 { Vec3::ZERO } else { c.pose.to_local(*sum * (1.0 / *count as f64)) }).collect();
+        Rig { clusters, cluster_of, within, size, settled, centers }
+    }
+
+    /// Where a cluster's center is now.
+    fn center(&self, cluster: usize) -> Vec3 {
+        self.clusters[cluster].pose.to_world(self.centers[cluster])
     }
 
     fn pose_of(&self, thing: usize) -> Frame {
@@ -386,8 +407,8 @@ fn value_row(rig: &Rig, joint: &Joint, dof: Dof) -> Row {
 /// How far `fb`'s origin is from `fa`'s, along a direction fixed in `fa`.
 fn along_row(rig: &Rig, fa: &Frame, ca: usize, fb: &Frame, cb: usize, axis: Vec3) -> Row {
     let d = fb.origin - fa.origin;
-    let ra = fa.origin - rig.clusters[ca].pose.origin;
-    let rb = fb.origin - rig.clusters[cb].pose.origin;
+    let ra = fa.origin - rig.center(ca);
+    let rb = fb.origin - rig.center(cb);
     Row { value: d.dot(axis), parts: vec![(cb, axis, rb.cross(axis)), (ca, -axis, axis.cross(d) - ra.cross(axis))] }
 }
 
@@ -620,7 +641,8 @@ fn apply_step(rig: &mut Rig, columns: &Columns, step: &[f64], share: f64) {
         let w = v3(step[at + 3], step[at + 4], step[at + 5]) * (weight * share / rig.size);
         let pose = rig.clusters[c].pose;
         let (z, x) = (rotated(pose.z, w), rotated(pose.x, w));
-        rig.clusters[c].pose = Frame::new(pose.origin + v, z, x);
+        let center = rig.center(c);
+        rig.clusters[c].pose = Frame::new(center + rotated(pose.origin - center, w) + v, z, x);
     }
 }
 
@@ -758,7 +780,7 @@ fn freedom(rig: &Rig, problem: &Problem, skip: &[bool], skip_couplings: &[bool])
         return (0, vec![false; problem.poses.len()]);
     }
     // All with even weights, as a preference doesn't change what's possible. Limits aren't counted: they don't take freedom.
-    let mut even = Rig { clusters: rig.clusters.clone(), cluster_of: rig.cluster_of.clone(), within: rig.within.clone(), size: rig.size, settled: rig.settled.clone() };
+    let mut even = Rig { clusters: rig.clusters.clone(), cluster_of: rig.cluster_of.clone(), within: rig.within.clone(), size: rig.size, settled: rig.settled.clone(), centers: rig.centers.clone() };
     for c in &mut even.clusters {
         c.weight = 1.0;
     }
@@ -907,13 +929,13 @@ fn goal_rows(rig: &Rig, goal: &Goal) -> Vec<Row> {
         Goal::Point { thing, local, to } => {
             let c = rig.cluster_of[*thing];
             let p = rig.pose_of(*thing).to_world(*local);
-            let r = p - rig.clusters[c].pose.origin;
+            let r = p - rig.center(c);
             [Vec3::X, Vec3::Y, Vec3::Z].iter().map(|&axis| Row { value: (p - *to).dot(axis), parts: vec![(c, axis, r.cross(axis))] }).collect()
         }
         Goal::Pose { thing, to } => {
             let c = rig.cluster_of[*thing];
             let now = rig.pose_of(*thing);
-            let r = now.origin - rig.clusters[c].pose.origin;
+            let r = now.origin - rig.center(c);
             let w = rotation_between(to, &now);
             let mut rows: Vec<Row> = [Vec3::X, Vec3::Y, Vec3::Z].iter().map(|&axis| Row { value: (now.origin - to.origin).dot(axis), parts: vec![(c, axis, r.cross(axis))] }).collect();
             for axis in [Vec3::X, Vec3::Y, Vec3::Z] {

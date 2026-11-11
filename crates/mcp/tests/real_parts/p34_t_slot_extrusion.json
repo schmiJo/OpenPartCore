@@ -1,0 +1,21 @@
+{
+  "name": "T-slot extrusion",
+  "kind": "profile",
+  "parameters": {"L": 200, "r": 2, "core": 3.4, "corner": 2.5},
+  "steps": [
+    {"id": 1, "name": "Section", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [
+      [-20, -20], [-4, -20], [-4, -16], [-10, -16], [-10, -11], [-4, -8], [4, -8], [10, -11], [10, -16], [4, -16], [4, -20],
+      [20, -20], [20, -4], [16, -4], [16, -10], [11, -10], [8, -4], [8, 4], [11, 10], [16, 10], [16, 4], [20, 4],
+      [20, 20], [4, 20], [4, 16], [10, 16], [10, 11], [4, 8], [-4, 8], [-10, 11], [-10, 16], [-4, 16], [-4, 20],
+      [-20, 20], [-20, 4], [-16, 4], [-16, 10], [-11, 10], [-8, 4], [-8, -4], [-11, -10], [-16, -10], [-16, -4], [-20, -4]]},
+      "holes": [{"type": "circle", "r": "core"}, {"type": "circle", "cx": 15, "cy": 15, "r": "corner"}, {"type": "circle", "cx": -15, "cy": 15, "r": "corner"}, {"type": "circle", "cx": -15, "cy": -15, "r": "corner"}, {"type": "circle", "cx": 15, "cy": -15, "r": "corner"}]}]},
+    {"id": 2, "name": "Length", "type": "extrude", "sketch": 1, "length": "L"},
+    {"id": 3, "name": "Corners", "type": "fillet", "edges": {"any": [{"between": ["f2:side.10", "f2:side.11"]}, {"between": ["f2:side.21", "f2:side.22"]}, {"between": ["f2:side.32", "f2:side.33"]}, {"between": ["f2:side.43", "f2:side.0"]}]}, "radius": "r"}
+  ],
+  "always": {
+    "volume": "L * (904 - pi * core^2 - 4 * pi * corner^2 - 4 * (1 - pi / 4) * r^2)",
+    "genus": [5],
+    "bounds": [[-20, -20, 0], [20, 20, "L"]]
+  },
+  "changes": [{"set": {"L": 300}}, {"set": {"r": 1}}, {"set": {"core": 3}}]
+}

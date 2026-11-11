@@ -34,7 +34,7 @@ point membership against both inputs.
 | Boxes in arbitrary orientations | 5,000 | 0 | 0 |
 | Prisms and plates on a grid | 5,000 | 0 | 0 |
 | Any primitive in general position | 5,000 | 4 (0.08%) | 0 |
-| Primitives aligned on a grid | 5,000 | 254 (5.1%) | 0 |
+| Primitives aligned on a grid | 5,000 | 198 (4.0%) | 0 |
 
 "Refused" counts cases where at least one of the three operations returned an error.
 
@@ -49,8 +49,8 @@ not tangency cases by construction, so they deserve a closer look:
 | 4609 | Two edges claim the same continuation, on a sphere |
 
 **Aligned refusals** are nearly all exact tangency between surfaces with no closed-form
-intersection, which integer grids produce often. For example, a plane tangent to a torus at a
-saddle point gives a curve that crosses itself there. A few of these report as internal errors
+intersection, which integer grids produce often: a torus touching another or a cylinder, for
+example, gives a curve that crosses itself there. A few of these report as internal errors
 ("two edges claim the same continuation", "the result does not close") rather than naming the
 tangency, because the curve touches a face boundary tangentially at a vertex.
 
@@ -74,6 +74,56 @@ itself, within the last sample before a corner, and outlines are now checked mor
 reported volume is 1.8e-4 and 1.6e-4 above this kernel's. Its own numbers settle this in the kernel's favour: for `spline_outline`, a polygon through 20,001 points
 of OpenCASCADE's own edges gives a cap area of 812.6155, and this kernel's is 812.6155, while its `Area` for that face says 812.9296. A mesh of the solid made by OpenCASCADE
 has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
+
+## Real parts
+
+`crates/mcp/tests/real_parts/` holds 58 parts and 5 assemblies: brackets, flanges, housings, gears, shafts, fasteners with real threads, enclosures, manifolds, pipes and a spring. Each is modelled the way a person does it, feature by feature through the tools an app uses, with flush faces, centred holes, ribs that meet walls exactly and fillets late in the history. If a step is refused, that's written down and it's turned off, so the rest still gets tried.
+
+Each one is then checked by things that don't depend on this kernel's own answer: a volume formula where one is easy (40 of the 58), the holes through it, where its bounds should be, a watertight mesh, its STEP file read by OpenCASCADE for validity, volume and solids, dimensions changed and changed back, and saved and reopened. `scripts/check_real_parts.sh <folder>` makes the table, and `scripts/real_parts_sheet.py` a picture of them all. `crates/mcp/tests/real_parts.rs` holds it to what's expected, with volumes from OpenCASCADE or a formula: a part that stops working fails it, and so does one that starts to, until the file says so.
+
+| | Whole | A step refused | Something wrong |
+|---|---|---|---|
+| First run | 46 of 63 | 12 | 5 |
+| Now | 56 of 63 | 5 | 2 |
+
+A part is only whole if everything above holds, at its own dimensions and after each change. Of the first run's 5 wrong, 2 were really wrong and are still open, on fillets and chamfers (below), 2 were assemblies coming to rest a degree or so off, now fixed, and 1 was OpenCASCADE's: see the spring below.
+
+**What was refused or wrong, most common first, and what happened to it:**
+
+| What | Parts | Now |
+|---|---|---|
+| A rounded rectangle whose corners meet, which is what a slot is, was refused for having sides of no length | 5 | Fixed |
+| Fillets and chamfers: see below | 6 | Open, and two of them are wrong rather than refused |
+| An assembly's new mate left its part a degree or so off, and turned by however its origin was placed | 2 | Fixed: a part turns about where it's held, and a new mate comes to rest at zero if it's that part's only one |
+| A pattern of a pattern, as for a grid of countersinks | 1 | Fixed |
+| A tangential inlet: a cylinder just touching another's wall from inside, as in a cyclone | 1 | Fixed: the curve is two loops crossing where they touch, and it's worked out directly |
+| Shelling a square-to-round duct | 1 | Open. The loft's corner edges are sharp at the square end and smooth at the round one, which the shell can't follow |
+
+**Fillet and chamfer failures, all open:**
+
+| Part | What happens |
+|---|---|
+| Gusset bracket | **Wrong.** Rounding a rib where it meets the plate, when the rib ends in a sharp wedge, leaves strips of fillet standing in the air past the tip. It's valid and watertight, and only its bounds show it |
+| Shelf bracket | **Wrong.** A chamfer on an edge that ends on another feature's face does nothing or almost nothing, with only a note saying it left no faces |
+| Gearbox housing | Refused: the bottom edge of a box whose corners were filleted, because of a torus and a cylinder tangent along their edge. The same shape from a rounded sketch works |
+| Moulded cup | Refused: the same on a drafted box, as "doesn't fit" |
+| Pipe tee | Refused: the crotch of a tee, as two blended edges meet at an angle |
+| Connecting rod | Works as drawn, and refused with the "does not close" message at one other length |
+
+**Moving dimensions at random.** Each part that takes under 30 seconds was also rebuilt with all its dimensions moved by up to 5%, six times over: 306 rebuilds fine, 10 refused, 12 wrong. All 12 wrong are the two fillet and chamfer parts above. Of the 10 refused, 4 are the parts above that can't be drawn at all yet, 4 are a fillet rightly running into a hole that's near it, and 2 are a splined shaft, whose relief groove is exactly tangent to the groove floors and flush with their ends: "two edges claim the same continuation", at some dimensions and not others, and that's not been fixed. Some dimensions are held still for this where a part's design depends on them together, as `scan_fixed` in its script says.
+
+**What this says about the Boolean fuzz below.** Its refusal on aligned primitives, 5.1% and now 4.0%, is mostly exact tangency among tori, and none of these parts hit that. Tangency they do have, they come through: a rib tangent to a boss, an ear tangent to its round end, a rabbet level with where a fillet starts, a ball on a shank of its own size, a thread on a shaft, a hinge's knuckle tangent to its plate, and equal cross drillings. So this measure and that one aren't the same thing, and this one is closer to what someone modelling will meet.
+
+**Speed.** Most parts take under 5 seconds, including all those checks, and the handwheel and the duct about 13. Threads and springs take minutes that way, as those checks rebuild them. Cutting an M8 thread 30 mm long took 28 to 57 seconds on a busy machine, and changing a dimension on it takes as long again. A person would notice that.
+
+**Clumsy in the tools, as opposed to wrong in the kernel.** These all got in the way of modelling, and none were refused:
+
+- **A sketch's circular repeat moves its region and doesn't turn it,** so a gear's tooth space or a groove around a shaft needs a pattern feature rather than the repeat that looks right for it.
+- **A list of parts can't follow a count.** A Boolean that welds a pattern's copies names them, as `f5` and `f5.1`, so changing the count breaks it.
+- **Connector places, instance places and relation amounts are numbers,** where a feature's are expressions. A connector given as a place doesn't follow a dimension.
+- **A face's axis points go by which piece a key finds first.** On a bore through two walls, that's one wall's middle, and which wall isn't obvious. `connector_candidates` shows them, but it takes that step.
+- **An edge is hard to name when there are many like it.** Rounding all the roots of a heat sink's fins takes a box and a direction together, where `between` takes one pair of faces at a time.
+- **Which way an axis point's z goes** depends on how the feature was drawn, and it decides whether the start or the end of a knuckle is the one that's wanted.
 
 ## STEP import
 
@@ -225,32 +275,19 @@ Rational B-spline patches, from a loft or a file: see [NURBS_DESIGN.md](NURBS_DE
 
 **Speed is the weak point.** A distance takes about 3 microseconds on the surface and 10 near it, where a swept spline's takes one and an analytic one takes nanoseconds, and that's after three rounds of work on it. Booleans on two lofts took about 1.5 s natively in the fuzz, with a similar time for their mass properties, while the simpler nozzle demo takes under 200 ms a rebuild. Each knot interval that gets touched also keeps about 170 kB, or 370 kB if it's rational and cubic, so a surface with thousands of them would be a problem. That hasn't been tried.
 
-## Cases OpenCASCADE handles and this kernel refuses
+## Cases OpenCASCADE handles and this kernel used to refuse
 
-Found by an independent review harness and still open. `--example review named <file>` reruns them. The two it also found on fillets, an elliptical rim and a tee's saddle, now work: see [below](#fillets-and-chamfers).
+An independent review harness found these: `--example review named <file>` reruns them. A skin 1e-5 thick around a cylinder, and a crescent as thin as that from one a hair off the other's axis, were both refused as "the result does not close". They come out now, to 1e-8 of their formulas, 0.00314 and 0.001. Fillets on an elliptical rim and a tee's saddle, also from it, work too: see [below](#fillets-and-chamfers).
 
-| Case | This kernel | OpenCASCADE |
-|---|---|---|
-| Cylinder r = 5.00001 over r = 5, coaxial: subtract the thin shell | Refused: "the result does not close" | Volume 0.003 |
-| Cylinder r = 5 with its axis offset 1e-5: subtract the sliver | Refused: "the result does not close" | Volume 0.001 |
-
-These are slivers near the tolerance, and a refusal there is the safe answer, but the
-message should name the sliver instead of blaming closure.
-
-Two more were found while writing a test, both on a thin wall beside a large circle, a 128-sided hole just inside a circle of radius 100, and both refused and never wrong. A chord of the circle at the resolution these checks use strays about 0.5, which is what's in the way.
-
-| Wall | Subtract the hole | A profile with that hole | OpenCASCADE subtracting it |
-|---|---|---|---|
-| 0.1 | Refused: "the result does not close" | Refused: "hole 0 crosses the outer wire" | Valid, 376.9509, which is the formula |
-| 0.2 | Works | Refused, wrongly | Valid, 690.5130, which is the formula, as this kernel gets |
-| 0.3 and up | Works | Works | Not tried |
+A thin wall beside a large circle used to be refused here, because a chord of the circle at the resolution those checks used stray about 0.5. A profile's crossing check is exact on arcs now, and so is the check on where a region's sample points are, so a 128-sided hole just inside a circle of radius 100 works at a wall of 0.1 by Boolean, and down to 0.001 as a profile, each to the formula: `crates/kernel/tests/m18_thin_walls.rs`.
 
 ## What Booleans refuse by design
 
-- **General tangency:** a cylinder internally tangent to a sphere, or a plane tangent to a torus
-  away from its axis, where the intersection crosses itself. Slide to "Known limit: tangent bore"
+- **General tangency:** a cylinder internally tangent to a sphere, or a torus touching a cylinder or
+  another torus, where the intersection crosses itself. Slide to "Known limit: tangent bore"
   in the Stress cases demo to see one. Tangency handled in closed form does work: coaxial
-  surfaces, a plane tangent to a cylinder, tangent parallel cylinders, and so on.
+  surfaces, a plane tangent to a cylinder, tangent parallel cylinders, a cylinder touching a larger
+  one's wall from inside, a plane along a torus's axis touching its waist, and so on.
 - **Very small features:** intersection loops under roughly 1/100 of the smaller surface's radius,
   and edges within tolerance of each other.
 - **Tiny differences:** the tolerance is 1e-7 mm, and nothing shorter than 1e-6 mm can be built.

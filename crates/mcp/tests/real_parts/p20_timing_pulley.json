@@ -1,0 +1,24 @@
+{
+  "name": "Timing pulley",
+  "kind": "pulley",
+  "parameters": {"n": 20, "OD": 38, "F": 12, "ft": 1.5, "fl": 23, "hub": 14, "hh": 8, "bore": 8, "gw": 2.6, "gd": 1.4},
+  "steps": [
+    {"id": 1, "name": "Toothed part", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "OD / 2"}}]},
+    {"id": 2, "name": "Blank", "type": "extrude", "sketch": 1, "length": "F"},
+    {"id": 3, "name": "Tooth space", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "rounded_rect", "cx": "OD / 2", "cy": 0, "w": "2 * gd", "h": "gw", "r": 0.5}}]},
+    {"id": 4, "name": "Cut it", "type": "extrude", "sketch": 3, "length": "F + 2", "mode": "remove"},
+    {"id": 5, "name": "All of them", "type": "pattern", "of": [4], "count": "n"},
+    {"id": 6, "name": "Lower flange", "type": "sketch", "plane": {"origin": [0, 0, "-ft"]}, "regions": [{"outer": {"type": "circle", "r": "fl"}}]},
+    {"id": 7, "name": "Lower flange solid", "type": "extrude", "sketch": 6, "length": "ft"},
+    {"id": 8, "name": "Upper flange", "type": "sketch", "plane": {"origin": [0, 0, "F"]}, "regions": [{"outer": {"type": "circle", "r": "fl"}}]},
+    {"id": 9, "name": "Upper flange solid", "type": "extrude", "sketch": 8, "length": "ft"},
+    {"id": 10, "name": "Hub", "type": "sketch", "plane": {"origin": [0, 0, "F + ft"], "on_face": "f9:end"}, "regions": [{"outer": {"type": "circle", "r": "hub"}}]},
+    {"id": 11, "name": "Hub solid", "type": "extrude", "sketch": 10, "length": "hh"},
+    {"id": 12, "name": "Bore", "type": "sketch", "plane": {"origin": [0, 0, "-ft"]}, "regions": [{"outer": {"type": "circle", "r": "bore / 2"}}]},
+    {"id": 13, "name": "Cut bore", "type": "extrude", "sketch": 12, "start": -1, "length": "F + 2 * ft + hh + 2", "mode": "remove"},
+    {"id": 14, "name": "Set screw", "type": "sketch", "plane": {"z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "F + ft + hh / 2", "r": 2}}]},
+    {"id": 15, "name": "Drill it", "type": "extrude", "sketch": 14, "length": "hub + 1", "mode": "remove"}
+  ],
+  "always": {"genus": [2], "bounds": [["-fl", "-fl", "-ft"], ["fl", "fl", "F + ft + hh"]]},
+  "changes": [{"set": {"F": 16}}, {"set": {"n": 24}}, {"set": {"hh": 10}}]
+}

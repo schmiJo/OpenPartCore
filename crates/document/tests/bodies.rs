@@ -62,9 +62,9 @@ fn parts_that_touch_all_around_stay_apart() {
 
 #[test]
 fn merging_a_files_parts_says_how_to_keep_them_apart_when_it_fails() {
-    // A cylinder just inside another, along the same axis, which a Boolean refuses as too close to call.
-    let a = cylinder(&Frame::WORLD, 5.0, 10.0, 1).unwrap();
-    let b = cylinder(&Frame::translation(v3(1e-5, 0.0, 2.0)), 5.0, 10.0, 2).unwrap();
+    // A cylinder just touching the inside of a sphere, where they meet in a figure of eight, which a Boolean refuses.
+    let a = sphere(&Frame::WORLD, 30.0, 1).unwrap();
+    let b = cylinder(&Frame::translation(v3(12.0, 0.0, -40.0)), 18.0, 80.0, 2).unwrap();
     let text = write_step_bodies(&[&a, &b], "too close");
     let mut doc = Document::new();
     let f = doc.with(Op::ImportStep { text: text.clone(), mode: Mode::Add });

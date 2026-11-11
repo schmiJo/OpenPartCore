@@ -1,0 +1,29 @@
+{
+  "name": "Hydraulic manifold",
+  "kind": "manifold",
+  "parameters": {"L": 100, "W": 50, "H": 40, "zc": 20, "R": 6, "port": 4, "cb": 9, "depth": 4},
+  "steps": [
+    {"id": 1, "name": "Footprint", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-L / 2", "y": "-W / 2", "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Block", "type": "extrude", "sketch": 1, "length": "H"},
+    {"id": 3, "name": "Gallery", "type": "sketch", "plane": {"origin": ["-L / 2 - 1", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "zc", "r": "R"}}]},
+    {"id": 4, "name": "Drill it through", "type": "extrude", "sketch": 3, "length": "L + 2", "mode": "remove"},
+    {"expect": {"volume": "L * W * H - pi * R^2 * L", "genus": [1]}},
+    {"id": 5, "name": "Branch, the gallery's own size", "type": "sketch", "plane": {"origin": [0, "W / 2 + 1", 0], "z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "cx": -25, "cy": "zc", "r": "R"}}]},
+    {"id": 6, "name": "Drill to the gallery's axis", "type": "extrude", "sketch": 5, "length": "W / 2 + 1", "mode": "remove"},
+    {"id": 7, "name": "The other branch", "type": "pattern", "of": [6], "direction": [1, 0, 0], "count": 2, "spacing": 50},
+    {"expect": {"volume": "L * W * H - pi * R^2 * L - 2 * (pi * R^2 * W / 2 - 8 / 3 * R^3)", "genus": [3]}},
+    {"id": 8, "name": "Top port", "type": "sketch", "plane": {"origin": [0, 0, "H + 1"], "z": [0, 0, -1], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "r": "port"}}]},
+    {"id": 9, "name": "Drill it", "type": "extrude", "sketch": 8, "length": "H + 1 - zc", "mode": "remove"},
+    {"id": 10, "name": "Port's counterbore", "type": "sketch", "plane": {"origin": [0, 0, "H - depth"]}, "regions": [{"outer": {"type": "circle", "r": "cb"}}]},
+    {"id": 11, "name": "Cut it", "type": "extrude", "sketch": 10, "length": "depth + 1", "mode": "remove"},
+    {"id": 12, "name": "Branch counterbore", "type": "sketch", "plane": {"origin": [0, "W / 2 - depth", 0], "z": [0, 1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "cx": -25, "cy": "-zc", "r": "cb"}}]},
+    {"id": 13, "name": "Cut it", "type": "extrude", "sketch": 12, "length": "depth + 1", "mode": "remove"},
+    {"id": 14, "name": "And its twin", "type": "pattern", "of": [13], "direction": [1, 0, 0], "count": 2, "spacing": 50},
+    {"id": 15, "name": "O-ring groove", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["cb + 2", "H - 2"], ["cb + 4", "H - 2"], ["cb + 4", "H + 1"], ["cb + 2", "H + 1"]]}}]},
+    {"id": 16, "name": "Turn it", "type": "revolve", "sketch": 15, "mode": "remove"},
+    {"id": 17, "name": "Mounting holes", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "cx": "8 - L / 2", "cy": -18, "r": 4}, "repeat": {"type": "grid", "nx": 2, "ny": 2, "dx": "L - 16", "dy": 36}}]},
+    {"id": 18, "name": "Cut them", "type": "extrude", "sketch": 17, "length": "H + 2", "mode": "remove"}
+  ],
+  "always": {"genus": [8], "bounds": [["-L / 2", "-W / 2", 0], ["L / 2", "W / 2", "H"]]},
+  "changes": [{"set": {"L": 120}}, {"set": {"zc": 22}}, {"set": {"R": 5}}]
+}

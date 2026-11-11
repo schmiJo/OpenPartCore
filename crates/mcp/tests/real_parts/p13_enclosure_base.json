@@ -1,0 +1,28 @@
+{
+  "name": "Enclosure base",
+  "kind": "enclosure",
+  "parameters": {"L": 120, "W": 80, "H": 35, "t": 2.5, "rc": 8, "rb": 4, "boss": 4, "pilot": 2.5, "lip": 1.2, "ld": 2},
+  "steps": [
+    {"id": 1, "name": "Footprint", "type": "sketch", "regions": [{"outer": {"type": "rounded_rect", "w": "L", "h": "W", "r": "rc"}}]},
+    {"id": 2, "name": "Block", "type": "extrude", "sketch": 1, "length": "H"},
+    {"id": 3, "name": "Bottom edge", "type": "fillet", "edges": {"on_face": "f2:start"}, "radius": "rb"},
+    {"id": 4, "name": "Hollow", "type": "shell", "open": ["f2:end"], "thickness": "t"},
+    {"id": 5, "name": "Screw bosses", "type": "sketch", "plane": {"origin": [0, 0, "t"], "on_face": "f4:start"},
+     "regions": [{"outer": {"type": "circle", "cx": "9 - L / 2", "cy": "9 - W / 2", "r": "boss"}, "repeat": {"type": "grid", "nx": 2, "ny": 2, "dx": "L - 18", "dy": "W - 18"}}]},
+    {"id": 6, "name": "Bosses", "type": "extrude", "sketch": 5, "length": "H - t - 3"},
+    {"id": 7, "name": "Pilot holes", "type": "sketch", "plane": {"origin": [0, 0, "H - 3"], "on_face": "f6:end"},
+     "regions": [{"outer": {"type": "circle", "cx": "9 - L / 2", "cy": "9 - W / 2", "r": "pilot / 2"}, "repeat": {"type": "grid", "nx": 2, "ny": 2, "dx": "L - 18", "dy": "W - 18"}}]},
+    {"id": 8, "name": "Drill them", "type": "extrude", "sketch": 7, "start": -10, "length": 11, "mode": "remove"},
+    {"id": 9, "name": "Step for the lid", "type": "sketch", "plane": {"origin": [0, 0, "H - ld"]},
+     "regions": [{"outer": {"type": "rounded_rect", "w": "L - 2 * (t - lip)", "h": "W - 2 * (t - lip)", "r": "rc - (t - lip)"}, "holes": [{"type": "rounded_rect", "w": "L - 2 * t", "h": "W - 2 * t", "r": "rc - t"}]}]},
+    {"id": 10, "name": "Cut the step", "type": "extrude", "sketch": 9, "length": "ld + 1", "mode": "remove"},
+    {"id": 11, "name": "Cable way", "type": "sketch", "plane": {"origin": ["L / 2 - 5", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]},
+     "regions": [{"outer": {"type": "rounded_rect", "cx": 0, "cy": "H / 2", "w": 16, "h": 10, "r": 3}}]},
+    {"id": 12, "name": "Cut it", "type": "extrude", "sketch": 11, "length": 10, "mode": "remove"},
+    {"id": 13, "name": "Vents", "type": "sketch", "plane": {"origin": [0, 0, -1]},
+     "regions": [{"outer": {"type": "rounded_rect", "cx": -20, "cy": 0, "w": 4, "h": 30, "r": 1.5}, "repeat": {"type": "grid", "nx": 6, "ny": 1, "dx": 8, "dy": 0}}]},
+    {"id": 14, "name": "Cut vents", "type": "extrude", "sketch": 13, "length": "t + 2", "mode": "remove"}
+  ],
+  "always": {"genus": [7], "bounds": [["-L / 2", "-W / 2", 0], ["L / 2", "W / 2", "H"]]},
+  "changes": [{"set": {"H": 45}}, {"set": {"t": 3}}, {"set": {"L": 140}}]
+}

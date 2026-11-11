@@ -1,0 +1,17 @@
+{
+  "name": "Fluted knob",
+  "kind": "knob",
+  "parameters": {"R": 20, "H": 24, "r": 4, "n": 12, "fl": 3.2, "hole": 6, "hd": 14},
+  "steps": [
+    {"id": 1, "name": "Half section", "type": "sketch", "regions": [{"outer": {"type": "path", "start": [0, 0], "moves": [{"line_to": ["R", 0]}, {"line_to": ["R", "H - r"]}, {"arc_to": ["R - r", "H"], "center": ["R - r", "H - r"], "ccw": true}, {"line_to": [0, "H"]}]}}]},
+    {"id": 2, "name": "Turned", "type": "revolve", "sketch": 1},
+    {"id": 3, "name": "Flutes", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "r": "fl"}, "repeat": {"type": "circular", "count": "n", "radius": "R + 1"}}]},
+    {"id": 4, "name": "Cut them", "type": "extrude", "sketch": 3, "length": "H + 2", "mode": "remove"},
+    {"id": 5, "name": "Blind hole", "type": "sketch", "plane": {"origin": [0, 0, -1]}, "regions": [{"outer": {"type": "circle", "r": "hole"}}]},
+    {"id": 6, "name": "Drill it", "type": "extrude", "sketch": 5, "length": "hd + 1", "mode": "remove"},
+    {"id": 7, "name": "Mouth of the hole", "type": "chamfer", "edges": {"both": [{"radius": "hole"}, {"in_box": [[-20, -20, -0.01], [20, 20, 0.01]]}]}, "distance": 0.6},
+    {"id": 8, "name": "Pointer dot", "type": "solid", "shape": "sphere", "radius": 2, "at": {"origin": [10, 0, "H"]}, "mode": "remove"}
+  ],
+  "always": {"genus": [0], "bounds": [["-R", "-R", 0], ["R", "R", "H"]], "bounds_tolerance": 0.5},
+  "changes": [{"set": {"H": 28}}, {"set": {"n": 10}}]
+}

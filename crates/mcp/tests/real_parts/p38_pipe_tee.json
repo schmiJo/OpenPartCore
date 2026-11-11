@@ -1,0 +1,20 @@
+{
+  "name": "Pipe tee",
+  "kind": "pipe",
+  "parameters": {"R": 25, "r": 20, "La": 120, "Lb": 70},
+  "steps": [
+    {"id": 1, "name": "Run", "type": "sketch", "plane": {"origin": ["-La / 2", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": "R"}}]},
+    {"id": 2, "name": "Run solid", "type": "extrude", "sketch": 1, "length": "La"},
+    {"id": 3, "name": "Branch, the same size", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "R"}}]},
+    {"id": 4, "name": "Branch solid", "type": "extrude", "sketch": 3, "length": "Lb"},
+    {"expect": {"volume": "pi * R^2 * (La + Lb) - 8 / 3 * R^3", "genus": [0]}},
+    {"id": 5, "name": "Bore of the run", "type": "sketch", "plane": {"origin": ["-La / 2", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": "r"}}]},
+    {"id": 6, "name": "Cut it", "type": "extrude", "sketch": 5, "start": -1, "length": "La + 2", "mode": "remove"},
+    {"id": 7, "name": "Bore of the branch, the same size", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "r"}}]},
+    {"id": 8, "name": "Cut it", "type": "extrude", "sketch": 7, "length": "Lb + 1", "mode": "remove"},
+    {"expect": {"volume": "pi * R^2 * (La + Lb) - 8 / 3 * R^3 - pi * r^2 * (La + Lb) + 8 / 3 * r^3", "genus": [2]}},
+    {"id": 9, "name": "Crotch", "type": "fillet", "edges": {"between": ["f2:side.0", "f4:side.0"]}, "radius": 5}
+  ],
+  "always": {"genus": [2], "bounds": [["-La / 2", "-R", "-R"], ["La / 2", "R", "Lb"]]},
+  "changes": [{"set": {"Lb": 90}}, {"set": {"La": 150}}]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "Ball valve body",
+  "kind": "pipe",
+  "parameters": {"S": 30, "Rr": 18, "L": 120, "FD": 35, "ft": 10, "Rn": 16, "Hn": 55, "BF": 28, "bt": 8, "Rb": 12, "Rst": 8, "cav": 20},
+  "steps": [
+    {"id": 1, "name": "Ball housing", "type": "solid", "shape": "sphere", "radius": "S"},
+    {"id": 2, "name": "Run", "type": "sketch", "plane": {"origin": ["-L / 2", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": "Rr"}}]},
+    {"id": 3, "name": "Run solid", "type": "extrude", "sketch": 2, "length": "L"},
+    {"id": 4, "name": "Inlet flange", "type": "sketch", "plane": {"origin": ["-L / 2", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": "FD"}}]},
+    {"id": 5, "name": "Inlet flange solid", "type": "extrude", "sketch": 4, "length": "ft"},
+    {"id": 6, "name": "Outlet flange", "type": "sketch", "plane": {"origin": ["L / 2 - ft", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": "FD"}}]},
+    {"id": 7, "name": "Outlet flange solid", "type": "extrude", "sketch": 6, "length": "ft"},
+    {"id": 8, "name": "Neck", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "Rn"}}]},
+    {"id": 9, "name": "Neck solid", "type": "extrude", "sketch": 8, "length": "Hn"},
+    {"id": 10, "name": "Bonnet flange", "type": "sketch", "plane": {"origin": [0, 0, "Hn"]}, "regions": [{"outer": {"type": "circle", "r": "BF"}}]},
+    {"id": 11, "name": "Bonnet flange solid", "type": "extrude", "sketch": 10, "length": "bt"},
+    {"expect": {"genus": [0]}},
+    {"id": 12, "name": "Ball cavity", "type": "solid", "shape": "sphere", "radius": "cav", "mode": "remove"},
+    {"id": 13, "name": "Run's bore", "type": "sketch", "plane": {"origin": ["-L / 2 - 1", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": "Rb"}}]},
+    {"id": 14, "name": "Cut it", "type": "extrude", "sketch": 13, "length": "L + 2", "mode": "remove"},
+    {"id": 15, "name": "Stem bore", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "Rst"}}]},
+    {"id": 16, "name": "Cut it", "type": "extrude", "sketch": 15, "length": "Hn + bt + 1", "mode": "remove"},
+    {"expect": {"genus": [2]}},
+    {"id": 17, "name": "Inlet bolts", "type": "sketch", "plane": {"origin": ["-L / 2 - 1", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": 3.5}, "repeat": {"type": "circular", "count": 4, "radius": 27, "start_degrees": 45}}]},
+    {"id": 18, "name": "Cut them", "type": "extrude", "sketch": 17, "length": "ft + 2", "mode": "remove"},
+    {"id": 19, "name": "Outlet bolts", "type": "sketch", "plane": {"origin": ["L / 2 - ft - 1", 0, 0], "z": [1, 0, 0], "x": [0, 1, 0]}, "regions": [{"outer": {"type": "circle", "r": 3.5}, "repeat": {"type": "circular", "count": 4, "radius": 27, "start_degrees": 45}}]},
+    {"id": 20, "name": "Cut them", "type": "extrude", "sketch": 19, "length": "ft + 2", "mode": "remove"},
+    {"id": 21, "name": "Bonnet bolts", "type": "sketch", "plane": {"origin": [0, 0, "Hn + bt + 1"], "z": [0, 0, -1], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "r": 2.5}, "repeat": {"type": "circular", "count": 4, "radius": 22, "start_degrees": 45}}]},
+    {"id": 22, "name": "Blind tap them", "type": "extrude", "sketch": 21, "length": "bt", "mode": "remove"}
+  ],
+  "always": {"genus": [10], "bounds": [["-L / 2", "-FD", "-FD"], ["L / 2", "FD", "Hn + bt"]]},
+  "changes": [{"set": {"Hn": 65}}, {"set": {"L": 140}}]
+}

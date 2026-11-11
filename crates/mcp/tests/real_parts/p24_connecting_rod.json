@@ -1,0 +1,41 @@
+{
+  "name": "Connecting rod",
+  "kind": "lever",
+  "parameters": {"R1": 22, "R2": 13, "L": 100, "web": 8, "T": 16, "b1": 24, "b2": 12},
+  "steps": [
+    {"id": 1, "name": "Web outline", "type": "constrained_sketch", "plane": {"origin": [0, 0, "-web / 2"]}, "sketch": {
+      "format": "coreshape-sketch", "version": 1,
+      "entities": [
+        {"id": 1, "type": "arc", "center": [0, 0], "radius": 22, "start": [-21.8, 2], "end": [21.8, 2]},
+        {"id": 2, "type": "line", "start": [21.8, 2], "end": [12.9, 102]},
+        {"id": 3, "type": "arc", "center": [0, 100], "radius": 13, "start": [12.9, 102], "end": [-12.9, 102]},
+        {"id": 4, "type": "line", "start": [-12.9, 102], "end": [-21.8, 2]}
+      ],
+      "constraints": [
+        {"id": 1, "type": "coincident", "a": "1.end", "b": "2.start"},
+        {"id": 2, "type": "coincident", "a": "2.end", "b": "3.start"},
+        {"id": 3, "type": "coincident", "a": "3.end", "b": "4.start"},
+        {"id": 4, "type": "coincident", "a": "4.end", "b": "1.start"},
+        {"id": 5, "type": "tangent", "a": "1", "b": "2"},
+        {"id": 6, "type": "tangent", "a": "2", "b": "3"},
+        {"id": 7, "type": "tangent", "a": "3", "b": "4"},
+        {"id": 8, "type": "tangent", "a": "4", "b": "1"},
+        {"id": 9, "type": "coincident", "a": "1.center", "b": "origin"},
+        {"id": 10, "type": "coincident", "a": "3.center", "b": "y_axis"},
+        {"id": 11, "type": "radius", "of": "1", "value": "R1"},
+        {"id": 12, "type": "radius", "of": "3", "value": "R2"},
+        {"id": 13, "type": "vertical_distance", "a": "1.center", "b": "3.center", "value": "L"}
+      ]
+    }},
+    {"id": 2, "name": "Web", "type": "extrude", "sketch": 1, "length": "web"},
+    {"id": 3, "name": "Big end", "type": "sketch", "plane": {"origin": [0, 0, "-T / 2"]}, "regions": [{"outer": {"type": "circle", "r": "R1"}}]},
+    {"id": 4, "name": "Big end boss, flush with the web's arc", "type": "extrude", "sketch": 3, "length": "T"},
+    {"id": 5, "name": "Small end", "type": "sketch", "plane": {"origin": [0, 0, "-T / 2"]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "L", "r": "R2"}}]},
+    {"id": 6, "name": "Small end boss", "type": "extrude", "sketch": 5, "length": "T"},
+    {"id": 7, "name": "Holes", "type": "sketch", "plane": {"origin": [0, 0, "-T / 2 - 1"]}, "regions": [{"outer": {"type": "circle", "r": "b1 / 2"}}, {"outer": {"type": "circle", "cx": 0, "cy": "L", "r": "b2 / 2"}}]},
+    {"id": 8, "name": "Cut them", "type": "extrude", "sketch": 7, "length": "T + 2", "mode": "remove"},
+    {"id": 9, "name": "Rounds where the web meets the bosses", "type": "fillet", "edges": {"any": [{"between": ["f2:start", "f4:side.0"]}, {"between": ["f2:end", "f4:side.0"]}, {"between": ["f2:start", "f6:side.0"]}, {"between": ["f2:end", "f6:side.0"]}]}, "radius": 2}
+  ],
+  "always": {"genus": [2], "bounds": [["-R1", "-R1", "-T / 2"], ["R1", "L + R2", "T / 2"]]},
+  "changes": [{"set": {"L": 120}}, {"set": {"web": 6}}, {"set": {"R2": 15}}]
+}

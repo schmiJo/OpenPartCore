@@ -1,0 +1,16 @@
+{
+  "name": "Moulded cup with draft",
+  "kind": "moulded",
+  "parameters": {"L": 80, "W": 60, "H": 40, "a": 3, "rc": 8, "rb": 5, "t": 2},
+  "steps": [
+    {"id": 1, "name": "Footprint", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-L / 2", "y": "-W / 2", "w": "L", "h": "W"}}]},
+    {"id": 2, "name": "Block", "type": "extrude", "sketch": 1, "length": "H"},
+    {"id": 3, "name": "Draft", "type": "draft", "faces": ["f2:side.0", "f2:side.1", "f2:side.2", "f2:side.3"], "degrees": "-a"},
+    {"expect": {"bounds": [["-L / 2 - H * tan(a)", "-W / 2 - H * tan(a)", 0], ["L / 2 + H * tan(a)", "W / 2 + H * tan(a)", "H"]]}},
+    {"id": 4, "name": "Corners", "type": "fillet", "edges": {"any": [{"between": ["f2:side.0", "f2:side.1"]}, {"between": ["f2:side.1", "f2:side.2"]}, {"between": ["f2:side.2", "f2:side.3"]}, {"between": ["f2:side.3", "f2:side.0"]}]}, "radius": "rc"},
+    {"id": 5, "name": "Bottom edge", "type": "fillet", "edges": {"on_face": "f2:start"}, "radius": "rb"},
+    {"id": 6, "name": "Hollow", "type": "shell", "open": ["f2:end"], "thickness": "t"}
+  ],
+  "always": {"genus": [0]},
+  "changes": [{"set": {"H": 50}}, {"set": {"a": 5}}, {"set": {"t": 2.5}}]
+}

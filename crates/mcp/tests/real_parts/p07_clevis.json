@@ -1,0 +1,25 @@
+{
+  "name": "Clevis",
+  "kind": "bracket",
+  "parameters": {"W": 30, "H": 50, "R": 15, "gap": 12, "base": 20, "pin": 10, "stud": 6.8, "r": 2, "c": 0.5},
+  "steps": [
+    {"id": 1, "name": "Side view", "type": "sketch", "plane": {"z": [0, -1, 0], "x": [1, 0, 0]},
+     "regions": [{"outer": {"type": "path", "start": ["-R", 0], "moves": [{"line_to": ["R", 0]}, {"line_to": ["R", "H - R"]}, {"arc_to": ["-R", "H - R"], "center": [0, "H - R"], "ccw": true}]}}]},
+    {"id": 2, "name": "Block", "type": "extrude", "sketch": 1, "length": "W"},
+    {"id": 3, "name": "Fork gap", "type": "sketch", "plane": {"origin": [0, 0, "base"]},
+     "regions": [{"outer": {"type": "rect", "x": "-R - 1", "y": "-W / 2 - gap / 2", "w": "2 * R + 2", "h": "gap"}}]},
+    {"id": 4, "name": "Cut gap", "type": "extrude", "sketch": 3, "length": "H", "mode": "remove"},
+    {"id": 5, "name": "Pin", "type": "sketch", "plane": {"z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "H - R", "r": "pin / 2"}}]},
+    {"id": 6, "name": "Cut pin hole", "type": "extrude", "sketch": 5, "start": -1, "length": "W + 2", "mode": "remove"},
+    {"id": 7, "name": "Stud", "type": "sketch", "regions": [{"outer": {"type": "circle", "cx": 0, "cy": "-W / 2", "r": "stud / 2"}}]},
+    {"id": 8, "name": "Cut stud hole", "type": "extrude", "sketch": 7, "start": -1, "length": 13, "mode": "remove"},
+    {"id": 9, "name": "Gap's root", "type": "fillet", "edges": {"any": [{"between": ["f4:start", "f4:side.0"]}, {"between": ["f4:start", "f4:side.2"]}]}, "radius": "r"},
+    {"id": 10, "name": "Pin hole's edges", "type": "chamfer", "edges": {"radius": "pin / 2"}, "distance": "c"}
+  ],
+  "always": {
+    "volume": "(2 * R * (H - R) + pi * R^2 / 2) * W - gap * (2 * R * (H - R) + pi * R^2 / 2 - 2 * R * base) - pi * (pin / 2)^2 * (W - gap) - pi * (stud / 2)^2 * 12 + 2 * (1 - pi / 4) * r^2 * (2 * R) - 4 * 2 * pi * (pin / 2 + c / 3) * c^2 / 2",
+    "genus": [2],
+    "bounds": [["-R", "-W", 0], ["R", 0, "H"]]
+  },
+  "changes": [{"set": {"gap": 14}}, {"set": {"W": 36}}, {"set": {"base": 24}}]
+}

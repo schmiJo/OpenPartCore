@@ -1,0 +1,42 @@
+{
+  "name": "Cam",
+  "kind": "cam",
+  "parameters": {"R": 30, "r": 10, "lift": 35, "F": 12, "bore": 16, "key": 5, "c": 1},
+  "steps": [
+    {"id": 1, "name": "Outline", "type": "constrained_sketch", "sketch": {
+      "format": "coreshape-sketch", "version": 1,
+      "entities": [
+        {"id": 1, "type": "arc", "center": [0, 0], "radius": 30, "start": [-24.6, 17.1], "end": [24.6, 17.1]},
+        {"id": 2, "type": "line", "start": [24.6, 17.1], "end": [8.2, 40.7]},
+        {"id": 3, "type": "arc", "center": [0, 35], "radius": 10, "start": [8.2, 40.7], "end": [-8.2, 40.7]},
+        {"id": 4, "type": "line", "start": [-8.2, 40.7], "end": [-24.6, 17.1]}
+      ],
+      "constraints": [
+        {"id": 1, "type": "coincident", "a": "1.end", "b": "2.start"},
+        {"id": 2, "type": "coincident", "a": "2.end", "b": "3.start"},
+        {"id": 3, "type": "coincident", "a": "3.end", "b": "4.start"},
+        {"id": 4, "type": "coincident", "a": "4.end", "b": "1.start"},
+        {"id": 5, "type": "tangent", "a": "1", "b": "2"},
+        {"id": 6, "type": "tangent", "a": "2", "b": "3"},
+        {"id": 7, "type": "tangent", "a": "3", "b": "4"},
+        {"id": 8, "type": "tangent", "a": "4", "b": "1"},
+        {"id": 9, "type": "coincident", "a": "1.center", "b": "origin"},
+        {"id": 10, "type": "coincident", "a": "3.center", "b": "y_axis"},
+        {"id": 11, "type": "radius", "of": "1", "value": "R"},
+        {"id": 12, "type": "radius", "of": "3", "value": "r"},
+        {"id": 13, "type": "vertical_distance", "a": "1.center", "b": "3.center", "value": "lift"}
+      ]
+    }},
+    {"id": 2, "name": "Plate", "type": "extrude", "sketch": 1, "length": "F"},
+    {"expect": {"genus": [0]}},
+    {"id": 3, "name": "Bore and keyway", "type": "sketch", "regions": [{"outer": {"type": "path", "start": ["bore / 2 * cos(asin(key / bore))", "-key / 2"], "moves": [
+       {"line_to": ["bore / 2 + 2.3", "-key / 2"]},
+       {"line_to": ["bore / 2 + 2.3", "key / 2"]},
+       {"line_to": ["bore / 2 * cos(asin(key / bore))", "key / 2"]},
+       {"arc_to": ["bore / 2 * cos(asin(key / bore))", "-key / 2"], "center": [0, 0], "ccw": true}]}}]},
+    {"id": 4, "name": "Cut bore", "type": "extrude", "sketch": 3, "start": -1, "length": "F + 2", "mode": "remove"},
+    {"id": 5, "name": "All round, both sides", "type": "chamfer", "edges": {"any": [{"between": ["f2:start", "f2:side.1"]}, {"between": ["f2:end", "f2:side.1"]}]}, "distance": "c"}
+  ],
+  "always": {"genus": [1], "bounds": [["-R", "-R", 0], ["R", "lift + r", "F"]]},
+  "changes": [{"set": {"lift": 40}}, {"set": {"r": 12}}, {"set": {"F": 16}}]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "Spur gear",
+  "kind": "gear",
+  "parameters": {"z": 24, "m": 3, "F": 20, "hub": 18, "hubh": 12, "bore": 16, "key": 5, "r": 3},
+  "steps": [
+    {"id": 1, "name": "Blank", "type": "sketch", "regions": [{"outer": {"type": "circle", "r": "m * (z + 2) / 2"}}]},
+    {"id": 2, "name": "Blank solid", "type": "extrude", "sketch": 1, "length": "F"},
+    {"id": 3, "name": "Space between two teeth", "type": "sketch", "plane": {"origin": [0, 0, -1]},
+     "regions": [{"outer": {"type": "path", "start": ["m * (z - 2.5) / 2", "-0.45 * m"], "moves": [
+       {"spline_through": [["m * z / 2", "-0.78 * m"], ["m * (z + 2) / 2 + 1", "-1.0 * m"]]},
+       {"line_to": ["m * (z + 2) / 2 + 1", "1.0 * m"]},
+       {"spline_through": [["m * z / 2", "0.78 * m"], ["m * (z - 2.5) / 2", "0.45 * m"]]}]}}]},
+    {"id": 4, "name": "Cut it", "type": "extrude", "sketch": 3, "length": "F + 2", "mode": "remove"},
+    {"id": 5, "name": "All the teeth", "type": "pattern", "of": [4], "count": "z"},
+    {"id": 6, "name": "Hub outline", "type": "sketch", "plane": {"origin": [0, 0, "F"], "on_face": "f2:end"}, "regions": [{"outer": {"type": "circle", "r": "hub"}}]},
+    {"id": 7, "name": "Hub", "type": "extrude", "sketch": 6, "length": "hubh"},
+    {"id": 8, "name": "Bore and keyway", "type": "sketch", "regions": [{"outer": {"type": "path", "start": ["bore / 2 * cos(asin(key / bore))", "-key / 2"], "moves": [
+       {"line_to": ["bore / 2 + 2.3", "-key / 2"]},
+       {"line_to": ["bore / 2 + 2.3", "key / 2"]},
+       {"line_to": ["bore / 2 * cos(asin(key / bore))", "key / 2"]},
+       {"arc_to": ["bore / 2 * cos(asin(key / bore))", "-key / 2"], "center": [0, 0], "ccw": true}]}}]},
+    {"id": 9, "name": "Cut bore", "type": "extrude", "sketch": 8, "start": -1, "length": "F + hubh + 2", "mode": "remove"},
+    {"id": 10, "name": "Hub's root", "type": "fillet", "edges": {"between": ["f7:side.0", "f2:end"]}, "radius": "r"}
+  ],
+  "always": {"genus": [1], "bounds": [["-m * (z + 2) / 2", "-m * (z + 2) / 2", 0], ["m * (z + 2) / 2", "m * (z + 2) / 2", "F + hubh"]]},
+  "changes": [{"set": {"F": 25}}, {"set": {"z": 30}}, {"set": {"bore": 20}}]
+}

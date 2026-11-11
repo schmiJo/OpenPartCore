@@ -1,0 +1,21 @@
+{
+  "name": "Hex nut M10",
+  "kind": "fastener",
+  "parameters": {"AF": 16, "H": 8.4, "minor": 8.5, "major": 10, "p": 1.5},
+  "steps": [
+    {"id": 1, "name": "Hexagon", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [
+      ["AF / sqrt(3) * cos(0)", "AF / sqrt(3) * sin(0)"], ["AF / sqrt(3) * cos(60)", "AF / sqrt(3) * sin(60)"], ["AF / sqrt(3) * cos(120)", "AF / sqrt(3) * sin(120)"],
+      ["AF / sqrt(3) * cos(180)", "AF / sqrt(3) * sin(180)"], ["AF / sqrt(3) * cos(240)", "AF / sqrt(3) * sin(240)"], ["AF / sqrt(3) * cos(300)", "AF / sqrt(3) * sin(300)"]]},
+      "holes": [{"type": "circle", "r": "minor / 2"}]}]},
+    {"id": 2, "name": "Blank", "type": "extrude", "sketch": 1, "length": "H"},
+    {"expect": {"volume": "(sqrt(3) / 2 * AF^2 - pi * (minor / 2)^2) * H", "genus": [1]}},
+    {"id": 3, "name": "Top chamfer", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["0.95 * AF / 2", "H"], ["AF / sqrt(3) + 1", "H"], ["AF / sqrt(3) + 1", "H - (AF / sqrt(3) + 1 - 0.95 * AF / 2) * tan(30)"]]}}]},
+    {"id": 4, "name": "Turn it off", "type": "revolve", "sketch": 3, "mode": "remove"},
+    {"id": 5, "name": "Bottom chamfer", "type": "sketch", "regions": [{"outer": {"type": "polygon", "points": [["0.95 * AF / 2", 0], ["AF / sqrt(3) + 1", "(AF / sqrt(3) + 1 - 0.95 * AF / 2) * tan(30)"], ["AF / sqrt(3) + 1", 0]]}}]},
+    {"id": 6, "name": "Turn it off", "type": "revolve", "sketch": 5, "mode": "remove"},
+    {"id": 7, "name": "Thread groove", "type": "sketch", "plane": {"z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "polygon", "points": [["minor / 2 - 0.1", "-p - 0.45 * p"], ["major / 2 + 0.1", "-p"], ["minor / 2 - 0.1", "-p + 0.45 * p"]]}}]},
+    {"id": 8, "name": "Cut the thread", "type": "helix", "sketch": 7, "pitch": "p", "turns": "(H + 2 * p) / p", "mode": "remove"}
+  ],
+  "always": {"genus": [1], "bounds": [["-AF * 0.95 / 2 * 1.2", "-AF / 2", 0], ["AF * 0.95 / 2 * 1.2", "AF / 2", "H"]], "bounds_tolerance": 0.8},
+  "changes": [{"set": {"H": 10}}]
+}

@@ -318,6 +318,35 @@ fn the_first_end_of_a_new_mate_does_the_moving() {
 }
 
 #[test]
+fn a_new_mate_that_leaves_a_turn_free_comes_to_rest_at_zero() {
+    // The shaft has to turn over to get to its bearing, and how it gets there leaves it at some angle or other.
+    let (mut p, studio, assembly, parts) = project(vec![block("10", "10", "10"), block("10", "10", "90")]);
+    let (a, b) = (instance(&mut p, assembly, studio, parts[0], "Bearing"), instance(&mut p, assembly, studio, parts[1], "Shaft"));
+    p.assembly_mut(assembly).unwrap().instance_mut(a).unwrap().fixed = true;
+    let on_shaft = Anchor::Frame(Frame::new(v3(5.0, 5.0, 45.0), Vec3::Z, Vec3::X));
+    let on_bearing = Anchor::Frame(Frame::new(v3(5.0, 5.0, 5.0), v3(0.3, 0.8, 0.5), Vec3::X));
+    let asm = p.assembly_mut(assembly).unwrap();
+    let (ca, cb) = (asm.add_connector(vec![b], on_shaft).unwrap(), asm.add_connector(vec![a], on_bearing).unwrap());
+    let m = asm.add_mate(MateKind::Revolute, ca, cb).unwrap();
+    let solved = p.solve_new_mate(assembly, m, &[b]).unwrap();
+    assert!(solved.failing.is_empty());
+    assert!(value(&solved, m, Dof::Angle).abs() < 1e-6, "{}", value(&solved, m, Dof::Angle));
+    assert_eq!(solved.freedom, 1);
+}
+
+#[test]
+fn a_new_mate_doesnt_swing_what_something_else_holds() {
+    // The crank press's last mate closes a loop, and the mechanism stays where it was rather than going to dead center.
+    let mut s = slider_crank();
+    s.p.solve(s.assembly).unwrap();
+    s.p.set_mate_value(s.assembly, s.crank_joint, Dof::Angle, 60.0).unwrap();
+    let last = s.p.assembly(s.assembly).unwrap().mates.iter().find(|m| m.id != s.crank_joint && m.kind == MateKind::Revolute).unwrap().id;
+    let first = s.p.assembly(s.assembly).unwrap().instances[2].id;
+    let solved = s.p.solve_new_mate(s.assembly, last, &[first]).unwrap();
+    assert!((value(&solved, s.crank_joint, Dof::Angle) - 60.0).abs() < 1e-6, "{}", value(&solved, s.crank_joint, Dof::Angle));
+}
+
+#[test]
 fn what_isnt_mated_stays_where_it_is() {
     let (mut p, studio, assembly, parts) = project(vec![block("10", "10", "10"), block("10", "10", "10"), block("10", "10", "10")]);
     let (a, b, c) = (instance(&mut p, assembly, studio, parts[0], "A"), instance(&mut p, assembly, studio, parts[1], "B"), instance(&mut p, assembly, studio, parts[2], "C"));

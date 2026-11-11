@@ -649,14 +649,12 @@ fn intersect_faces(
             }
         }
     }
+    // A curve is cut where it crosses another, wherever that is. Where the surfaces just touch, no piece can run through it,
+    // and if it's off these faces, nothing uses the vertex.
     for x in crossings {
-        if index[0].locate_on_face(fa, x, 2.0 * TOL) != FaceLoc::Outside
-            && index[1].locate_on_face(fb, x, 2.0 * TOL) != FaceLoc::Outside
-        {
-            let v = arr.vertex(x);
-            if !candidates.contains(&v) {
-                candidates.push(v);
-            }
+        let v = arr.vertex(x);
+        if !candidates.contains(&v) {
+            candidates.push(v);
         }
     }
 
