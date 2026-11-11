@@ -3,3 +3,4 @@
 *.stl
 *.step
 !/docs/**
+__pycache__/
