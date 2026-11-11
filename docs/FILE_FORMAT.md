@@ -75,7 +75,7 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
 | `loft` | `sections`, in order, each a sketch id, for a sketch holding one outline, or a region `{"sketch": 2, "region": "r..."}`, so that one sketch with several outlines can feed it, and `mode`. Straight between two, and a smooth cubic through three or more. A region that has gone fails the feature, saying what's there |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. Optionally `regions`, as an extrude has them: see [below](#extrude-regions-and-ends) |
-| `sweep` | `sketch`, `path`, `mode`: see below |
+| `sweep` | `sketch`, `path`, `mode`. `path` is a list of steps, `{"sketch": 5}` or `{"edges": selection}`: see below |
 | `helix` | `sketch`, `pitch` (how far along the axis one turn goes), `turns`, `point` (default origin) and `axis` (default +z) for the axis, `left_handed` (default false), `mode`. The sketch can hold the axis, for a spring or a thread, or lie across it, for a twisted bar |
 | `solid` | `shape`, its dimensions, `at` (default XY), `mode` |
 | `pattern` | `of` (feature ids, which can be other patterns and mirrors; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. |
@@ -104,10 +104,17 @@ where each part has a default: the origin, world Z, and world X (world Y if z ru
 Solids: `box` (`dx dy dz`), `cylinder` (`radius height`), `cone` (`r0 r1 height`), `sphere` (`radius`),
 `torus` (`major minor`).
 
-**Sweep paths** start at the sketch plane heading along its normal, and each step carries on from the direction
-the last ended in, so a path is always smooth. A step is `{"line": length}`, or `{"arc_radius": r, "degrees": a,
-"toward_degrees": d}`, a bend around a center `r` away in the direction `d` degrees counter-clockwise from the
-sketch's x axis. Bends must stay wider than the profile, or the profile would cross the center.
+**Sweep paths** are one of three things:
+
+| `path` | Goes along |
+|---|---|
+| `[{"line": 10}, {"arc_radius": 5, "degrees": 90, "toward_degrees": 0}, ...]` | Steps from the sketch plane, heading along its normal. Each step carries on from the direction the last ended in, so a path is always smooth. A step is `{"line": length}`, or `{"arc_radius": r, "degrees": a, "toward_degrees": d}`, a bend around a center `r` away in the direction `d` degrees counter-clockwise from the sketch's x axis |
+| `{"sketch": 5}` | That sketch's curves, end to end: its open curves, or if it has none, the outline of its one region. A constrained sketch's open curves are allowed when a sweep uses it as a path |
+| `{"edges": {"on_face": "f2:end"}}` | Those edges of a part, end to end, picked by any [edge selection](#edge-selections) |
+
+Along a sketch's curves or a part's edges, as Onshape's sweep does, the pieces can come in any order and run either way. The profile goes along the path from its end in the profile's plane, or if the path is closed, from where it crosses that plane nearest the profile, so a closed path makes a ring with no ends. The profile keeps its place across the path and stays square to it, so it has to be drawn square to the path where that starts, but needn't be centred on it. The path has to be smooth, made of lines and arcs. What doesn't fit is refused, saying what and where: a path that starts off the profile's plane or leaves it at a slant, a corner, a spline or ellipse, and pieces that branch or don't join.
+
+In every form, bends must stay wider than the profile, or the profile would cross the center. Faces are named from the profile, as a sweep's always were: `f6:side.N`, and `f6:start` and `f6:end` for the ends.
 
 **Copies keep names.** A face in a pattern's or mirror's copy has the name of the face it came from, so `f2:end` covers
 the original and every copy, and a fillet between two named faces applies to them all. To pick one, use a [face key](#face-keys).

@@ -15,7 +15,7 @@
 
 use coreshape::blend::{chamfer_with, fillet_with, BlendOptions};
 use coreshape::boolean::{intersect, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
-use coreshape::multi::{boolean_many, merged_tools, sweep, PathStep};
+use coreshape::multi::{boolean_many, merged_tools, sweep, sweep_along, PathCurve, PathStep};
 use coreshape::build::{
     box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus, SLOT_END_CAP, SLOT_SEG_BASE, SLOT_START_CAP,
 };
@@ -24,6 +24,7 @@ use coreshape::math::*;
 use coreshape::profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
 use coreshape::spline::Spline;
 use coreshape::surface::Surface;
+use coreshape::curve::Curve;
 use coreshape::topo::{Body, FaceTag};
 use coreshape::delete::delete_faces;
 use coreshape::helix::{helix, Helix};
@@ -715,9 +716,9 @@ pub enum Op {
     /// A solid through sections in order, each a sketch holding one outline or one region of a sketch, with free-form sides.
     /// Straight between two sections, and a smooth cubic through three or more. Sides are named from the first section.
     Loft { sections: Vec<LoftSection>, mode: Mode },
-    /// Sweeps a sketch along a smooth path of lines and arcs, starting at the sketch plane and
-    /// heading along its normal.
-    Sweep { sketch: FeatureId, path: Vec<SweepStep>, mode: Mode },
+    /// Sweeps a sketch along a smooth path of lines and arcs: steps from the sketch plane, heading along its normal, or a
+    /// sketch's curves, or a part's edges. See `SweepPath`.
+    Sweep { sketch: FeatureId, path: SweepPath, mode: Mode },
     /// Sweeps a sketch along a helix around the axis through `point`: a spring, a thread or a twisted bar. `pitch` is how
     /// far along the axis one turn goes. The sides are named from the sketch, and the ends are the start and end caps.
     Helix { sketch: FeatureId, point: Point3, axis: Point3, pitch: Expr, turns: Expr, left_handed: bool, mode: Mode },
@@ -844,6 +845,17 @@ pub enum SweepStep {
     Arc { radius: Expr, degrees: Expr, toward_degrees: Expr },
 }
 
+/// What a sweep goes along.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SweepPath {
+    /// Steps from the sketch plane, heading along its normal, each carrying on from where the last ended.
+    Steps(Vec<SweepStep>),
+    /// The curves of a sketch, end to end: its open curves, or else the outline of its one region.
+    Sketch(FeatureId),
+    /// Edges of a part, end to end.
+    Edges(EdgeSelect),
+}
+
 /// Where a pattern's copies go. `count` includes the original.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternPath {
@@ -944,6 +956,11 @@ impl Op {
         matches!(self, Op::Transform { .. } | Op::Thicken { .. } | Op::CopyFaces { .. } | Op::Sew { .. } | Op::Trim { .. })
     }
 
+    /// Whether this uses a sketch's open curves: to make a surface from, or as a sweep's path.
+    fn uses_open_curves_of(&self, id: FeatureId) -> bool {
+        self.surface_from() == Some(id) || matches!(self, Op::Sweep { path: SweepPath::Sketch(along), .. } if *along == id)
+    }
+
     /// The sketch this makes a surface from, whose open curves it can use.
     fn surface_from(&self) -> Option<FeatureId> {
         match self {
@@ -1007,7 +1024,15 @@ impl Op {
                 out.push(*sketch);
                 out.extend(regions.iter().map(|r| r.sketch));
             }
-            Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } => out.push(*sketch),
+            Op::Sweep { sketch, path, .. } => {
+                out.push(*sketch);
+                match path {
+                    SweepPath::Steps(_) => {}
+                    SweepPath::Sketch(id) => out.push(*id),
+                    SweepPath::Edges(edges) => edges.references(&mut out),
+                }
+            }
+            Op::Helix { sketch, .. } | Op::Fill { sketch } => out.push(*sketch),
             Op::Loft { sections, .. } => out.extend(sections.iter().map(|s| s.sketch)),
             Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
             Op::Trim { tool: TrimTool::Body(body), .. } => out.push(body.feature),
@@ -1132,14 +1157,18 @@ impl Op {
                 out.extend([pitch, turns]);
             }
             Op::Thicken { thickness, .. } => out.push(thickness),
-            Op::Sweep { path, .. } => {
-                for step in path {
-                    match step {
-                        SweepStep::Line { length } => out.push(length),
-                        SweepStep::Arc { radius, degrees, toward_degrees } => out.extend([radius, degrees, toward_degrees]),
+            Op::Sweep { path, .. } => match path {
+                SweepPath::Steps(steps) => {
+                    for step in steps {
+                        match step {
+                            SweepStep::Line { length } => out.push(length),
+                            SweepStep::Arc { radius, degrees, toward_degrees } => out.extend([radius, degrees, toward_degrees]),
+                        }
                     }
                 }
-            }
+                SweepPath::Sketch(_) => {}
+                SweepPath::Edges(edges) => edges.collect_exprs(&mut out),
+            },
             Op::Pattern { along, .. } => match along {
                 PatternPath::Linear { direction, count, spacing } => {
                     out.extend(direction.iter());
@@ -1973,6 +2002,7 @@ impl Document {
         let list: Vec<FeatureId> = match op {
             Op::Extrude { sketch, regions, .. } => sketch.iter().copied().chain(regions.iter().map(|r| r.sketch)).collect(),
             Op::Revolve { sketch, regions, .. } => std::iter::once(*sketch).chain(regions.iter().map(|r| r.sketch)).collect(),
+            Op::Sweep { sketch, path: SweepPath::Sketch(along), .. } => vec![*sketch, *along],
             Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } => vec![*sketch],
             Op::Loft { sections, .. } => sections.iter().map(|s| s.sketch).collect(),
             _ => Vec::new(),
@@ -2125,7 +2155,7 @@ impl Document {
                 }
             }
             // A constrained sketch's open curves are refused unless a surface is what they're for.
-            if matches!(feature.op, Op::ConstrainedSketch { .. }) && self.features.iter().any(|f| f.op.surface_from() == Some(feature.id)) {
+            if matches!(feature.op, Op::ConstrainedSketch { .. }) && self.features.iter().any(|f| f.op.uses_open_curves_of(feature.id)) {
                 own.push_str(" for a surface");
             }
             // The bodies it acts on: those it names, or all of them. One that isn't there is for it to say so.
@@ -2147,8 +2177,9 @@ impl Document {
             // sketch or what it copies when it has them. A new body needs nothing from the others, unless it's made
             // from their faces.
             let makes_its_own = |f: &FeatureId| self.feature(*f).is_some_and(|g| matches!(g.op.mode(), Some(Mode::NewBody | Mode::Surface)));
-            // So does one made from faces, which can be on any part.
-            let looks_around = matches!(&feature.op, Op::Extrude { end, faces, .. } if *end != ExtrudeEnd::Blind || !faces.is_empty());
+            // So does one made from faces or edges, which can be on any part.
+            let looks_around = matches!(&feature.op, Op::Extrude { end, faces, .. } if *end != ExtrudeEnd::Blind || !faces.is_empty())
+                || matches!(&feature.op, Op::Sweep { path: SweepPath::Edges(_), .. });
             let independent = match &feature.op {
                 Op::Thicken { .. } => false,
                 _ if looks_around => false,
@@ -2188,6 +2219,7 @@ impl Document {
                     let sketches: Vec<FeatureId> = std::iter::once(*sketch).chain(regions.iter().map(|r| r.sketch)).collect();
                     hash_text(body_key ^ mixed(&sketches), &own)
                 }
+                Op::Sweep { sketch, path: SweepPath::Sketch(along), .. } => hash_text(body_key ^ mixed(&[*sketch, *along]), &own),
                 Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
                 Op::Loft { sections, .. } => hash_text(body_key ^ mixed(&sections.iter().map(|s| s.sketch).collect::<Vec<_>>()), &own),
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
@@ -2283,7 +2315,7 @@ impl Document {
             Op::ConstrainedSketch { plane, sketch } => {
                 let solved = sketch.solve_with(env).map_err(|e| Error::InvalidProfile(e.message))?;
                 // Curves that close nothing are refused, unless a surface is going to sweep them.
-                let open = if self.features.iter().any(|f| f.op.surface_from() == Some(feature.id)) { open_chains(&solved.sketch.arrangement()) } else { Vec::new() };
+                let open = if self.features.iter().any(|f| f.op.uses_open_curves_of(feature.id)) { open_chains(&solved.sketch.arrangement()) } else { Vec::new() };
                 for wire in &open {
                     wire.check_open()?;
                 }
@@ -2461,7 +2493,20 @@ impl Document {
             }
             Op::Sweep { sketch, path, mode } => {
                 let SketchOutput { frame, profiles: list, by_entity, .. } = sketch_output(sketch)?;
-                let steps = path
+                let along: Option<Vec<PathCurve>> = match path {
+                    SweepPath::Steps(_) => None,
+                    SweepPath::Sketch(id) => Some(path_from_sketch(*id, &sketch_output(id)?)?),
+                    SweepPath::Edges(query) => {
+                        let everything = whole().ok_or_else(|| Error::InvalidInput("a sweep along edges needs a part to take them from".into()))?;
+                        Some(path_from_edges(&everything, &select_edges(query, &everything, env)?)?)
+                    }
+                };
+                let no_steps = Vec::new();
+                let steps = match path {
+                    SweepPath::Steps(steps) => steps,
+                    _ => &no_steps,
+                };
+                let steps = steps
                     .iter()
                     .map(|step| {
                         Ok(match step {
@@ -2477,7 +2522,13 @@ impl Document {
                 let tools = list
                     .iter()
                     .enumerate()
-                    .map(|(k, p)| Ok(with_region(sweep(p, &frame, &steps, tag)?, if by_entity { 0 } else { k as u32 })))
+                    .map(|(k, p)| {
+                        let made = match &along {
+                            Some(pieces) => sweep_along(p, &frame, pieces, tag)?,
+                            None => sweep(p, &frame, &steps, tag)?,
+                        };
+                        Ok(with_region(made, if by_entity { 0 } else { k as u32 }))
+                    })
                     .collect::<Result<Vec<Body>>>()?;
                 applied(tools, *mode)
             }
@@ -3129,6 +3180,59 @@ fn with_region(mut body: Body, region: u32) -> Body {
         }
     }
     body
+}
+
+/// A sketch's curves as a sweep's path, in space: its open curves, or else the outline of its one region.
+fn path_from_sketch(id: FeatureId, out: &SketchOutput) -> Result<Vec<PathCurve>> {
+    let outlines: usize = out.profiles.iter().map(|p| 1 + p.holes.len()).sum();
+    if !out.open.is_empty() && outlines > 0 {
+        return Err(Error::InvalidInput(format!("a sweep's path is one chain of curves, and f{} has {outlines} closed outline(s) as well as open curves", id.0)));
+    }
+    if out.open.is_empty() && outlines != 1 {
+        return Err(Error::InvalidInput(format!("a sweep's path is one chain of curves, and f{} has {outlines} closed outlines", id.0)));
+    }
+    let wires: Vec<&Wire> = if out.open.is_empty() { vec![&out.profiles[0].outer] } else { out.open.iter().collect() };
+    let f = &out.frame;
+    let mut pieces = Vec::new();
+    for seg in wires.iter().flat_map(|w| &w.segs) {
+        pieces.push(match seg.geom {
+            SegGeom::Line { a, b } => PathCurve::Line { from: f.point(a.x, a.y, 0.0), to: f.point(b.x, b.y, 0.0) },
+            SegGeom::Arc { center, radius, a0, a1 } => PathCurve::Arc {
+                center: f.point(center.x, center.y, 0.0),
+                axis: if a1 > a0 { f.z } else { -f.z },
+                from: f.point(center.x + radius * a0.cos(), center.y + radius * a0.sin(), 0.0),
+                angle: (a1 - a0).abs(),
+            },
+            SegGeom::Spline(_) => {
+                return Err(Error::InvalidInput(format!("a sweep's path can be lines and arcs for now, and f{} has a spline or an ellipse in it", id.0)))
+            }
+        });
+    }
+    Ok(pieces)
+}
+
+/// A part's edges as a sweep's path.
+fn path_from_edges(body: &Body, edges: &[usize]) -> Result<Vec<PathCurve>> {
+    edges
+        .iter()
+        .map(|&e| {
+            let edge = &body.edges[e];
+            let (a, b) = (body.vertices[edge.v0], body.vertices[edge.v1]);
+            match &edge.curve {
+                Curve::Line { .. } => Ok(PathCurve::Line { from: a, to: b }),
+                Curve::Circle { frame, .. } => Ok(PathCurve::Arc { center: frame.origin, axis: frame.z, from: a, angle: edge.t1 - edge.t0 }),
+                other => {
+                    let m = edge.eval_mid();
+                    let kind = match other {
+                        Curve::Ellipse { .. } => "an ellipse",
+                        Curve::Spline(_) => "a spline",
+                        _ => "an intersection curve",
+                    };
+                    Err(Error::InvalidInput(format!("a sweep's path can be lines and arcs for now, and the edge through ({:.3}, {:.3}, {:.3}) is {kind}", m.x, m.y, m.z)))
+                }
+            }
+        })
+        .collect()
 }
 
 /// An extruded face's walls and ends, named for it. A wall swept from segment `id` is `wall.entry`, holding the faces
@@ -3903,21 +4007,7 @@ pub fn op_value(op: &Op) -> Value {
         Op::Sweep { sketch, path, mode } => Value::obj(vec![
             ("type", Value::str("sweep")),
             ("sketch", Value::Num(sketch.0 as f64)),
-            (
-                "path",
-                Value::Arr(
-                    path.iter()
-                        .map(|step| match step {
-                            SweepStep::Line { length } => Value::obj(vec![("line", expr_value(length))]),
-                            SweepStep::Arc { radius, degrees, toward_degrees } => Value::obj(vec![
-                                ("arc_radius", expr_value(radius)),
-                                ("degrees", expr_value(degrees)),
-                                ("toward_degrees", expr_value(toward_degrees)),
-                            ]),
-                        })
-                        .collect(),
-                ),
-            ),
+            ("path", sweep_path_value(path)),
             ("mode", mode_value(*mode)),
         ]),
         Op::Pattern { of, along } => {
@@ -4014,6 +4104,25 @@ pub fn op_value(op: &Op) -> Value {
 
 fn face_list_value(list: &[FaceRef]) -> Value {
     Value::Arr(list.iter().map(|f| Value::str(f.name())).collect())
+}
+
+/// A sweep's path: a list of steps, `{"sketch": 5}` or `{"edges": selection}`.
+fn sweep_path_value(path: &SweepPath) -> Value {
+    match path {
+        SweepPath::Steps(steps) => Value::Arr(
+            steps
+                .iter()
+                .map(|step| match step {
+                    SweepStep::Line { length } => Value::obj(vec![("line", expr_value(length))]),
+                    SweepStep::Arc { radius, degrees, toward_degrees } => {
+                        Value::obj(vec![("arc_radius", expr_value(radius)), ("degrees", expr_value(degrees)), ("toward_degrees", expr_value(toward_degrees))])
+                    }
+                })
+                .collect(),
+        ),
+        SweepPath::Sketch(id) => Value::obj(vec![("sketch", Value::Num(id.0 as f64))]),
+        SweepPath::Edges(edges) => Value::obj(vec![("edges", edge_select_value(edges))]),
+    }
 }
 
 fn key_list_value(list: &[FaceKey]) -> Value {
@@ -4284,8 +4393,21 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
         }
         "sweep" => {
             with(&["type", "sketch", "path", "mode"])?;
+            let given = field(v, "path", "a sweep")?;
+            if given.as_array().is_none() {
+                let path = if given.get("sketch").is_some() {
+                    known_keys(given, &["sketch"])?;
+                    SweepPath::Sketch(read_sketch_id(given)?)
+                } else if let Some(edges) = given.get("edges") {
+                    known_keys(given, &["edges"])?;
+                    SweepPath::Edges(read_edge_select(edges)?)
+                } else {
+                    return Err(Error::InvalidInput("a sweep's path is a list of steps, {\"sketch\": 5} or {\"edges\": selection}".into()));
+                };
+                return Ok(Op::Sweep { sketch: read_sketch_id(v)?, path, mode: read_mode(v)? });
+            }
             let mut path = Vec::new();
-            for step in field(v, "path", "a sweep")?.as_array().ok_or_else(|| Error::InvalidInput("a sweep's path must be a list".into()))? {
+            for step in given.as_array().unwrap_or_default() {
                 if let Some(length) = step.get("line") {
                     known_keys(step, &["line"])?;
                     path.push(SweepStep::Line { length: read_expr(length)? });
@@ -4300,7 +4422,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                     return Err(Error::InvalidInput("a sweep step is {\"line\": length} or {\"arc_radius\": r, \"degrees\": a, \"toward_degrees\": d}".into()));
                 }
             }
-            Ok(Op::Sweep { sketch: read_sketch_id(v)?, path, mode: read_mode(v)? })
+            Ok(Op::Sweep { sketch: read_sketch_id(v)?, path: SweepPath::Steps(path), mode: read_mode(v)? })
         }
         "pattern" => {
             let of = read_ids(v)?;

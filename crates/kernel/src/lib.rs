@@ -50,7 +50,7 @@ pub use mass::{mass_properties, MassProps};
 pub use math::{v2, v3, Aabb, Frame, Mirror, Rng, Vec2, Vec3, MAX_COORD, MIN_FEATURE, PI, TAU, TOL};
 pub use profile::{PathBuilder, Profile, Seg, SegGeom, Wire};
 pub use radii::{fillet_radii, Radius};
-pub use multi::{boolean_many, compound, merged_tools, sweep, PathStep};
+pub use multi::{boolean_many, compound, merged_tools, sweep, sweep_along, PathCurve, PathStep};
 pub use spline::{FacePiece, PlaneCurve, Spline};
 pub use surface::{Chart, Surface};
 pub use tess::{tessellate, Mesh, TessParams};

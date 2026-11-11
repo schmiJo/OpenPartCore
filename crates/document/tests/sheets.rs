@@ -150,7 +150,7 @@ fn a_sweep_a_loft_and_a_helix_make_sides_without_ends() {
     // A circle along a straight path is a tube.
     let mut doc = Document::new();
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, 3.0))]));
-    doc.with(Op::Sweep { sketch: s, path: vec![SweepStep::Line { length: 10.0.into() }], mode: Mode::Surface });
+    doc.with(Op::Sweep { sketch: s, path: SweepPath::Steps(vec![SweepStep::Line { length: 10.0.into() }]), mode: Mode::Surface });
     let o = ok(&mut doc);
     assert!(o.bodies[0].body.sheet);
     near(area_of(&o, 0), TAU * 3.0 * 10.0, "a sweep");

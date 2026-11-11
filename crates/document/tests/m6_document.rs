@@ -857,11 +857,11 @@ fn a_sweep_feature_follows_its_path_and_saves() {
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, 3.0).clone()).hole(Shape::circle(0.0, 0.0, 2.0))]));
     let sw = doc.with(Op::Sweep {
         sketch: s,
-        path: vec![
+        path: SweepPath::Steps(vec![
             SweepStep::Line { length: 10.0.into() },
             SweepStep::Arc { radius: "bend".into(), degrees: 90.0.into(), toward_degrees: 0.0.into() },
             SweepStep::Line { length: 10.0.into() },
-        ],
+        ]),
         mode: Mode::Add,
     });
     let want = |bend: f64| PI * 5.0 * (20.0 + bend * PI / 2.0);

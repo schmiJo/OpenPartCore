@@ -451,7 +451,10 @@ An extrude can pick regions from any constrained sketches, and end through all, 
 
 ## Sweeps
 
-- **The path is lines and arcs,** and each step carries on from the last one's direction, so there are no corners or free curves. A helix is its own feature: see [above](#helix).
+A sweep goes along steps, a sketch's curves or a part's edges: see [FILE_FORMAT.md](FILE_FORMAT.md#features). `crates/document/tests/sweep_paths.rs` holds each against Pappus: the profile's area times how far its centroid goes.
+
+- **The path is lines and arcs, and smooth.** A spline or ellipse in the path is refused, as is a corner, saying where. Onshape follows splines, and mitres or rounds a corner. Here, a path along a block's sharp edges has to be filleted first. A helix is its own feature: see [above](#helix).
+- **The profile stays square to the path,** which is Onshape's default. Keeping the profile's orientation, twisting it, and following a guide curve or a face aren't built. So the profile has to be drawn in a plane square to the path where it starts, with the path's end on that plane, and a slant or a gap is refused, saying by how much.
 - **A bend tighter than the profile is wide is refused,** since the profile would cross the bend's center.
 - **Each step is built separately and joined by a Boolean,** so a path that runs into itself gives the union of its pieces and isn't refused, and it can hit the Boolean's limits above.
 - **Spline profiles along a path have no test of their own.** Free-form sweeps along a free path aren't built.

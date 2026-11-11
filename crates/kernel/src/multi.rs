@@ -260,3 +260,239 @@ pub fn sweep(profile: &Profile, frame: &Frame, path: &[PathStep], feature: u32) 
     }
     Ok(current)
 }
+
+/// One piece of a sweep's path in space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PathCurve {
+    Line { from: Vec3, to: Vec3 },
+    /// From `from`, around `center` by `angle` radians, right-handed about the unit vector `axis`.
+    Arc { center: Vec3, axis: Vec3, from: Vec3, angle: f64 },
+}
+
+impl PathCurve {
+    /// The point a fraction `s` of the way along.
+    pub fn point(&self, s: f64) -> Vec3 {
+        match *self {
+            PathCurve::Line { from, to } => from + (to - from) * s,
+            PathCurve::Arc { center, axis, from, angle } => Frame::rotation(center, axis, angle * s).to_world(from),
+        }
+    }
+
+    pub fn start(&self) -> Vec3 {
+        self.point(0.0)
+    }
+
+    pub fn end(&self) -> Vec3 {
+        self.point(1.0)
+    }
+
+    /// The unit direction of travel a fraction `s` of the way along.
+    pub fn tangent(&self, s: f64) -> Vec3 {
+        match *self {
+            PathCurve::Line { from, to } => (to - from).normalized(),
+            PathCurve::Arc { center, axis, .. } => axis.cross(self.point(s) - center).normalized(),
+        }
+    }
+
+    pub fn length(&self) -> f64 {
+        match *self {
+            PathCurve::Line { from, to } => from.dist(to),
+            PathCurve::Arc { center, from, angle, .. } => center.dist(from) * angle,
+        }
+    }
+
+    pub fn reversed(&self) -> PathCurve {
+        match *self {
+            PathCurve::Line { from, to } => PathCurve::Line { from: to, to: from },
+            PathCurve::Arc { center, axis, angle, .. } => PathCurve::Arc { center, axis: -axis, from: self.end(), angle },
+        }
+    }
+
+    /// The two parts either side of a fraction `s` of the way along.
+    fn split(&self, s: f64) -> (PathCurve, PathCurve) {
+        let p = self.point(s);
+        match *self {
+            PathCurve::Line { from, to } => (PathCurve::Line { from, to: p }, PathCurve::Line { from: p, to }),
+            PathCurve::Arc { center, axis, from, angle } => (PathCurve::Arc { center, axis, from, angle: angle * s }, PathCurve::Arc { center, axis, from: p, angle: angle * (1.0 - s) }),
+        }
+    }
+
+    /// Fractions along where it crosses a plane, as `n . (q - o) = 0`.
+    fn crossings(&self, o: Vec3, n: Vec3) -> Vec<f64> {
+        let mut out = Vec::new();
+        match *self {
+            PathCurve::Line { from, to } => {
+                let (a, b) = (n.dot(from - o), n.dot(to - o));
+                if a != b && a * b <= 0.0 {
+                    out.push(a / (a - b));
+                }
+            }
+            PathCurve::Arc { center, axis, from, angle } => {
+                // n . (center + c cos t + (axis x c) sin t - o), with c from the center to the start.
+                let c = from - center;
+                let (p, q, r) = (n.dot(c), n.dot(axis.cross(c)), n.dot(center - o));
+                let amp = p.hypot(q);
+                if amp > 0.0 && r.abs() <= amp {
+                    let base = q.atan2(p);
+                    let spread = (-r / amp).acos();
+                    for t in [base + spread, base - spread] {
+                        let t = t.rem_euclid(TAU);
+                        if t <= angle {
+                            out.push(t / angle);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Sweeps a profile drawn in `frame`'s plane along a smooth chain of lines and arcs, in any order and either way round, as
+/// Onshape's sweep does. The profile goes from the end of the path in its plane, or for a closed path from where it crosses
+/// that plane nearest the profile, and stays square to the path, so it has to be drawn square to it there. Straight runs
+/// are extrusions and bends are revolutions, so the surfaces stay exact.
+pub fn sweep_along(profile: &Profile, frame: &Frame, pieces: &[PathCurve], feature: u32) -> Result<Body> {
+    let refuse = |why: String| Error::InvalidInput(format!("sweeping along that path: {why}"));
+    if pieces.is_empty() {
+        return Err(refuse("there's nothing in it".into()));
+    }
+    let size = pieces.iter().map(|c| c.start().norm().max(c.end().norm()) + c.length()).fold(1.0f64, f64::max);
+    let join = 1e-7 * size;
+    let at = |p: Vec3| format!("({:.4}, {:.4}, {:.4})", p.x, p.y, p.z);
+
+    // End to end. Each end meets one other end, or none if it's an end of the whole path.
+    let ends: Vec<Vec3> = pieces.iter().flat_map(|c| [c.start(), c.end()]).collect();
+    let others = |k: usize| -> Vec<usize> { (0..ends.len()).filter(|&j| j != k && ends[j].dist(ends[k]) <= join).collect() };
+    let mut free = Vec::new();
+    for k in 0..ends.len() {
+        match others(k).len() {
+            0 => free.push(k),
+            1 => {}
+            n => return Err(refuse(format!("{} pieces meet at {}, so it branches", n + 1, at(ends[k])))),
+        }
+    }
+    let closed = free.is_empty();
+    if !closed && free.len() != 2 {
+        return Err(refuse(format!("it's in {} pieces that don't join", free.len() / 2)));
+    }
+    let mut chain: Vec<PathCurve> = Vec::with_capacity(pieces.len());
+    let mut used = vec![false; pieces.len()];
+    let mut k = if closed { 0 } else { free[0] };
+    loop {
+        let i = k / 2;
+        used[i] = true;
+        chain.push(if k % 2 == 0 { pieces[i] } else { pieces[i].reversed() });
+        // On from the other end of this piece.
+        let next = others(k ^ 1).into_iter().find(|j| !used[j / 2]);
+        match next {
+            Some(j) => k = j,
+            None => break,
+        }
+    }
+    if used.iter().any(|u| !u) {
+        return Err(refuse(format!("it's in more than one piece: {} of its {} curves don't join the rest", used.iter().filter(|u| !**u).count(), pieces.len())));
+    }
+
+    // Where it starts: the end in the profile's plane, or where a closed one crosses that plane nearest the profile.
+    let (o, n) = (frame.origin, frame.z);
+    let middle = profile_middle(profile, frame);
+    let off = |p: Vec3| n.dot(p - o).abs();
+    if closed {
+        let mut best: Option<(f64, usize, f64)> = None;
+        for (i, c) in chain.iter().enumerate() {
+            for s in c.crossings(o, n) {
+                let d = c.point(s).dist(middle);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, i, s));
+                }
+            }
+        }
+        let (_, i, s) = best.ok_or_else(|| refuse("it's closed and never crosses the profile's plane".into()))?;
+        chain.rotate_left(i);
+        if s > 1e-9 && s < 1.0 - 1e-9 {
+            let (a, b) = chain[0].split(s);
+            chain[0] = b;
+            chain.push(a);
+        } else if s >= 1.0 - 1e-9 {
+            chain.rotate_left(1);
+        }
+    } else {
+        let (first, last) = (chain[0].start(), chain[chain.len() - 1].end());
+        let (a, b) = (off(first), off(last));
+        if b < a - join || (b <= a + join && last.dist(middle) < first.dist(middle)) {
+            chain = chain.iter().rev().map(PathCurve::reversed).collect();
+        }
+    }
+    let start = chain[0].start();
+    if off(start) > join {
+        return Err(refuse(format!(
+            "it starts {:.4} from the profile's plane. The profile goes along the path from its start, so the path has to start in the profile's plane",
+            off(start)
+        )));
+    }
+    let heading = chain[0].tangent(0.0);
+    let square = heading.dot(n).abs();
+    if square < 1.0 - 1e-9 {
+        return Err(refuse(format!(
+            "it leaves the profile's plane at {:.3} degrees from square to it. The profile stays square to the path, so it has to be drawn square to the path where that starts",
+            square.min(1.0).acos().to_degrees()
+        )));
+    }
+    for w in 0..chain.len() - usize::from(!closed) {
+        let (a, b) = (&chain[w], &chain[(w + 1) % chain.len()]);
+        let turn = a.tangent(1.0).dot(b.tangent(0.0)).clamp(-1.0, 1.0).acos();
+        if turn > 1e-6 {
+            return Err(refuse(format!("it turns a corner of {:.3} degrees at {}, and a sweep's path has to be smooth", turn.to_degrees(), at(b.start()))));
+        }
+    }
+
+    // The section starts on the path, square to it, with the profile's x axis, and the profile in its coordinates.
+    let ahead = heading.dot(n) > 0.0;
+    let section = Frame { origin: start, x: frame.x, y: if ahead { frame.y } else { -frame.y }, z: if ahead { n } else { -n } };
+    let shift = frame.to_local(start);
+    let sense = if ahead { 1.0 } else { -1.0 };
+    let moved = mapped_profile(profile, [[1.0, 0.0], [0.0, sense]], v2(-shift.x, -sense * shift.y));
+
+    // Each piece as a step, following the section as `sweep` will.
+    let mut steps = Vec::with_capacity(chain.len());
+    let mut here = section;
+    for c in &chain {
+        match *c {
+            PathCurve::Line { .. } => {
+                let length = c.length();
+                steps.push(PathStep::Line { length });
+                here.origin = here.origin + here.z * length;
+            }
+            PathCurve::Arc { center, angle, .. } => {
+                let to = center - here.origin;
+                let radius = to.norm();
+                let toward = to.dot(here.y).atan2(to.dot(here.x));
+                steps.push(PathStep::Arc { radius, angle, toward });
+                let to_center = here.x * toward.cos() + here.y * toward.sin();
+                let axis = (-to_center).cross(here.z);
+                let spin = Frame::rotation(here.origin + to_center * radius, axis, angle);
+                here = Frame { origin: spin.to_world(here.origin), x: spin.dir_to_world(here.x), y: spin.dir_to_world(here.y), z: spin.dir_to_world(here.z) };
+            }
+        }
+    }
+    let end = chain[chain.len() - 1].end();
+    if here.origin.dist(end) > 1e3 * join {
+        return Err(Error::Internal(format!("following the path's steps ends {:.2e} from its end", here.origin.dist(end))));
+    }
+    sweep(&moved, &section, &steps, feature)
+}
+
+/// Roughly the middle of a profile's outline, in space, for telling which crossing of its plane is nearest it.
+fn profile_middle(profile: &Profile, frame: &Frame) -> Vec3 {
+    let mut sum = v2(0.0, 0.0);
+    let mut count = 0.0;
+    for seg in &profile.outer.segs {
+        for i in 0..8 {
+            sum = sum + seg.at(i as f64 / 8.0);
+            count += 1.0;
+        }
+    }
+    let m = sum * (1.0 / count);
+    frame.point(m.x, m.y, 0.0)
+}
