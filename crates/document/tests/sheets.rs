@@ -340,6 +340,11 @@ fn what_needs_a_solid_refuses_a_sheet_it_names() {
     assert!(fails(&mut doc).contains("needs a solid"));
 
     let (mut doc, f) = setup();
+    let set = |r: f64| RadiusSet { edges: EdgeSelect::OnFace(f.end_cap()), radius: RadiusLaw::Constant(r.into()) };
+    doc.with(Op::FilletRadii { sets: vec![set(1.0)] });
+    assert!(fails(&mut doc).contains("needs a solid"));
+
+    let (mut doc, f) = setup();
     doc.with(Op::chamfer(EdgeSelect::OnFace(f.end_cap()), 1.0));
     assert!(fails(&mut doc).contains("needs a solid"));
 

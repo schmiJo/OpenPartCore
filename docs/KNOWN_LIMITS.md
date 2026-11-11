@@ -84,31 +84,37 @@ Each one is then checked by things that don't depend on this kernel's own answer
 | | Whole | A step refused | Something wrong |
 |---|---|---|---|
 | First run | 46 of 63 | 12 | 5 |
-| Now | 56 of 63 | 5 | 2 |
+| With the real parts' fixes | 56 of 63 | 5 | 2 |
+| With the fillet work too | 59 of 63 | 4 | 0 |
 
-A part is only whole if everything above holds, at its own dimensions and after each change. Of the first run's 5 wrong, 2 were really wrong and are still open, on fillets and chamfers (below), 2 were assemblies coming to rest a degree or so off, now fixed, and 1 was OpenCASCADE's: see the spring below.
+A part is only whole if everything above holds, at its own dimensions and after each change. Of the first run's 5 wrong, 2 were really wrong, on fillets and chamfers, and the fillet work fixed both (below), 2 were assemblies coming to rest a degree or so off, now fixed, and 1 was OpenCASCADE's: see the spring below.
+
+The table's own count for the last row says 1 wrong, the drafted cup, and that one is OpenCASCADE's. Its fitted fillet reads back 0.28% short in OpenCASCADE's volume, while OpenCASCADE's own fine mesh of the same file comes to within 3e-6 of this kernel's, as under fillets below. What stops the cup now is the shell after the fillet, so it counts as refused.
+
+Merging the fillet work also showed that one part counted whole was wrong all along: the plate with drafted bosses and a rib. Its fillet around the bosses' roots came out at half, and the old checks had no formula for that step. The fillet's own checks now refuse it, and the bug is open, under fillets below.
 
 **What was refused or wrong, most common first, and what happened to it:**
 
 | What | Parts | Now |
 |---|---|---|
 | A rounded rectangle whose corners meet, which is what a slot is, was refused for having sides of no length | 5 | Fixed |
-| Fillets and chamfers: see below | 6 | Open, and two of them are wrong rather than refused |
+| Fillets and chamfers: see below | 6 | Four fixed by the fillet work, two open |
 | An assembly's new mate left its part a degree or so off, and turned by however its origin was placed | 2 | Fixed: a part turns about where it's held, and a new mate comes to rest at zero if it's that part's only one |
 | A pattern of a pattern, as for a grid of countersinks | 1 | Fixed |
 | A tangential inlet: a cylinder just touching another's wall from inside, as in a cyclone | 1 | Fixed: the curve is two loops crossing where they touch, and it's worked out directly |
 | Shelling a square-to-round duct | 1 | Open. The loft's corner edges are sharp at the square end and smooth at the round one, which the shell can't follow |
 
-**Fillet and chamfer failures, all open:**
+**Fillet and chamfer failures the real parts found:**
 
-| Part | What happens |
-|---|---|
-| Gusset bracket | **Wrong.** Rounding a rib where it meets the plate, when the rib ends in a sharp wedge, leaves strips of fillet standing in the air past the tip. It's valid and watertight, and only its bounds show it |
-| Shelf bracket | **Wrong.** A chamfer on an edge that ends on another feature's face does nothing or almost nothing, with only a note saying it left no faces |
-| Gearbox housing | Refused: the bottom edge of a box whose corners were filleted, because of a torus and a cylinder tangent along their edge. The same shape from a rounded sketch works |
-| Moulded cup | Refused: the same on a drafted box, as "doesn't fit" |
-| Pipe tee | Refused: the crotch of a tee, as two blended edges meet at an angle |
-| Connecting rod | Works as drawn, and refused with the "does not close" message at one other length |
+| Part | What happened | Now |
+|---|---|---|
+| Gusset bracket | **Wrong.** Rounding a rib where it meets the plate, when the rib ends in a sharp wedge, left strips of fillet standing in the air past the tip | Fixed, and whole at every change |
+| Shelf bracket | **Wrong.** A chamfer on an edge that ends on another feature's face did nothing or almost nothing | Fixed, and whole at every change |
+| Gearbox housing | Refused: the bottom edge of a box whose corners were filleted | Fixed. Its script then named the rim's top face wrongly and expected the wrong bounds, which nothing had reached before, and both are corrected |
+| Connecting rod | Refused at one other length | Fixed. Its fillet also came out 5.4 mm³ bigger on each edge than it should, hanging out past the web's sides, and now matches a numerical integral of the ideal fillet kept over the web to 6e-6 |
+| Moulded cup | Refused: the bottom edge of a drafted box | The fillet works and matches OpenCASCADE's own fillet to 1.2e-5. The shell after it is refused, as a smooth edge of a fitted face can't be moved to within the tolerance |
+| Pipe tee | Refused: the crotch of a tee, as two blended edges meet at an angle | Open |
+| Plate with drafted bosses and a rib | Counted whole, but **wrong**: half the fillet around each boss's root was missing | Refused by the fillet's own checks. The bug is open: see fillets below |
 
 **Moving dimensions at random.** Each part that takes under 30 seconds was also rebuilt with all its dimensions moved by up to 5%, six times over: 306 rebuilds fine, 10 refused, 12 wrong. All 12 wrong are the two fillet and chamfer parts above. Of the 10 refused, 4 are the parts above that can't be drawn at all yet, 4 are a fillet rightly running into a hole that's near it, and 2 are a splined shaft, whose relief groove is exactly tangent to the groove floors and flush with their ends: "two edges claim the same continuation", at some dimensions and not others, and that's not been fixed. Some dimensions are held still for this where a part's design depends on them together, as `scan_fixed` in its script says.
 
@@ -304,7 +310,18 @@ Supported:
 - A rim whose corner radius equals the fillet radius: a sphere at each corner, matching
   OpenCASCADE to 1e-9.
 - A rim whose corner radius is below the fillet radius: see the difference below.
-- A sphere patch where three convex edges between planes meet.
+- A sphere patch where three edges between planes meet, all convex or all concave.
+- Corners where convex and concave edges meet, or where one of three is too short to be a wall for the others. The odd one is done first, and the other two then run smoothly around it. OpenCASCADE gets the same volume to 1e-15 on an L's rim and uprights and a pocket's floor, walls and mouth.
+- Two edges meeting at an angle with the third left sharp: a mitre, in a reflex corner as well, where they used to stop short with a step.
+- **A wall too short for the ball.** If a face beside the edge ends before the ball can touch it, all along the edge, the fillet stays tangent to the other face and runs through that face's far edge, which stays where it was. That takes straight and round edges, convex and concave: thin plates, the rims of holes in them, low bosses and ribs, steps and shaft shoulders. Each is checked against a formula, as OpenCASCADE refuses every one of them. A chamfer does the same.
+- **A face that ends part of the way along the edge.** A hole across the contact line just cuts the fillet. Where the blend would otherwise cut into what's beyond a wall or hang out over nothing, it's kept to what's under or over that face, so a boss's fillet near the plate's edge stops at the plate's side, which rises to meet it.
+
+- **Different radii on edges that meet at a corner** (`fillet_radii`). The largest goes first, and the others then run smoothly around it as one chain, with the radius going from one to the other around the piece between them, so nothing at the corner is left sharp. An edge that's the odd one out at a corner, convex among concave or the other way round, always goes first.
+- **A radius varying along a chain of edges,** in straight lines between places along it, on any edge the fitted route takes, an open chain only. On a straight edge between square faces, and around half a rim, the volume matches the integral of each section's area to 1e-8, as the sections there are exactly what a ball would make.
+
+Every fillet and chamfer is checked afterwards in two ways that don't depend on how it was made. Its result can't reach past the part's own bounds, as a blend only lies between points on the part's faces. And along each edge it was asked for, the edge has to have gone: taken off a convex edge and filled in on a concave one. Where the ball has its faces to stand on, all of it has to go, and where a face runs off, most of it. These would have turned both wrong results the real parts found into refusals: a rib's fillet that ran on past its tip, and a chamfer down a shelf bracket's sloped back that did nothing.
+
+**Open, and wrong: a fillet around a boss whose root a rib interrupts comes out at half.** A boss on a plate with a rib running into it, rounded where the boss meets the plate: the edge is two arcs of one circle meeting smoothly where the boss's side is split, and together they run from one side of the rib round to the other. Picking either arc picks both, as it should, but only about half of them gets the fillet. With bosses of radius 12 and a rib 3 wide, at a radius of 2, each boss gets 33.6 mm³ where the ideal fillet less the rib's footprint is 64.55 by a numerical integral. Without the rib, the same boss gets its full ring, 67.1319, as the formula says. It was the same before the fillet work (31.0 there). The likely cause is how the ends are trimmed against the rib's walls: each end is cut back by a half-space beyond its wall, and on a run that goes most of the way round a circle, the half-space at one end also takes in the far half of the run. On a drafted boss the fillet's own checks see it and refuse. **On a plain cylindrical boss they don't, and the half fillet comes through as a result.** The real parts' plate with drafted bosses and a rib is the first case. The second is the same plate without the draft.
 
 Supported, but fitted and not exact, which makes them the only results in this kernel that are neither exact nor refused:
 
@@ -313,9 +330,9 @@ Supported, but fitted and not exact, which makes them the only results in this k
 
 Not supported, returning an error:
 
-- Variable radius.
-- A radius that runs off a neighbouring face. Real kernels can absorb the overrun and restructure
-  the neighbours. This one refuses.
+- A radius too big for both of the faces beside the edge.
+- A radius that varies around a closed chain, as there's no end for it to start from, or that varies and runs smoothly into edges with another radius.
+- Two edges running smoothly into each other with different radii and nothing between them for the radius to go from one to the other.
 - A fitted blend passing a vertex where a sharp edge meets it, or that ends where more than one face lies beyond it. Those need corner blends.
 - A fitted blend's end at a reflex corner, where its side would end past the neighbouring edge, which takes reshaping that neighbour.
 - A surface so kinked that the fit doesn't reach its tolerance within 1,024 stations.
@@ -336,8 +353,11 @@ Works, but differs from commercial CAD:
 
 - Two filleted edges meeting at a corner with a third edge left sharp end in a plain mitre, with
   no vertex blend.
-- Mixed convex and concave edges at one vertex have little test coverage. The Boolean checks
-  still guard the result, but the shape may not be the one you'd pick.
+- **OpenCASCADE's volume of a fitted blend can be wrong.** Its integrator gets B-spline faces with many knots wrong: on a rounded box whose bottom rim is fitted, this kernel's volume matches the formula to 1e-11, OpenCASCADE's reading of the same file comes out 0.26% short, and OpenCASCADE's own fine mesh of that file matches the formula again to 2e-6. So `scripts/check_fillets.sh` also measures its mesh wherever there are B-spline faces, and goes by that where the two disagree.
+- **A web running exactly tangent into a boss.** The fillet where they meet runs off the web near each tangent point, where the plane of the web's side touches the fillet's surface at a single point. It's cut along that side and kept to what's over the web, as where any face runs off, and matches a 1D integral of the ideal fillet kept over the web to 2e-8. That cut used to fail, and the fillet then stopped short with the rest of the edge left sharp, until the Boolean worked out tangencies like this one directly. OpenCASCADE refuses this one. Real kernels can blend it all the way, rolling over the side's edge.
+- **A wall that's too short for only part of the way along** keeps the usual arc, cut off by the wall's far edge or kept to the face, so there's a crease where the two meet. Real kernels can roll along that edge for a smoother result. On a boss 2 mm from a plate's edge with a fillet of 5, this kernel adds 367.1 and OpenCASCADE, which rolls over the plate's edge, 348.1. This one's is checked against a formula for what it does.
+
+**Realistic parts** (`--example fillet_cases`, `scripts/check_fillets.sh`): 62 parts, with one that should be refused. Of the first 51 tried, 13 were refused, and several more came out valid but with a shape OpenCASCADE or a formula disagreed with, in three ways: a step at a reflex corner, a sharp peak in a concave corner, and a fillet ending on a slanted face that stopped short of the far end of its edge, or that next to nothing was left of. All 61 now come out valid and closed, 24 of them match a formula, and all 61 read back in OpenCASCADE valid and with the same volume. Where it does them at all, it agrees to 1e-6 relative on all but the two known differences described here: a rim tighter than the radius, and a fillet running off part of a face.
 
 **Random slider positions on the demos** (200 per model, `--example scan` in `crates/wasm`): no invalid bodies.
 

@@ -133,8 +133,8 @@ fn rollback_shows_earlier_states_without_recomputing() {
 fn a_failing_feature_keeps_the_last_good_body_and_recovers() {
     let (mut doc, _) = plate();
     doc.rebuild(None);
-    // A fillet bigger than the 6 mm face it runs along.
-    doc.set_parameter("r", 7.0).unwrap();
+    // A fillet bigger than both of the faces it's between.
+    doc.set_parameter("r", 500.0).unwrap();
     let o = doc.rebuild(None);
     assert_eq!(o.failed, Some(2));
     assert!(matches!(o.steps[2].state, StepState::Failed(_)));
@@ -1004,5 +1004,47 @@ fn an_imported_step_file_is_a_feature_like_any_other() {
     match &o.steps[0].state {
         StepState::Failed(why) => assert!(why.contains("STEP"), "{why}"),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_fillet_with_several_radii_saves_and_rebuilds() {
+    // A block whose top front edge goes from 1 to 3 along its length, and whose right top edge is 2.
+    let mut doc = Document::new();
+    doc.set_parameter("big", 3.0).unwrap();
+    let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 40.0, 30.0))]));
+    let e = doc.with(Op::extrude(s, 0.0, 20.0, Mode::Add));
+    let sets = vec![
+        RadiusSet { edges: EdgeSelect::Between(e.end_cap(), e.side(0)), radius: RadiusLaw::Along { stations: vec![(0.0.into(), 1.0.into()), (1.0.into(), "big".into())], start: Some(point3(0.0, 0.0, 20.0)) } },
+        RadiusSet { edges: EdgeSelect::Between(e.end_cap(), e.side(1)), radius: RadiusLaw::Constant(2.0.into()) },
+    ];
+    let f = doc.with(Op::FilletRadii { sets });
+    let o = doc.rebuild(None);
+    assert_eq!(o.failed, None, "{:?}", o.steps);
+    // At least what the tapered edge takes on its own, and less than if it were 3 all along with the other at 2.
+    let tapered = (1.0 - PI / 4.0) * 40.0 * (1.0 + 3.0 + 9.0) / 3.0;
+    let v = vol(&o);
+    assert!(v < 24000.0 - tapered && v > 24000.0 - corner_area(3.0) * 40.0 - corner_area(2.0) * 30.0, "{v}");
+    // Saved and read back, it's the same feature and the same part.
+    let text = doc.save_text();
+    assert!(text.contains("fillet_radii") && text.contains("along"));
+    let mut back = Document::load_text(&text).unwrap();
+    assert_eq!(back.feature(f).unwrap().op, doc.feature(f).unwrap().op);
+    assert!((vol(&back.rebuild(None)) - v).abs() < 1e-9);
+    // A parameter moves it.
+    doc.set_parameter("big", 4.0).unwrap();
+    assert!(vol(&doc.rebuild(None)) < v);
+    // What a reader refuses.
+    let edges = r#""edges": {"on_face": "f2:end"}"#;
+    for (set, says) in [
+        (format!(r#"{{{edges}, "radius": 1, "along": [{{"at": 0, "radius": 1}}]}}"#), "not both"),
+        (format!(r#"{{{edges}, "along": [{{"at": 0}}]}}"#), "radius"),
+        (format!(r#"{{{edges}}}"#), r#""radius" or an "along""#),
+    ] {
+        let feature = format!(r#"{{"id": 9, "name": "Bad", "type": "fillet_radii", "sets": [{set}]}}"#);
+        let changed = text.replacen(r#""features": ["#, &format!(r#""features": [{feature}, "#), 1);
+        assert_ne!(changed, text);
+        let why = Document::load_text(&changed).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(why.contains(says), "{feature}: {why}");
     }
 }

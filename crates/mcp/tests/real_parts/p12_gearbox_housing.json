@@ -18,10 +18,10 @@
     {"id": 11, "name": "Bearing bore", "type": "sketch", "plane": {"origin": [0, "W / 2 + bl", 0], "z": [0, -1, 0], "x": [1, 0, 0]},
      "regions": [{"outer": {"type": "circle", "cx": -35, "cy": "H / 2", "r": "bore / 2"}}]},
     {"id": 12, "name": "Cut bore", "type": "extrude", "sketch": 11, "start": -1, "length": "W + 2 * bl + 2", "mode": "remove"},
-    {"id": 13, "name": "Rim holes", "type": "sketch", "plane": {"origin": [0, 0, "H"], "on_face": "f7:end"},
+    {"id": 13, "name": "Rim holes", "type": "sketch", "plane": {"origin": [0, 0, "H"], "on_face": "f2:end"},
      "regions": [{"outer": {"type": "circle", "cx": -60, "cy": "W / 2 + fl / 2", "r": 3.2}, "repeat": {"type": "grid", "nx": 3, "ny": 1, "dx": 60, "dy": 0}}, {"outer": {"type": "circle", "cx": -60, "cy": "-W / 2 - fl / 2", "r": 3.2}, "repeat": {"type": "grid", "nx": 3, "ny": 1, "dx": 60, "dy": 0}}]},
     {"id": 14, "name": "Cut them", "type": "extrude", "sketch": 13, "start": "-ft - 1", "length": "ft + 2", "mode": "remove"}
   ],
-  "always": {"genus": [8], "bounds": [["-L / 2 - fl", "-W / 2 - bl", 0], ["L / 2 + fl", "W / 2 + bl", "H"]]},
+  "always": {"genus": [8], "bounds": [["-L / 2 - fl", "-W / 2 - fl", 0], ["L / 2 + fl", "W / 2 + fl", "H"]]},
   "changes": [{"set": {"H": 90}}, {"set": {"L": 180}}, {"set": {"t": 5}}]
 }

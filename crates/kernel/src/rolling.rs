@@ -210,22 +210,44 @@ struct Station {
 
 struct Solver<'a> {
     /// The faces along each side of the whole chain, since a ball by a joint can be touching the next one along.
-    lefts: Vec<&'a Face>,
-    rights: Vec<&'a Face>,
+    lefts: Vec<usize>,
+    rights: Vec<usize>,
     kind: Kind,
     /// Which way a ball sits: -1 inside the body on a convex edge, +1 outside on a concave one.
     side: f64,
+    body: &'a Body,
+    index: &'a Index<'a>,
 }
 
-/// The one of these faces that really has the nearest point to `p`.
-fn holding<'a>(list: &[&'a Face], p: Vec3, otherwise: usize) -> &'a Face {
-    list.iter().copied().find(|f| f.surface.foot_within(p)).unwrap_or(list[otherwise])
-}
+impl<'a> Solver<'a> {
+    /// The one of these faces that really has the nearest point to `p`. A seam needn't be square to the edge, so a contact can
+    /// still be on the face before while the edge has gone on to the next, and all that says which is where the foot lands.
+    fn holding_of(&self, list: &[usize], p: Vec3) -> usize {
+        if let [only] = list {
+            return *only;
+        }
+        let faces = &self.body.faces;
+        let within = |f: &&usize| faces[**f].surface.foot_within(p);
+        // The nearest that holds it: the foot on a wall across the way can be on that wall too.
+        let on_it = list
+            .iter()
+            .filter(within)
+            .filter(|f| self.index.locate_on_face(**f, faces[**f].surface.project(p), 1e-6) != FaceLoc::Outside)
+            .min_by(|a, b| faces[**a].surface.sdf(p).abs().total_cmp(&faces[**b].surface.sdf(p).abs()));
+        on_it.or_else(|| list.iter().find(within)).copied().unwrap_or(list[0])
+    }
 
-impl Solver<'_> {
+    fn holding(&self, list: &[usize], p: Vec3) -> &'a Face {
+        &self.body.faces[self.holding_of(list, p)]
+    }
     /// The section in the plane through `p` with normal `n`. `near` is a center to start from, if there is one.
     fn station(&self, p: Vec3, n: Vec3, near: Option<Vec3>) -> Option<Station> {
-        match self.kind {
+        self.station_as(self.kind, p, n, near)
+    }
+
+    /// The same, for a radius other than the usual one.
+    fn station_as(&self, kind: Kind, p: Vec3, n: Vec3, near: Option<Vec3>) -> Option<Station> {
+        match kind {
             Kind::Fillet(r) => self.fillet_station(p, n, r, near),
             Kind::Chamfer(d) => self.chamfer_station(p, n, d),
         }
@@ -236,13 +258,13 @@ impl Solver<'_> {
         let mut c = match near {
             Some(c) => c + n * n.dot(p - c),
             None => {
-                let (na, nb) = (out_normal(holding(&self.lefts, p, 0), p), out_normal(holding(&self.rights, p, 0), p));
+                let (na, nb) = (out_normal(self.holding(&self.lefts, p), p), out_normal(self.holding(&self.rights, p), p));
                 p + solve3(na, nb, n, target, target, 0.0)?
             }
         };
         let mut converged = false;
         for _ in 0..24 {
-            let (left, right) = (holding(&self.lefts, c, 0), holding(&self.rights, c, 0));
+            let (left, right) = (self.holding(&self.lefts, c), self.holding(&self.rights, c));
             let (fa, fb, fc) = (out_sdf(left, c) - target, out_sdf(right, c) - target, n.dot(c - p));
             if fa.abs().max(fb.abs()).max(fc.abs()) < 1e-11 {
                 converged = true;
@@ -256,7 +278,7 @@ impl Solver<'_> {
         if !converged {
             return None;
         }
-        let (pa, pb) = (c - out_normal(holding(&self.lefts, c, 0), c) * target, c - out_normal(holding(&self.rights, c, 0), c) * target);
+        let (pa, pb) = (c - out_normal(self.holding(&self.lefts, c), c) * target, c - out_normal(self.holding(&self.rights, c), c) * target);
         let (a, b) = ((pa - c).normalized(), (pb - c).normalized());
         let half = 0.5 * a.dot(b).clamp(-1.0, 1.0).acos();
         // Close to a half turn, the faces nearly face each other and there's no sensible arc.
@@ -271,10 +293,10 @@ impl Solver<'_> {
 
     fn chamfer_station(&self, p: Vec3, n: Vec3, d: f64) -> Option<Station> {
         // At this distance from the edge in this plane, going into each face.
-        let reach = |list: &[&Face], into: Vec3| -> Option<Vec3> {
+        let reach = |list: &[usize], into: Vec3| -> Option<Vec3> {
             let mut q = p + into * d;
             for _ in 0..24 {
-                let face = holding(list, q, 0);
+                let face = self.holding(list, q);
                 let (f0, f1, f2) = (out_sdf(face, q), n.dot(q - p), ((q - p).norm2() - d * d) * 0.5);
                 if f0.abs().max(f1.abs()).max(f2.abs()) < 1e-11 {
                     return Some(q);
@@ -283,7 +305,7 @@ impl Solver<'_> {
             }
             None
         };
-        let (na, nb) = (out_normal(holding(&self.lefts, p, 0), p), out_normal(holding(&self.rights, p, 0), p));
+        let (na, nb) = (out_normal(self.holding(&self.lefts, p), p), out_normal(self.holding(&self.rights, p), p));
         // Left of travel seen from outside, and right of it.
         let pa = reach(&self.lefts, na.cross(n).normalized())?;
         let pb = reach(&self.rights, n.cross(nb).normalized())?;
@@ -294,13 +316,47 @@ impl Solver<'_> {
 
 /// Where along an element a blend's side crosses a knot line of a free-form face, since a surface can have a real kink
 /// there, which a fit should stop at instead of trying to bend through. As fractions along the element.
-fn knot_crossings(body: &Body, e: &Element, solver: &Solver) -> Vec<f64> {
+fn knot_crossings(body: &Body, e: &Element, solver: &Solver, kind_at: &dyn Fn(f64) -> Kind) -> Vec<f64> {
     const SAMPLES: usize = 48;
     let mut out = Vec::new();
     let contact = |s: f64| -> Option<(Vec3, Vec3)> {
-        let st = solver.station(e.point(body, s), e.tangent(body, s), None)?;
+        let st = solver.station_as(kind_at(s), e.point(body, s), e.tangent(body, s), None)?;
         Some((st.section[0].point(), st.section[st.section.len() - 1].point()))
     };
+    // Where a side goes from one face to the next away from the joint, as across a slanted seam, the surface it's fitted to
+    // changes, and so does how it bends.
+    for (which, list) in [(0usize, &solver.lefts), (1, &solver.rights)] {
+        if list.len() < 2 {
+            continue;
+        }
+        let on = |s: f64| -> Option<usize> {
+            let (a, b) = contact(s)?;
+            Some(solver.holding_of(list, if which == 0 { a } else { b }))
+        };
+        let mut before = on(0.0);
+        for k in 1..=SAMPLES {
+            let (lo, hi) = ((k - 1) as f64 / SAMPLES as f64, k as f64 / SAMPLES as f64);
+            let here = on(hi);
+            if let (Some(a), Some(b)) = (before, here) {
+                if a != b {
+                    let (mut x, mut y) = (lo, hi);
+                    for _ in 0..30 {
+                        let m = (x + y) / 2.0;
+                        if on(m) == Some(a) {
+                            x = m;
+                        } else {
+                            y = m;
+                        }
+                    }
+                    let at = (x + y) / 2.0;
+                    if at > 1e-6 && at < 1.0 - 1e-6 {
+                        out.push(at);
+                    }
+                }
+            }
+            before = here;
+        }
+    }
     let (left, right) = (&body.faces[e.left], &body.faces[e.right]);
     for (which, face) in [(0usize, left), (1, right)] {
         let Surface::Free { frame, patch } = &face.surface else { continue };
@@ -488,8 +544,181 @@ fn replace_in_loop(face: &mut Face, gone: &[usize], pieces: &[Coedge]) -> Result
     Err(Error::Internal("a blended edge isn't in the face beside it".into()))
 }
 
+/// How a fillet's radius goes along a chain of edges, where it isn't the same all along.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Varying {
+    /// By how far along the chain, from 0 to 1, in straight lines between these, measured from the end nearest `start`, or
+    /// without one, from the end with the lowest x, then y, then z.
+    Along { stations: Vec<(f64, f64)>, start: Option<Vec3> },
+    /// By edge. Edges in the chain with none take it smoothly from the radius before them to the one after.
+    ByEdge(Vec<(usize, f64)>),
+}
+
+/// A radius worked out for each element of one chain.
+struct Law {
+    /// For each element, its radius at each end, and whether it goes between them smoothly or in a straight line.
+    spans: Vec<Span>,
+    /// For each element, where along it the radius changes direction, as a fit has to stop there.
+    kinks: Vec<Vec<f64>>,
+}
+
+enum Span {
+    /// In straight lines between these fractions along the element.
+    Lines(Vec<(f64, f64)>),
+    /// From one radius to another, level at both ends, between these fractions of the stretch it's in.
+    Smooth { from: f64, to: f64, start: f64, end: f64 },
+}
+
+impl Law {
+    fn new(varying: &Varying, chain: &Chain, body: &Body, lengths: &[f64]) -> Result<Law> {
+        let els = &chain.elements;
+        let total: f64 = lengths.iter().sum();
+        let mut before = Vec::with_capacity(els.len());
+        let mut sum = 0.0;
+        for l in lengths {
+            before.push(sum);
+            sum += l;
+        }
+        match varying {
+            Varying::Along { stations, start } => {
+                if chain.closed {
+                    return Err(Error::Unsupported("a radius that varies around a closed chain of edges isn't available yet: there's no end for it to start from".into()));
+                }
+                // Which end is 0.
+                let (a, z) = (els[0].point(body, 0.0), els[els.len() - 1].point(body, 1.0));
+                let flip = match start {
+                    Some(p) => z.dist(*p) < a.dist(*p),
+                    None => {
+                        let key = |q: Vec3| [q.x, q.y, q.z];
+                        let (ka, kz) = (key(a), key(z));
+                        let first = ka.iter().zip(&kz).find(|(x, y)| (**x - **y).abs() > 1e-9);
+                        first.is_some_and(|(x, y)| y < x)
+                    }
+                };
+                let at_chain = |x: f64| -> f64 {
+                    let x = x.clamp(0.0, 1.0);
+                    let x = if flip { 1.0 - x } else { x };
+                    if x <= stations[0].0 {
+                        return stations[0].1;
+                    }
+                    for w in stations.windows(2) {
+                        if x <= w[1].0 {
+                            return w[0].1 + (w[1].1 - w[0].1) * (x - w[0].0) / (w[1].0 - w[0].0);
+                        }
+                    }
+                    stations[stations.len() - 1].1
+                };
+                let mut spans = Vec::with_capacity(els.len());
+                let mut kinks = Vec::with_capacity(els.len());
+                for (i, l) in lengths.iter().enumerate() {
+                    // Fractions along this element where a station falls.
+                    let mut here: Vec<f64> = stations
+                        .iter()
+                        .map(|st| if flip { 1.0 - st.0 } else { st.0 })
+                        .map(|x| (x * total - before[i]) / l)
+                        .filter(|s| *s > 1e-9 && *s < 1.0 - 1e-9)
+                        .collect();
+                    here.sort_by(f64::total_cmp);
+                    let mut points = vec![0.0];
+                    points.extend(here.iter().copied());
+                    points.push(1.0);
+                    spans.push(Span::Lines(points.iter().map(|s| (*s, at_chain((before[i] + s * l) / total))).collect()));
+                    kinks.push(here);
+                }
+                Ok(Law { spans, kinks })
+            }
+            Varying::ByEdge(list) => {
+                let of = |e: usize| list.iter().find(|x| x.0 == e).map(|x| x.1);
+                let n = els.len();
+                // Straight from one radius to another, with nothing between them to go from one to the other, there's no
+                // ball that rolls along it.
+                let pairs = if chain.closed { n } else { n - 1 };
+                for k in 0..pairs {
+                    if let (Some(a), Some(b)) = (of(els[k].edge), of(els[(k + 1) % n].edge)) {
+                        if (a - b).abs() > 1e-9 * a.max(b) {
+                            return Err(Error::Unsupported(format!(
+                                "two edges running smoothly into each other with radii {a} and {b} need an edge between them for the radius to go from one to the other"
+                            )));
+                        }
+                    }
+                }
+                let mut spans = Vec::with_capacity(n);
+                for i in 0..n {
+                    if let Some(r) = of(els[i].edge) {
+                        spans.push(Span::Lines(vec![(0.0, r), (1.0, r)]));
+                        continue;
+                    }
+                    // How far back and on to edges that have a radius.
+                    let step = |k: usize, forward: bool| -> Option<usize> {
+                        if forward {
+                            (k + 1 < n).then_some(k + 1).or(chain.closed.then_some(0))
+                        } else {
+                            (k > 0).then(|| k - 1).or(chain.closed.then_some(n - 1))
+                        }
+                    };
+                    let walk = |forward: bool| -> (Option<f64>, f64) {
+                        let (mut k, mut gone) = (i, 0.0);
+                        for _ in 0..n {
+                            let Some(next) = step(k, forward) else {
+                                return (None, gone);
+                            };
+                            if let Some(r) = of(els[next].edge) {
+                                return (Some(r), gone);
+                            }
+                            gone += lengths[next];
+                            k = next;
+                        }
+                        (None, gone)
+                    };
+                    let ((from, back), (to, on)) = (walk(false), walk(true));
+                    let (from, to) = match (from, to) {
+                        (Some(a), Some(b)) => (a, b),
+                        (Some(a), None) => (a, a),
+                        (None, Some(b)) => (b, b),
+                        (None, None) => return Err(Error::InvalidInput("none of this chain's edges has a radius".into())),
+                    };
+                    let stretch = back + lengths[i] + on;
+                    spans.push(Span::Smooth { from, to, start: back / stretch, end: (back + lengths[i]) / stretch });
+                }
+                Ok(Law { spans, kinks: vec![Vec::new(); n] })
+            }
+        }
+    }
+
+    /// The radius a fraction of the way along an element.
+    fn radius(&self, i: usize, s: f64) -> f64 {
+        match &self.spans[i] {
+            Span::Lines(points) => {
+                for w in points.windows(2) {
+                    if s <= w[1].0 {
+                        return w[0].1 + (w[1].1 - w[0].1) * (s - w[0].0) / (w[1].0 - w[0].0);
+                    }
+                }
+                points[points.len() - 1].1
+            }
+            Span::Smooth { from, to, start, end } => {
+                let x = start + (end - start) * s;
+                from + (to - from) * x * x * (3.0 - 2.0 * x)
+            }
+        }
+    }
+}
+
+/// Fillets edges with a radius that varies along them.
+pub(crate) fn blend_varying(body: &Body, edges: &[usize], varying: &Varying, feature: u32) -> Result<Body> {
+    let largest = match varying {
+        Varying::Along { stations, .. } => stations.iter().map(|s| s.1).fold(0.0, f64::max),
+        Varying::ByEdge(list) => list.iter().map(|x| x.1).fold(0.0, f64::max),
+    };
+    blend_with(body, edges, Kind::Fillet(largest), Some(varying), feature)
+}
+
 /// Blends edges by working on the faces directly: see the notes at the top of this module.
 pub(crate) fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body> {
+    blend_with(body, edges, kind, None, feature)
+}
+
+fn blend_with(body: &Body, edges: &[usize], kind: Kind, varying: Option<&Varying>, feature: u32) -> Result<Body> {
     let uses = body.edge_uses();
     let mut at_vertex: Vec<Vec<usize>> = vec![Vec::new(); body.vertices.len()];
     for (i, e) in body.edges.iter().enumerate() {
@@ -502,9 +731,27 @@ pub(crate) fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> R
     let mut new_faces: Vec<Face> = Vec::new();
     let mut placed: Vec<Placed> = Vec::new();
     for chain in &chains {
-        blend_chain(body, &mut work, &index, chain, kind, feature, &uses, &at_vertex, &mut new_faces, &mut placed)?;
+        blend_chain(body, &mut work, &index, chain, kind, varying, feature, &uses, &at_vertex, &mut new_faces, &mut placed)?;
     }
-    finish(work, new_faces, body, &index, &placed, kind)
+    let out = finish(work, new_faces, body, &index, &placed, kind)?;
+    // Along each edge, whether it's convex, as the chain says.
+    let mut along = Vec::new();
+    for chain in &chains {
+        for e in &chain.elements {
+            for k in 1..8 {
+                let s = k as f64 / 8.0;
+                let (p, t) = (e.point(body, s), e.tangent(body, s));
+                let turn = out_normal(&body.faces[e.left], p).cross(out_normal(&body.faces[e.right], p)).dot(t);
+                along.push((p, turn > 0.0, false));
+            }
+        }
+    }
+    let name = match kind {
+        Kind::Fillet(_) => "fillet",
+        Kind::Chamfer(_) => "chamfer",
+    };
+    crate::blend::check_blend(body, &out, &along, name)?;
+    Ok(out)
 }
 
 /// A stretch of a new face, to check that it's where a blend belongs.
@@ -532,6 +779,7 @@ fn blend_chain(
     index: &Index,
     chain: &Chain,
     kind: Kind,
+    varying: Option<&Varying>,
     feature: u32,
     uses: &[Vec<(usize, usize, usize, bool)>],
     at_vertex: &[Vec<usize>],
@@ -594,7 +842,7 @@ fn blend_chain(
 
     // Stations, doubling until the fit holds.
     let lengths: Vec<f64> = els.iter().map(|e| (0..8).map(|k| e.point(body, k as f64 / 8.0).dist(e.point(body, (k + 1) as f64 / 8.0))).sum::<f64>()).collect();
-    let along = |left: bool| -> Vec<&Face> {
+    let along = |left: bool| -> Vec<usize> {
         let mut list: Vec<usize> = Vec::new();
         for e in els {
             let f = if left { e.left } else { e.right };
@@ -602,20 +850,35 @@ fn blend_chain(
                 list.push(f);
             }
         }
-        list.into_iter().map(|f| &body.faces[f]).collect()
+        list
     };
     // The current element's face first, for where a point is equally on two.
     let solver_at = |e: &Element| {
         let mut lefts = along(true);
         let mut rights = along(false);
-        lefts.sort_by_key(|f| !std::ptr::eq(*f, &body.faces[e.left]));
-        rights.sort_by_key(|f| !std::ptr::eq(*f, &body.faces[e.right]));
-        Solver { lefts, rights, kind, side }
+        lefts.sort_by_key(|f| *f != e.left);
+        rights.sort_by_key(|f| *f != e.right);
+        Solver { lefts, rights, kind, side, body, index }
     };
+    // Where it isn't the same all along, what it is at each place.
+    let law = varying.map(|v| Law::new(v, chain, body, &lengths)).transpose()?;
+    let kind_at = |i: usize, s: f64| -> Kind { law.as_ref().map_or(kind, |l| Kind::Fillet(l.radius(i, s))) };
     // A closed chain's patches join partway along elements, and each part needs enough for a cubic.
     let least = if chain.closed { 8 } else { 4 };
     let mut per_element: Vec<usize> = lengths.iter().map(|l| ((l / (0.75 * size)).ceil() as usize).clamp(least, 64)).collect();
-    let crossings: Vec<Vec<f64>> = els.iter().map(|e| knot_crossings(body, e, &solver_at(e))).collect();
+    let crossings: Vec<Vec<f64>> = els
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let mut list = knot_crossings(body, e, &solver_at(e), &|s| kind_at(i, s));
+            if let Some(l) = &law {
+                list.extend(l.kinks[i].iter().copied());
+                list.sort_by(f64::total_cmp);
+                list.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+            }
+            list
+        })
+        .collect();
     let mut last_error = f64::INFINITY;
     loop {
         let total: usize = per_element.iter().sum();
@@ -647,7 +910,7 @@ fn blend_chain(
                 from = to;
             }
             for &s in &fractions[usize::from(i > 0)..] {
-                let st = solver.station(e.point(body, s), e.tangent(body, s), near).ok_or_else(|| Error::InvalidInput(too_big(kind)))?;
+                let st = solver.station_as(kind_at(i, s), e.point(body, s), e.tangent(body, s), near).ok_or_else(|| Error::InvalidInput(too_big(kind_at(i, s))))?;
                 near = Some(st.center);
                 stations.push(st);
             }
@@ -670,10 +933,12 @@ fn blend_chain(
         let mut after: Vec<Station> = Vec::new();
         if let (Some(a), Some(z)) = (&start_end, &finish_end) {
             let step = lengths[0] / per_element[0] as f64;
-            before = extend(body, &solver_at(&els[0]), els[0].point(body, 0.0), els[0].tangent(body, 0.0), -step.min(size * 0.5).max(size * 0.05), a.third, stations[0].clone(), els[0].point(body, 0.5), kind)?;
+            let solver = Solver { kind: kind_at(0, 0.0), ..solver_at(&els[0]) };
+            before = extend(body, &solver, els[0].point(body, 0.0), els[0].tangent(body, 0.0), -step.min(size * 0.5).max(size * 0.05), a.third, stations[0].clone(), els[0].point(body, 0.5), kind)?;
             let l = els.len() - 1;
             let step = lengths[l] / per_element[l] as f64;
-            after = extend(body, &solver_at(&els[l]), els[l].point(body, 1.0), els[l].tangent(body, 1.0), step.min(size * 0.5).max(size * 0.05), z.third, stations[stations.len() - 1].clone(), els[l].point(body, 0.5), kind)?;
+            let solver = Solver { kind: kind_at(l, 1.0), ..solver_at(&els[l]) };
+            after = extend(body, &solver, els[l].point(body, 1.0), els[l].tangent(body, 1.0), step.min(size * 0.5).max(size * 0.05), z.third, stations[stations.len() - 1].clone(), els[l].point(body, 0.5), kind)?;
         }
         let lead = before.len();
         let mut all: Vec<Station> = before.into_iter().rev().collect();
@@ -714,8 +979,8 @@ fn blend_chain(
                 let (pa, pb) = (patch.eval(0.0, v), patch.eval(1.0, v));
                 // By a joint it can be on the next element's face, whose surface may not be this one's.
                 let solver = solver_at(&els[owner[j - lead]]);
-                let on_left = holding(&solver.lefts, pa, 0).surface.sdf(pa).abs();
-                let on_right = holding(&solver.rights, pb, 0).surface.sdf(pb).abs();
+                let on_left = solver.holding(&solver.lefts, pa).surface.sdf(pa).abs();
+                let on_right = solver.holding(&solver.rights, pb).surface.sdf(pb).abs();
                 worst = worst.max(on_left).max(on_right);
             }
             patches.push(patch);

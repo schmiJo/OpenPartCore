@@ -192,6 +192,7 @@ fn what_needs_a_solid_says_so() {
         ("a Boolean", subtract(&solid, &s)),
         ("a Boolean", intersect(&s, &s)),
         ("a fillet", fillet(&s, &[0], 1.0, 3)),
+        ("a fillet", fillet_radii(&s, &[(vec![0], Radius::Constant(1.0)), (vec![1], Radius::Constant(0.5))], 3)),
         ("a chamfer", chamfer(&s, &[0], 1.0, 3)),
         ("an offset", offset(&s, 1.0)),
         ("a shell", shell(&s, &[], 1.0, 3)),
