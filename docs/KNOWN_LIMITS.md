@@ -458,6 +458,16 @@ A sketch can project a part's corners and edges onto its plane, worked out again
 - **Only edges and vertices project.** Onshape's Use also takes a whole face's outline, and its intersection takes where a part cuts the sketch plane. Neither is built.
 - **A projection follows its edge or vertex by name,** so it lasts as long as the names do: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys). An edge selection by place, `near`, picks whatever is there after a change.
 
+## Planes
+
+All eight of Onshape's plane types are built, with `flip`, and sketches sit on them. What they don't take yet:
+
+- A curve-point plane takes a part's edge, not a sketch's curve.
+- A tangent plane touches a cylinder, cone or sphere: not a torus or a free-form face. On a sphere it takes a point, since an angle round a sphere means nothing without an axis.
+- A line from a sketch is one of its lines: a sketch arc's or circle's axis isn't one yet, though a part's round edge's is (`{"axis_of": selection}`).
+- An edge's direction, and an axis's, are the kernel's own, as `edges_list` and `faces_list` give them, and a change elsewhere in the model can turn one round: `flip`, a negative angle or a negative distance turns a plane made from one back.
+- A plane on a face whose name covers several faces, such as a pattern's copies, needs them all in one plane, and otherwise one face's key.
+
 ## Sweeps
 
 A sweep goes along steps, a sketch's curves or a part's edges: see [FILE_FORMAT.md](FILE_FORMAT.md#features). `crates/document/tests/sweep_paths.rs` holds each against Pappus: the profile's area times how far its centroid goes.

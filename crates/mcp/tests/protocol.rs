@@ -1336,3 +1336,40 @@ fn sketch_tools_place_projected_geometry_from_a_context() {
     c.ok("feature_edit", r#"{"id":1,"feature":{"type":"solid","shape":"box","dx":15,"dy":20,"dz":30,"mode":"new_body"}}"#);
     assert_eq!(axis_x(&mut c)[..2], [15.0, 20.0]);
 }
+
+#[test]
+fn planes_list_gives_where_each_plane_is_and_sketch_tools_take_one() {
+    let root = folder("planes");
+    let mut c = Client::start(&root);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":10,"dy":20,"dz":30}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"plane","plane_type":"offset","plane":"top","distance":12}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","plane":{"on_plane":2},"regions":[{"outer":{"type":"circle","r":1}}]}}"#);
+    let list = parsed(&c.ok("planes_list", "{}"));
+    let list = list.as_array().unwrap();
+    let names: Vec<&str> = list.iter().map(|p| p.get("name").and_then(Value::as_str).unwrap()).collect();
+    assert_eq!(names, vec!["Top", "Front", "Right", "Plane 1", "Sketch 1"]);
+    let front = &list[1];
+    assert_eq!(front.get("plane").and_then(Value::as_str), Some("front"));
+    assert_eq!(numbers(front.get("normal").unwrap()), vec![0.0, -1.0, 0.0]);
+    assert_eq!(numbers(front.get("y").unwrap()), vec![0.0, 0.0, 1.0]);
+    let plane = &list[3];
+    assert_eq!(plane.get("plane_type").and_then(Value::as_str), Some("offset"));
+    assert_eq!(plane.get("position").and_then(Value::as_f64), Some(1.0));
+    assert_eq!(numbers(plane.get("origin").unwrap()), vec![0.0, 0.0, 12.0]);
+    assert_eq!(numbers(list[4].get("origin").unwrap()), vec![0.0, 0.0, 12.0]);
+    // Rolled back to before the plane, it hasn't been built.
+    let back = parsed(&c.ok("planes_list", r#"{"upto":0}"#));
+    let plane = &back.as_array().unwrap()[3];
+    assert_eq!(plane.get("state").and_then(Value::as_str), Some("rolledback"));
+    assert!(plane.get("origin").is_none());
+    // A plane that can't be made says why.
+    c.ok("feature_add", r#"{"feature":{"type":"plane","plane_type":"three_point","points":["origin",[1,0,0],[2,0,0]]}}"#);
+    let list = parsed(&c.ok("planes_list", "{}"));
+    let bad = list.as_array().unwrap().last().unwrap().clone();
+    assert!(bad.get("error").and_then(Value::as_str).unwrap().contains("in a line"), "{}", bad.to_text());
+    // The sketch tools see a sketch on a plane where the plane is: a corner of the box, from 12 above Top.
+    let sketch = r#"{"entities":[{"id":1,"type":"projected","from":{"vertex":{"faces":["f1:end","f1:side.1","f1:side.2"]}}}],"constraints":[],"next_entity":2,"next_constraint":1}"#;
+    let solved = parsed(&c.ok("sketch_solve", &format!(r#"{{"sketch":{sketch},"context":{{"plane":{{"on_plane":2}},"position":2}}}}"#)));
+    let at = solved.get("sketch").unwrap().get("entities").unwrap().as_array().unwrap()[0].get("geometry").unwrap().get("at").unwrap().clone();
+    assert_eq!(numbers(&at), vec![10.0, 20.0]);
+}

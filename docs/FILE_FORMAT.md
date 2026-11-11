@@ -71,7 +71,8 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 
 | `type` | Fields |
 |---|---|
-| `sketch` | `plane` (default XY, and with `"on_face": "f2:end"` it follows that flat face), `regions` |
+| `sketch` | `plane` (default XY; `{"on_plane": "top"}` or `{"on_plane": 7}` puts it on a [plane](#planes) and it follows it, and with `"on_face": "f2:end"` it follows that flat face, keeping its own origin), `regions` |
+| `plane` | A plane, not a part: `plane_type` and its fields, and `flip`. See [Planes](#planes) |
 | `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
 | `loft` | `sections`, in order, each a sketch id, for a sketch holding one outline, or a region `{"sketch": 2, "region": "r..."}`, so that one sketch with several outlines can feed it, and `mode`. Straight between two, and a smooth cubic through three or more. A region that has gone fails the feature, saying what's there |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. Optionally `regions`, as an extrude has them: see [below](#extrude-regions-and-ends) |
@@ -99,7 +100,9 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `draft` | `faces` (names), `degrees`, `pull` (default +z), `neutral` (a point on the plane where faces stay put; default the origin). A positive angle narrows the part along the pull, and widens a hole. |
 
 `mode` is `add`, `remove`, `intersect`, `new_body` or `surface`. A placement is `{"origin": [x, y, z], "z": [x, y, z], "x": [x, y, z]}`,
-where each part has a default: the origin, world Z, and world X (world Y if z runs along X).
+where each part has a default: the origin, world Z, and world X (world Y if z runs along X). Or it's `{"on_plane": plane}`
+alone, any [plane](#planes) by name, which it then follows, taking its origin, normal and x from it: a sketch's, a solid's
+`at`, and a transform's `from` and `to` can be.
 
 Solids: `box` (`dx dy dz`), `cylinder` (`radius height`), `cone` (`r0 r1 height`), `sphere` (`radius`),
 `torus` (`major minor`).
@@ -119,6 +122,52 @@ In every form, bends must stay wider than the profile, or the profile would cros
 **Copies keep names.** A face in a pattern's or mirror's copy has the name of the face it came from, so `f2:end` covers
 the original and every copy, and a fillet between two named faces applies to them all. To pick one, use a [face key](#face-keys).
 A pattern of features applies each one's solids as it did, adding or removing.
+
+## Planes
+
+A `plane` feature makes a plane, not a part, as Onshape's Plane feature does. It's worked out again at every rebuild from
+what it names, so it moves when they do, and so does anything on it. It has a `plane_type`, the fields that type takes, and
+`flip` (default false), which turns its normal round, keeping its origin and x. If what it names has gone or doesn't fit,
+such as three points in a line or a face that isn't flat, the feature fails and says what's wrong, as other features do,
+and what's after it waits.
+
+| `plane_type` | Fields | The plane |
+|---|---|---|
+| `offset` | `plane`, `distance` | Parallel to `plane`, `distance` along its normal, with its x |
+| `plane_point` | `plane`, `point` | Parallel to `plane`, through `point`, which is its origin |
+| `line_angle` | `line`, `degrees` (default 0), `reference` (a plane) | Through `line`, turned about it by `degrees`, right-handed about the line's direction. At 0 it's the plane through the line that comes nearest to being parallel to `reference`, or without one, to whichever of Top, Front and Right the line is most nearly parallel to (in that order when it's equally so). Its origin is the line's point, and its x runs along the line |
+| `point_normal` | `point`, `line` | Through `point`, square to `line`, facing along it |
+| `three_point` | `points`: three points | Through them: its origin is the first, its x points toward the second, and it faces the side from which the three go round counter-clockwise |
+| `mid_plane` | `planes`: two planes, or `points`: two points | Halfway between two parallel planes, facing as the first does, or for two that meet, the plane through where they meet that bisects the angle between them, facing between their normals once the second is turned to face the same side as the first. With x from the first. Between two points, it's square to the line from the first to the second, at its middle |
+| `curve_point` | `edge` (a selection picking one edge), and `point`, or `fraction` from 0 to 1 | Square to the edge, facing along it, at the point on it nearest `point`, or a `fraction` of its length from its start. An edge runs from its start to its end as `edges_list` gives them |
+| `tangent` | `face` (a cylinder, cone or sphere), and `point`, or `degrees` | Touching the face, facing out of the part, at the point on it nearest `point`, or on a cylinder or cone, at an angle round its axis, right-handed about the axis's direction, from the direction a plane facing along the axis would have as its x, at the height of the middle of the face. On a cylinder or cone its x runs along the axis |
+
+```json
+{"id": 4, "name": "Plane 1", "type": "plane", "plane_type": "offset", "plane": "f2:end", "distance": 5}
+{"id": 5, "name": "Plane 2", "type": "plane", "plane_type": "three_point", "points": [{"sketch": 3, "point": "1"}, {"sketch": 3, "point": "2.start"}, {"faces": ["f2:end", "f2:side.1", "f2:side.2"]}]}
+{"id": 6, "name": "Plane 3", "type": "plane", "plane_type": "line_angle", "line": {"between": ["f2:end", "f2:side.0"]}, "degrees": 30, "reference": "top"}
+{"id": 7, "name": "Plane 4", "type": "plane", "plane_type": "mid_plane", "planes": ["f2:side.1", "f2:side.3"], "flip": true}
+{"id": 8, "name": "Plane 5", "type": "plane", "plane_type": "curve_point", "edge": {"on_face": "f2:end"}, "fraction": 0.25}
+{"id": 9, "name": "Plane 6", "type": "plane", "plane_type": "tangent", "face": "f4:side.0", "degrees": 90}
+{"id": 10, "name": "Sketch 3", "type": "sketch", "plane": {"on_plane": 4}, "regions": [...]}
+```
+
+Each plane has an origin, a normal and an x direction, and its y is the normal across x. The MCP's `planes_list` gives where
+each is, as the history stands or as it stood after any position. Planes, points and lines are named the same way wherever
+a feature takes one:
+
+| Reference | Forms |
+|---|---|
+| A plane | `"top"`, `"front"` or `"right"`; a plane feature's id, like `4`; a flat face's name or key, like `"f2:end"`; or `{"point": [x, y, z], "normal": [x, y, z]}` |
+| A point | `"origin"`; `[x, y, z]`; a corner, `{"faces": [...], "near": [x, y, z]}`, as `vertices_list` and `edges_list` give them; or a constrained sketch's point, `{"sketch": 4, "point": "7.start"}`, with an entity's id for a point, or a curve's `start`, `end`, `center` or `major`, as constraints name them |
+| A line | A straight edge's [selection](#edge-selections), picking one edge, which runs from its start to its end, or the same as `{"edge": selection}`; a constrained sketch's line, `{"sketch": 4, "line": 9}`, from its start to its end; `{"axis_of": "f3:side.0"}`, the axis of a cylinder, cone, torus or turned face, pointing the way `faces_list` gives it, or `{"axis_of": selection}`, of a circle, arc or ellipse; or `{"point": [x, y, z], "direction": [x, y, z]}` |
+
+Top, Front and Right are Onshape's: Top is the XY plane facing +Z with x along X, Front is the XZ plane facing -Y with x along
+X and y up, and Right is the YZ plane facing +X with x along Y and y up. A flat face's plane faces out of the part, and its
+origin is where the world's origin is seen along its normal, so that it doesn't move when the face grows or gets a hole.
+Where nothing gives a plane its x, it runs along X on a plane nearer level than upright, and on any other it's level, to
+the right as you face the plane. A name that covers several faces, such as a pattern's copies, has to have them all in one
+plane, or one surface for an axis or a tangent: otherwise use a [key](#face-keys) for one of them.
 
 ## Face keys
 

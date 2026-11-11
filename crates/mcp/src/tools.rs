@@ -45,6 +45,7 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("sketch_drag", "Moves a point or edge of a sketch toward a target, disturbing the rest as little as possible, and gives the new sketch.", r#"{"sketch": {"type": "object"}, "grab": {"description": "A point, such as \"7.end\", or an edge and where it was grabbed: {\"edge\": 7, \"at\": [x, y]}."}, "to": {"type": "array", "items": {"type": "number"}}, "parameters": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch", "grab", "to"]"#),
     ("sketch_regions", "The closed regions a sketch would use: those picked, or by default every other level of nesting, so a loop in a loop is a hole. Says which entity leaves a gap if there aren't any.", r#"{"sketch": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
     ("sketch_arrangement", "Every closed region a sketch's curves make, split at crossings and T-junctions, each with a stable id, plus the curves that make none and why.", r#"{"sketch": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
+    ("planes_list", "Where each plane is: Top, Front and Right, then each plane feature and each sketch, in history order, with its position, origin, normal, and x and y directions, or why it didn't build. With upto, as the history stood after that position, for rolling back past them.", r#"{"upto": {"type": "integer", "description": "As after the feature at this position."}}"#, "[]"),
     ("vertices_list", "The solid's corners: where each is, the edges that meet there, and the vertex that picks it, {\"faces\": [...], \"near\": [x, y, z]}, as an extrude's up_to_vertex and a sketch's projected vertex take it.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
 ];
 
@@ -304,6 +305,11 @@ impl Session {
                 let scope = self.scope(args)?;
                 Ok(vec![text(edges_value(&scope.body, &scope.of_edge)?.to_pretty())])
             }
+            "planes_list" => {
+                let upto = position_arg(args, "upto")?;
+                let o = self.doc.rebuild(upto);
+                Ok(vec![text(self.planes_value(&o).to_pretty())])
+            }
             "vertices_list" => {
                 let scope = self.scope(args)?;
                 Ok(vec![text(corners_value(&scope.body, &scope.of_edge).to_pretty())])
@@ -395,6 +401,41 @@ impl Session {
             of_edge.extend(std::iter::repeat_n(name, b.body.edges.len()));
         }
         Ok(Scope { body: whole, of_face, of_edge })
+    }
+
+    /// Where each plane is, and each sketch's plane, as a rebuild left them.
+    fn planes_value(&self, o: &Outcome) -> Value {
+        let placed = |f: &coreshape::Frame| vec![("origin", vec3(f.origin)), ("normal", vec3(f.z)), ("x", vec3(f.x)), ("y", vec3(f.y))];
+        let mut list = Vec::new();
+        for (name, plane) in [("Top", PlaneRef::Top), ("Front", PlaneRef::Front), ("Right", PlaneRef::Right)] {
+            let mut items = vec![("plane", plane_ref_value(&plane)), ("name", Value::str(name))];
+            items.extend(placed(&plane.standard_frame().expect("a standard plane")));
+            list.push(Value::obj(items));
+        }
+        for (position, step) in o.steps.iter().enumerate() {
+            let Some(feature) = self.doc.feature(step.id) else { continue };
+            let plane_type = match &feature.op {
+                Op::Plane { def, .. } => Some(def.kind()),
+                Op::Sketch { .. } | Op::ConstrainedSketch { .. } => None,
+                _ => continue,
+            };
+            let mut items = vec![("id", Value::Num(step.id.0 as f64)), ("name", Value::str(&step.name)), ("type", Value::str(step.kind)), ("position", Value::Num(position as f64))];
+            if let Some(kind) = plane_type {
+                items.push(("plane_type", Value::str(kind)));
+            }
+            items.push(("state", Value::str(step.state.word())));
+            match &step.state {
+                StepState::Rebuilt | StepState::Reused => {
+                    if let Some(frame) = self.doc.frame_of(step.id) {
+                        items.extend(placed(&frame));
+                    }
+                }
+                StepState::Failed(why) => items.push(("error", Value::str(why))),
+                _ => {}
+            }
+            list.push(Value::obj(items));
+        }
+        Value::Arr(list)
     }
 
     /// Each body: its name, what made it, and how big it is.

@@ -38,8 +38,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod keys;
+mod planes;
 mod up_to;
 use keys::Keys;
+pub use planes::{default_x, line_ref_value, plane_ref_value, point_ref_value, read_line_ref, read_plane_ref, read_point_ref, AlongEdge, LineRef, PlaneDef, PlaneRef, PointRef, TangentAt};
+use planes::{Geo, Looker};
 pub use keys::{face_keys, find_faces, FaceKey};
 
 /// The file format's name and the version this code writes.
@@ -213,21 +216,24 @@ pub struct Placement {
     /// origin keeps its place within the plane, as a sketch's position on a face is its own, and the normal keeps the
     /// side of the face it started on.
     pub on_face: Option<FaceKey>,
+    /// A plane this sits on: at each rebuild its origin, normal and x are that plane's, wherever it's got to, and the
+    /// numbers above aren't used.
+    pub on_plane: Option<PlaneRef>,
 }
 
 impl Placement {
     /// The XY plane, offset along Z.
     pub fn xy(z: impl Into<Expr>) -> Placement {
-        Placement { origin: point3(0.0, 0.0, z), z: point3(0.0, 0.0, 1.0), x: point3(1.0, 0.0, 0.0), on_face: None }
+        Placement { origin: point3(0.0, 0.0, z), z: point3(0.0, 0.0, 1.0), x: point3(1.0, 0.0, 0.0), on_face: None, on_plane: None }
     }
 
     pub fn at(origin: Point3) -> Placement {
-        Placement { origin, z: point3(0.0, 0.0, 1.0), x: point3(1.0, 0.0, 0.0), on_face: None }
+        Placement { origin, z: point3(0.0, 0.0, 1.0), x: point3(1.0, 0.0, 0.0), on_face: None, on_plane: None }
     }
 
     /// Placed with the given axis and x direction.
     pub fn new(origin: Point3, z: Point3, x: Point3) -> Placement {
-        Placement { origin, z, x, on_face: None }
+        Placement { origin, z, x, on_face: None, on_plane: None }
     }
 
     /// The placement of a frame computed in code.
@@ -237,7 +243,13 @@ impl Placement {
             z: point3(f.z.x, f.z.y, f.z.z),
             x: point3(f.x.x, f.x.y, f.x.z),
             on_face: None,
+            on_plane: None,
         }
+    }
+
+    /// On a plane, following it: Top, Front, Right, a plane feature or a flat face.
+    pub fn on_plane(plane: PlaneRef) -> Placement {
+        Placement { on_plane: Some(plane), ..Placement::xy(0.0) }
     }
 
     /// This placement, following a flat face from here on.
@@ -758,6 +770,9 @@ pub enum Op {
     Sew { tolerance: Option<Expr> },
     /// Cuts sheets, those it names or all of them, and keeps a part of each.
     Trim { tool: TrimTool, keep: TrimKeep },
+    /// A plane, not a part, worked out again at every rebuild from what it names. `flip` turns its normal round, keeping
+    /// its origin and x. Sketches can sit on it, and other features can name it.
+    Plane { def: PlaneDef, flip: bool },
 }
 
 /// A line in a sketch's plane to revolve around.
@@ -926,12 +941,29 @@ impl Op {
             Op::Offset { .. } => "offset",
             Op::Shell { .. } => "shell",
             Op::Draft { .. } => "draft",
+            Op::Plane { .. } => "plane",
         }
     }
 
     /// Whether this makes profiles for later features, leaving the body alone.
     fn is_sketch(&self) -> bool {
         matches!(self, Op::Sketch { .. } | Op::ConstrainedSketch { .. })
+    }
+
+    /// Whether this makes something to build on, a sketch or a plane, and acts on no body.
+    fn is_reference(&self) -> bool {
+        self.is_sketch() || matches!(self, Op::Plane { .. })
+    }
+
+    /// What this places things by: placements that follow a face or a plane, and the planes, points and lines it names.
+    fn geo(&self) -> Vec<Geo<'_>> {
+        let following = |p: &Placement| p.on_face.is_some() || p.on_plane.is_some();
+        match self {
+            Op::Sketch { plane, .. } | Op::ConstrainedSketch { plane, .. } | Op::Solid { at: plane, .. } if following(plane) => vec![Geo::Place(plane)],
+            Op::Transform { motion: Motion::Frames { from, to }, .. } => [from, to].into_iter().filter(|p| following(p)).map(Geo::Place).collect(),
+            Op::Plane { def, flip } => vec![Geo::Def(def, *flip)],
+            _ => Vec::new(),
+        }
     }
 
     /// How this combines with a body, for the features that make a solid.
@@ -996,6 +1028,7 @@ impl Op {
             Op::Offset { .. } => "Offset",
             Op::Shell { .. } => "Shell",
             Op::Draft { .. } => "Draft",
+            Op::Plane { .. } => "Plane",
         }
     }
 
@@ -1059,6 +1092,9 @@ impl Op {
                 }
             }
             _ => {}
+        }
+        for g in self.geo() {
+            g.references(&mut out);
         }
         out.sort();
         out.dedup();
@@ -1224,6 +1260,10 @@ impl Op {
                 edges.collect_exprs(&mut out);
                 out.push(distance);
             }
+            Op::Plane { .. } => {}
+        }
+        for g in self.geo() {
+            g.exprs(&mut out);
         }
         out
     }
@@ -1304,6 +1344,15 @@ pub struct Outcome {
     pub bodies: Vec<NamedBody>,
     /// Index in `steps` of the failed feature, if any.
     pub failed: Option<usize>,
+    /// Each plane feature that built, where it is now, in history order.
+    pub planes: Vec<PlaneAt>,
+}
+
+/// A plane feature, as a rebuild left it.
+#[derive(Clone, Debug)]
+pub struct PlaneAt {
+    pub id: FeatureId,
+    pub frame: Frame,
 }
 
 /// One of a document's bodies, as a rebuild left it.
@@ -1360,6 +1409,8 @@ struct Cached {
     sketch: Option<SketchOutput>,
     /// The solids this feature applied, and how, for a pattern or mirror to use again.
     tools: Option<(Arc<Vec<Body>>, Mode)>,
+    /// A plane feature's plane.
+    plane: Option<Frame>,
 }
 
 /// What running one feature produced.
@@ -1368,6 +1419,7 @@ struct RunResult {
     added: Vec<Arc<Body>>,
     sketch: Option<SketchOutput>,
     tools: Option<(Arc<Vec<Body>>, Mode)>,
+    plane: Option<Frame>,
 }
 
 /// A body during a rebuild. Its key covers everything it depends on, so a change to one body doesn't rebuild another.
@@ -1406,24 +1458,6 @@ fn whole_of(all: &[Held]) -> Option<Arc<Body>> {
             Some(Arc::new(Body::side_by_side(&list)))
         }
     }
-}
-
-/// A sketch's frame. Following a face, that's the face's plane as it now is.
-fn plane_frame(plane: &Placement, env: &Env, all: &[Held]) -> Result<Frame> {
-    let frame = plane.resolve(env)?;
-    let Some(key) = &plane.on_face else { return Ok(frame) };
-    let gone = || Error::InvalidInput(format!("the face {} no longer exists in the model", key.text()));
-    let whole = whole_of(all).ok_or_else(gone)?;
-    let found = find_faces(&whole, key);
-    let face = found.first().ok_or_else(gone)?;
-    let Surface::Plane(on) = &whole.faces[*face].surface else {
-        return Err(Error::InvalidInput(format!("a sketch can only follow a flat face, and {} isn't flat", key.text())));
-    };
-    let normal = if on.z.dot(frame.z) >= 0.0 { on.z } else { -on.z };
-    let origin = frame.origin - on.z * (frame.origin - on.origin).dot(on.z);
-    // Tipped so far that its x axis now runs along the normal, any direction in the plane will do.
-    let x = if normal.cross(frame.x).norm() > 1e-9 { frame.x } else { normal.any_perpendicular() };
-    Ok(Frame::new(origin, normal, x))
 }
 
 /// What a sketch's projected entity comes from.
@@ -1624,7 +1658,7 @@ impl Changes {
     }
 
     fn done(self, tools: Option<(Arc<Vec<Body>>, Mode)>) -> RunResult {
-        RunResult { changed: self.changed, added: self.added, sketch: None, tools }
+        RunResult { changed: self.changed, added: self.added, sketch: None, tools, plane: None }
     }
 }
 
@@ -1828,7 +1862,7 @@ fn revolve_frame(axis: &RevolveAxis, frame: &Frame, list: &[Profile], angle: f64
 }
 
 /// What a rebuild hands back.
-fn finished(steps: Vec<Step>, held: &[Held], failed: Option<usize>) -> Outcome {
+fn finished(steps: Vec<Step>, held: &[Held], failed: Option<usize>, planes: Vec<PlaneAt>) -> Outcome {
     let (mut first_face, mut first_edge) = (0, 0);
     let bodies: Vec<NamedBody> = held
         .iter()
@@ -1847,7 +1881,7 @@ fn finished(steps: Vec<Step>, held: &[Held], failed: Option<usize>) -> Outcome {
             Some(Arc::new(Body::side_by_side(&list)))
         }
     };
-    Outcome { steps, body, bodies, failed }
+    Outcome { steps, body, bodies, failed, planes }
 }
 
 /// What a sketch hands to the features that use it.
@@ -1870,7 +1904,7 @@ fn sheets(made: Vec<Body>) -> Result<RunResult> {
     }
     let pieces: Vec<Body> = made.iter().flat_map(Body::solids).collect();
     let added = pieces.iter().map(|b| Arc::new(b.clone())).collect();
-    Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(pieces), Mode::NewBody)) })
+    Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(pieces), Mode::NewBody)), plane: None })
 }
 
 /// What regions and open curves made, each kept apart by its place in the sketch, as regions' faces are when they're not named
@@ -2018,8 +2052,59 @@ impl Document {
             let o = self.rebuild(Some(position - 1));
             o.bodies.iter().map(|b| Held { id: b.id, body: b.body.clone(), key: 0 }).collect()
         };
-        let frame = plane_frame(plane, &env, &held)?;
+        let frame = Looker::new(self, &env, &held).placement(plane)?;
         placed_sketch(sketch, &frame, &held, &env)
+    }
+
+    /// Where a plane feature's plane is, or a sketch's, as the last rebuild that reached it left it.
+    pub fn frame_of(&self, id: FeatureId) -> Option<Frame> {
+        let c = self.cache.get(&id)?;
+        c.plane.or_else(|| c.sketch.as_ref().map(|s| s.frame))
+    }
+
+    /// A plane feature's plane, for what names it.
+    fn plane_output(&self, id: FeatureId) -> Result<Frame> {
+        if self.feature(id).is_some_and(|f| f.suppressed) {
+            return Err(Error::InvalidInput(format!("plane f{} is suppressed", id.0)));
+        }
+        self.cache.get(&id).and_then(|c| c.plane).ok_or_else(|| Error::InvalidInput(format!("plane f{} did not build", id.0)))
+    }
+
+    /// What a sketch hands on, for what uses it.
+    fn sketch_output(&self, id: FeatureId) -> Result<SketchOutput> {
+        if self.feature(id).is_some_and(|f| f.suppressed) {
+            return Err(Error::InvalidInput(format!("its sketch f{} is suppressed", id.0)));
+        }
+        self.cache.get(&id).and_then(|c| c.sketch.clone()).ok_or_else(|| Error::InvalidInput(format!("its sketch f{} did not build", id.0)))
+    }
+
+    /// A constrained sketch as solved, with its frame, for picking its points and lines.
+    fn solved_sketch(&self, id: FeatureId) -> Result<(Frame, Arc<coreshape_sketch::Sketch>)> {
+        let out = self.sketch_output(id)?;
+        let solved = out.solved.ok_or_else(|| Error::InvalidInput(format!("points and lines are picked from a constrained sketch, and f{} is a sketch of shapes", id.0)))?;
+        Ok((out.frame, solved))
+    }
+
+    /// Where everything a feature places things by now is, as text for its key, so that it's rebuilt when any of it moves.
+    fn resolved_refs(&self, op: &Op, env: &Env, held: &[Held]) -> Result<String> {
+        let geo = op.geo();
+        if geo.is_empty() {
+            return Ok(String::new());
+        }
+        let look = Looker::new(self, env, held);
+        let mut out = String::new();
+        for g in geo {
+            let text = match g {
+                Geo::Place(p) => format!("{:?}", look.placement(p)?),
+                Geo::Plane(p) => format!("{:?}", look.plane(p)?),
+                Geo::Point(p) => format!("{:?}", look.point(p)?),
+                Geo::Line(l) => format!("{:?}", look.line(l)?),
+                Geo::Def(d, flip) => format!("{:?}", look.def(d, flip)?),
+            };
+            out.push(' ');
+            out.push_str(&text);
+        }
+        Ok(out)
     }
 
     pub fn feature(&self, id: FeatureId) -> Option<&Feature> {
@@ -2135,8 +2220,8 @@ impl Document {
     /// Chooses the bodies a feature acts on. Empty means all of them.
     pub fn set_scope(&mut self, id: FeatureId, scope: Vec<BodyId>) -> Result<()> {
         let at = self.position(id)?;
-        if !scope.is_empty() && self.features[at].op.is_sketch() {
-            return Err(Error::InvalidInput("a sketch doesn't act on a body".into()));
+        if !scope.is_empty() && self.features[at].op.is_reference() {
+            return Err(Error::InvalidInput(format!("a {} doesn't act on a body", self.features[at].op.label().to_lowercase())));
         }
         for b in &scope {
             if !self.features[..at].iter().any(|f| f.id == b.feature) {
@@ -2183,6 +2268,25 @@ impl Document {
             if let Some(f) = before.iter().find(|f| f.id == *sketch) {
                 if !f.op.is_sketch() {
                     return Err(Error::InvalidInput(format!("f{} is a {}, not a sketch", sketch.0, f.op.kind())));
+                }
+            }
+        }
+        let (mut planes, mut sketches) = (Vec::new(), Vec::new());
+        for g in op.geo() {
+            g.planes(&mut planes);
+            g.sketches(&mut sketches);
+        }
+        for id in planes {
+            if let Some(f) = before.iter().find(|f| f.id == id) {
+                if !matches!(f.op, Op::Plane { .. }) {
+                    return Err(Error::InvalidInput(format!("f{} is a {}, not a plane", id.0, f.op.kind())));
+                }
+            }
+        }
+        for id in sketches {
+            if let Some(f) = before.iter().find(|f| f.id == id) {
+                if !matches!(f.op, Op::ConstrainedSketch { .. }) {
+                    return Err(Error::InvalidInput(format!("points and lines are picked from a constrained sketch, and f{} is a {}", id.0, f.op.kind())));
                 }
             }
         }
@@ -2271,6 +2375,7 @@ impl Document {
         let mut steps: Vec<Step> = Vec::with_capacity(n);
         let mut held: Vec<Held> = Vec::new();
         let mut failed: Option<usize> = None;
+        let mut planes: Vec<PlaneAt> = Vec::new();
 
         let env = match self.environment() {
             Ok(env) => env,
@@ -2283,7 +2388,7 @@ impl Document {
                     first.state = StepState::Failed(why);
                     failed = Some(0);
                 }
-                return finished(steps, &held, failed);
+                return finished(steps, &held, failed, Vec::new());
             }
         };
 
@@ -2313,23 +2418,20 @@ impl Document {
                     continue;
                 }
             };
-            // A sketch following a face depends on where that face has got to, and nothing else about the bodies.
-            if let Op::Sketch { plane, .. } | Op::ConstrainedSketch { plane, .. } = &feature.op {
-                if plane.on_face.is_some() {
-                    match plane_frame(plane, &env, &held) {
-                        Ok(frame) => own.push_str(&format!(" {frame:?}")),
-                        Err(e) => {
-                            failed = Some(i);
-                            steps.push(step(StepState::Failed(e.to_string())));
-                            continue;
-                        }
-                    }
+            // Following a face or a plane, or naming planes, points or lines, it depends on where they've got to, and nothing
+            // else about what they're on.
+            match self.resolved_refs(&feature.op, &env, &held) {
+                Ok(text) => own.push_str(&text),
+                Err(e) => {
+                    failed = Some(i);
+                    steps.push(step(StepState::Failed(e.to_string())));
+                    continue;
                 }
             }
             // Geometry projected from parts depends on where those parts are now, and on nothing else about the bodies.
             if let Op::ConstrainedSketch { plane, sketch } = &feature.op {
                 if sketch.projected().next().is_some() {
-                    match plane_frame(plane, &env, &held).and_then(|frame| placed_sketch(sketch, &frame, &held, &env)) {
+                    match Looker::new(self, &env, &held).placement(plane).and_then(|frame| placed_sketch(sketch, &frame, &held, &env)) {
                         Ok(placed) => {
                             for e in placed.projected() {
                                 own.push_str(&format!(" {:?}", e.geometry));
@@ -2349,12 +2451,12 @@ impl Document {
             }
             // The bodies it acts on: those it names, or all of them. One that isn't there is for it to say so.
             let missing = feature.scope.iter().find(|id| !held.iter().any(|h| h.id == **id));
-            if let (Some(id), false) = (missing, feature.op.is_sketch()) {
+            if let (Some(id), false) = (missing, feature.op.is_reference()) {
                 failed = Some(i);
                 steps.push(step(StepState::Failed(format!("it acts on body {}, which isn't there at this point", id.text()))));
                 continue;
             }
-            let scope: Vec<(BodyId, Arc<Body>)> = if feature.op.is_sketch() {
+            let scope: Vec<(BodyId, Arc<Body>)> = if feature.op.is_reference() {
                 Vec::new()
             } else if feature.scope.is_empty() {
                 // A sheet has no inside to cut or add to, and one lying around mustn't get in the way of what does.
@@ -2399,7 +2501,7 @@ impl Document {
             }
             let mixed = |list: &[FeatureId]| list.iter().enumerate().fold(0u64, |sum, (k, id)| sum ^ keys.get(id).copied().unwrap_or(0).rotate_left(17 + k as u32));
             let key = match &feature.op {
-                Op::Sketch { .. } | Op::ConstrainedSketch { .. } => hash_text(1, &own),
+                Op::Sketch { .. } | Op::ConstrainedSketch { .. } | Op::Plane { .. } => hash_text(1, &own),
                 Op::Extrude { sketch, regions, .. } => {
                     let sketches: Vec<FeatureId> = sketch.iter().copied().chain(regions.iter().map(|r| r.sketch)).collect();
                     hash_text(body_key ^ mixed(&sketches), &own)
@@ -2420,6 +2522,9 @@ impl Document {
                 if !feature.op.is_sketch() {
                     take_result(&mut held, feature.id, key, &c.changed, &c.added);
                 }
+                if let Some(frame) = c.plane {
+                    planes.push(PlaneAt { id: feature.id, frame });
+                }
                 steps.push(step(StepState::Reused));
                 continue;
             }
@@ -2429,7 +2534,10 @@ impl Document {
                     if result.sketch.is_none() {
                         take_result(&mut held, feature.id, key, &result.changed, &result.added);
                     }
-                    self.cache.insert(feature.id, Cached { key, changed: result.changed, added: result.added, sketch: result.sketch, tools: result.tools });
+                    if let Some(frame) = result.plane {
+                        planes.push(PlaneAt { id: feature.id, frame });
+                    }
+                    self.cache.insert(feature.id, Cached { key, changed: result.changed, added: result.added, sketch: result.sketch, tools: result.tools, plane: result.plane });
                     steps.push(step(StepState::Rebuilt));
                 }
                 // The previous result stays cached under its own key, so going back to the
@@ -2440,7 +2548,7 @@ impl Document {
                 }
             }
         }
-        finished(steps, &held, failed)
+        finished(steps, &held, failed, planes)
     }
 
     /// Text covering everything a feature's result depends on: what it is, and the value
@@ -2456,7 +2564,7 @@ impl Document {
 
     fn run(&self, feature: &Feature, env: &Env, scope: &[(BodyId, Arc<Body>)], all: &[Held]) -> Result<RunResult> {
         let tag = feature.id.0;
-        let sketched = |output: SketchOutput| RunResult { changed: Vec::new(), added: Vec::new(), sketch: Some(output), tools: None };
+        let sketched = |output: SketchOutput| RunResult { changed: Vec::new(), added: Vec::new(), sketch: Some(output), tools: None, plane: None };
         let applied = |tools: Vec<Body>, mode: Mode| -> Result<RunResult> {
             if mode == Mode::Surface {
                 if matches!(feature.op, Op::Solid { .. } | Op::Thicken { .. }) {
@@ -2480,15 +2588,8 @@ impl Document {
         };
         let whole = || -> Option<Arc<Body>> { whole_of(all) };
         let at_point = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
-        let sketch_output = |id: &FeatureId| -> Result<SketchOutput> {
-            if self.feature(*id).is_some_and(|f| f.suppressed) {
-                return Err(Error::InvalidInput(format!("its sketch f{} is suppressed", id.0)));
-            }
-            self.cache
-                .get(id)
-                .and_then(|c| c.sketch.clone())
-                .ok_or_else(|| Error::InvalidInput(format!("its sketch f{} did not build", id.0)))
-        };
+        let sketch_output = |id: &FeatureId| -> Result<SketchOutput> { self.sketch_output(*id) };
+        let look = Looker::new(self, env, all);
         match &feature.op {
             Op::Sketch { plane, regions } => {
                 let list = resolve_regions(regions, env)?;
@@ -2499,10 +2600,10 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: plane_frame(plane, env, all)?, profiles: Arc::new(list), by_entity: false, solved: None, open: Arc::new(open) }))
+                Ok(sketched(SketchOutput { frame: look.placement(plane)?, profiles: Arc::new(list), by_entity: false, solved: None, open: Arc::new(open) }))
             }
             Op::ConstrainedSketch { plane, sketch } => {
-                let frame = plane_frame(plane, env, all)?;
+                let frame = look.placement(plane)?;
                 let placed;
                 let sketch = if sketch.projected().next().is_some() {
                     placed = placed_sketch(sketch, &frame, all, env)?;
@@ -2795,7 +2896,7 @@ impl Document {
                 // A file's solids are parts, and each of them can be a body. Merging is only for when that's asked for.
                 if *mode == Mode::NewBody {
                     let added = solids.iter().map(|b| Arc::new(b.clone())).collect();
-                    return Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), *mode)) });
+                    return Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), *mode)), plane: None });
                 }
                 let count = solids.len();
                 applied(solids, *mode).map_err(|e| {
@@ -2810,10 +2911,10 @@ impl Document {
                 let solids = coreshape::import::step::read_step_parts(text, tag)?;
                 // Each is one part, whether it's a solid or a sheet.
                 let added = solids.iter().map(|b| Arc::new(b.clone())).collect();
-                Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), Mode::NewBody)) })
+                Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), Mode::NewBody)), plane: None })
             }
             Op::Solid { primitive, at, mode } => {
-                let frame = at.resolve(env)?;
+                let frame = look.placement(at)?;
                 let made = match primitive {
                     Primitive::Box { dx, dy, dz } => box_solid(&frame, num(dx, env)?, num(dy, env)?, num(dz, env)?, tag)?,
                     Primitive::Cylinder { radius, height } => cylinder(&frame, num(radius, env)?, num(height, env)?, tag)?,
@@ -2940,7 +3041,7 @@ impl Document {
                         }
                         Frame::rotation(at_point(point)?, a.normalized(), num(degrees, env)?.to_radians())
                     }
-                    Motion::Frames { from, to } => to.resolve(env)?.compose(&from.resolve(env)?.inverse()),
+                    Motion::Frames { from, to } => look.placement(to)?.compose(&look.placement(from)?.inverse()),
                 };
                 let mut out = Changes::default();
                 for (k, (id, body)) in scope.iter().enumerate() {
@@ -3014,6 +3115,7 @@ impl Document {
                 }
                 Ok(out.done(None))
             }
+            Op::Plane { def, flip } => Ok(RunResult { changed: Vec::new(), added: Vec::new(), sketch: None, tools: None, plane: Some(look.def(def, *flip)?) }),
         }
     }
 
@@ -3259,8 +3361,8 @@ impl Document {
             if doc.features.iter().any(|g| g.id == feature.id) {
                 return Err(Error::InvalidInput(format!("feature id {} appears twice", feature.id.0)));
             }
-            if !feature.scope.is_empty() && feature.op.is_sketch() {
-                return Err(Error::InvalidInput(format!("feature f{} is a sketch, which doesn't act on a body", feature.id.0)));
+            if !feature.scope.is_empty() && feature.op.is_reference() {
+                return Err(Error::InvalidInput(format!("feature f{} is a {}, which doesn't act on a body", feature.id.0, feature.op.kind())));
             }
             for r in feature.references() {
                 if !doc.features.iter().any(|g| g.id == r) {
@@ -3706,6 +3808,9 @@ fn read_point3(v: &Value) -> Result<Point3> {
 }
 
 fn placement_value(p: &Placement) -> Value {
+    if let Some(plane) = &p.on_plane {
+        return Value::obj(vec![("on_plane", plane_ref_value(plane))]);
+    }
     let mut items = vec![("origin", point3_value(&p.origin)), ("z", point3_value(&p.z)), ("x", point3_value(&p.x))];
     if let Some(key) = &p.on_face {
         items.push(("on_face", Value::str(key.text())));
@@ -3738,7 +3843,11 @@ pub fn read_body_list(v: &Value, key: &str) -> Result<Vec<BodyId>> {
 
 /// A placement as files write it: `{"origin": [x, y, z], "z": [x, y, z], "x": [x, y, z]}`, each part with a default.
 pub fn read_placement(v: &Value) -> Result<Placement> {
-    known_keys(v, &["origin", "z", "x", "on_face"])?;
+    if let Some(plane) = v.get("on_plane") {
+        known_keys(v, &["on_plane"]).map_err(|_| Error::InvalidInput("a placement on a plane takes its origin, normal and x from the plane, so it has \"on_plane\" alone".into()))?;
+        return Ok(Placement::on_plane(read_plane_ref(plane)?));
+    }
+    known_keys(v, &["origin", "z", "x", "on_face", "on_plane"])?;
     let dir = |key: &str, fallback: [f64; 3]| -> Result<Point3> {
         match v.get(key) {
             Some(p) => read_point3(p),
@@ -3755,7 +3864,7 @@ pub fn read_placement(v: &Value) -> Result<Placement> {
         None => None,
         Some(k) => Some(FaceKey::parse(k.as_str().ok_or_else(|| Error::InvalidInput("\"on_face\" must be the name of a face".into()))?)?),
     };
-    Ok(Placement { origin: dir("origin", [0.0, 0.0, 0.0])?, z, x: dir("x", x_default)?, on_face })
+    Ok(Placement { origin: dir("origin", [0.0, 0.0, 0.0])?, z, x: dir("x", x_default)?, on_face, on_plane: None })
 }
 
 fn shape_value(s: &Shape) -> Value {
@@ -4315,6 +4424,7 @@ pub fn op_value(op: &Op) -> Value {
             ("distance", expr_value(distance)),
             ("propagate", Value::Bool(*propagate)),
         ]),
+        Op::Plane { def, flip } => planes::plane_value(def, *flip),
     }
 }
 
@@ -4765,8 +4875,9 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 },
             })
         }
+        "plane" => planes::read_plane(v, &with),
         other => Err(Error::InvalidInput(format!(
-            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, extrude, revolve, sweep, solid, pattern, mirror, transform, delete_bodies, boolean, fillet, chamfer, offset, shell or draft"
+            "unknown feature type \"{other}\"; expected sketch, constrained_sketch, plane, extrude, revolve, sweep, solid, pattern, mirror, transform, delete_bodies, boolean, fillet, chamfer, offset, shell or draft"
         ))),
     }
 }

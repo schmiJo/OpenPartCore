@@ -303,7 +303,7 @@ fn assembled(steps: Vec<coreshape_document::Step>, failed: Option<usize>, solved
         first_face += faces;
         first_edge += edges;
     }
-    Outcome { steps, body, bodies, failed }
+    Outcome { steps, body, bodies, failed, planes: Vec::new() }
 }
 
 /// What a mechanism adds to a build's info: how free it is, where it's got to, and whether it got there.
