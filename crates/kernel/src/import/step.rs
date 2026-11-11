@@ -1624,7 +1624,7 @@ impl Reader<'_> {
         let list = if f.has(id, "CLOSED_SHELL") {
             File::list(f.part(id, "CLOSED_SHELL")?.get(1))?
         } else if f.has(id, "OPEN_SHELL") {
-            return Err(Error::Unsupported("an open shell: this file holds surfaces with gaps, and only closed solids can be imported".into()));
+            File::list(f.part(id, "OPEN_SHELL")?.get(1))?
         } else {
             return Err(bad(format!("#{id} should be a closed shell, not a {}", f.name(id))));
         };
@@ -1973,7 +1973,7 @@ fn unsupported_surfaces(file: &File, shells: &[usize]) -> Vec<(String, usize)> {
     let known = ["B_SPLINE_SURFACE_WITH_KNOTS", "B_SPLINE_SURFACE", "QUASI_UNIFORM_SURFACE", "UNIFORM_SURFACE", "BEZIER_SURFACE", "OFFSET_SURFACE", "PLANE", "CYLINDRICAL_SURFACE", "CONICAL_SURFACE", "SPHERICAL_SURFACE", "TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE", "SURFACE_OF_LINEAR_EXTRUSION", "SURFACE_OF_REVOLUTION"];
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for &s in shells {
-        let Ok(list) = file.part(s, "CLOSED_SHELL").and_then(|a| File::list(a.get(1))) else { continue };
+        let Ok(list) = file.part(s, "CLOSED_SHELL").or_else(|_| file.part(s, "OPEN_SHELL")).and_then(|a| File::list(a.get(1))) else { continue };
         for item in list {
             let Ok(mut face) = File::id(Some(item)) else { continue };
             if let Ok(o) = file.part(face, "ORIENTED_FACE") {
@@ -2288,6 +2288,19 @@ fn orient_shell(b: &Builder, faces: &mut [RawFace]) {
 
 /// One solid: its outer shell, and any voids.
 fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Result<Body> {
+    built_shell(file, feature, outer, voids, false)
+}
+
+/// A shell as a sheet, whether the file has it open or closed. A sheet's faces only have to agree with each other, and which
+/// way the whole faces is the file's to say.
+fn sheet(file: &File, feature: u32, shell: usize) -> Result<Body> {
+    built_shell(file, feature, shell, &[], true)
+}
+
+fn built_shell(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)], open: bool) -> Result<Body> {
+    if !open && std::iter::once(outer).chain(voids.iter().map(|v| v.0)).any(|s| file.has(s, "OPEN_SHELL")) {
+        return Err(Error::Unsupported("a solid in this file is bounded by an open shell, which has gaps in it".into()));
+    }
     let mut b = Builder { vertices: Vec::new(), edges: Vec::new(), gap: 0.0 };
     let (mut vertices, mut edges) = (BTreeMap::new(), BTreeMap::new());
     let mut faces: Vec<RawFace> = Vec::new();
@@ -2303,7 +2316,7 @@ fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Re
         *uses.entry(c.edge).or_insert(0) += 1;
     }
     let lone = uses.values().filter(|&&n| n == 1).count();
-    if lone > 0 {
+    if lone > 0 && !open {
         return Err(Error::NearDegenerate(format!("a shell this file calls closed isn't closed: {lone} of its {} edges have a face on one side only", uses.len())));
     }
     orient_shell(&b, &mut faces);
@@ -2388,7 +2401,7 @@ fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Re
     }
 
     // Only what the faces use goes into the body, renumbered.
-    let mut body = Body { tolerance: b.gap, ..Body::default() };
+    let mut body = Body { tolerance: b.gap, sheet: open, ..Body::default() };
     let (mut new_vertex, mut new_edge) = (BTreeMap::new(), BTreeMap::new());
     for face in &faces {
         let mut loops = Vec::with_capacity(face.loops.len());
@@ -2410,6 +2423,9 @@ fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Re
     }
     body.compute_shells();
     validate(&body).map_err(|defects| Error::NearDegenerate(format!("the imported solid isn't valid: {}", defects.join("; "))))?;
+    if open {
+        return Ok(body);
+    }
 
     // Shells are meant to have their outsides out. If one's inside out, turn it over.
     let mut turned = false;
@@ -2739,15 +2755,78 @@ impl Placements {
 /// in the file. An assembly's parts come out where it puts them, one body for each time each is used. A file holding
 /// anything this can't represent exactly is refused, naming what it found.
 pub fn read_step(text: &str, feature: u32) -> Result<Vec<Body>> {
-    let (file, solids) = solids_of(text)?;
-    let placements = Placements::of(&file)?;
+    let (file, solids, surfaces) = contents_of(text)?;
+    if solids.is_empty() {
+        return placed_sheets(&file, &surfaces, feature, 0);
+    }
+    placed_bodies(&file, &solids, feature)
+}
+
+/// Every solid in a file, and then every sheet beside them, each where the file puts it. `read_step` leaves those sheets out
+/// when there are solids, as files often have them for reference.
+pub fn read_step_all(text: &str, feature: u32) -> Result<Vec<Body>> {
+    let (file, solids, surfaces) = contents_of(text)?;
+    if solids.is_empty() {
+        return placed_sheets(&file, &surfaces, feature, 0);
+    }
+    let mut out = placed_bodies(&file, &solids, feature)?;
+    let shells: Vec<usize> = surfaces.values().flatten().copied().collect();
+    let missing = unsupported_surfaces(&file, &shells);
+    if !missing.is_empty() {
+        let list: Vec<String> = missing.iter().map(|(n, c)| format!("{c} on {n}")).collect();
+        return Err(Error::Unsupported(format!("this file has surfaces that can't be imported yet: {}", list.join(", "))));
+    }
+    let first = out.len() as u32;
+    out.extend(placed_sheets(&file, &surfaces, feature, first)?);
+    Ok(out)
+}
+
+/// Each surface in a file with shells of its own, as a sheet, where the file puts it, and nothing for its solids.
+pub fn read_step_sheets(text: &str, feature: u32) -> Result<Vec<Body>> {
+    let (file, _, surfaces) = contents_of(text)?;
+    if surfaces.is_empty() {
+        return Err(Error::InvalidInput("this file has no surfaces beside its solids".to_string()));
+    }
+    let shells: Vec<usize> = surfaces.values().flatten().copied().collect();
+    let missing = unsupported_surfaces(&file, &shells);
+    if !missing.is_empty() {
+        let list: Vec<String> = missing.iter().map(|(n, c)| format!("{c} on {n}")).collect();
+        return Err(Error::Unsupported(format!("this file has surfaces that can't be imported yet: {}", list.join(", "))));
+    }
+    placed_sheets(&file, &surfaces, feature, 0)
+}
+
+/// The sheets a file's surface models make, a body for each shell of each use, named apart as an assembly's copies are.
+fn placed_sheets(file: &File, surfaces: &BTreeMap<usize, Vec<usize>>, feature: u32, first: u32) -> Result<Vec<Body>> {
+    let placements = Placements::of(file)?;
+    let ids: BTreeSet<usize> = surfaces.keys().copied().collect();
+    let mut built: BTreeMap<usize, Body> = BTreeMap::new();
+    let mut out = Vec::new();
+    for (id, at) in placements.placed_solids(&ids) {
+        for &shell in &surfaces[&id] {
+            if !built.contains_key(&shell) {
+                built.insert(shell, sheet(file, feature, shell)?);
+            }
+            let mut body = built[&shell].transformed(&at);
+            let k = first + out.len() as u32;
+            if k > 0 {
+                body.mark_copy(feature, k);
+            }
+            out.push(body);
+        }
+    }
+    Ok(out)
+}
+
+fn placed_bodies(file: &File, solids: &BTreeMap<usize, SolidShells>, feature: u32) -> Result<Vec<Body>> {
+    let placements = Placements::of(file)?;
     let ids: BTreeSet<usize> = solids.keys().copied().collect();
     let mut built: BTreeMap<usize, Body> = BTreeMap::new();
     let mut out = Vec::new();
     for (k, (id, at)) in placements.placed_solids(&ids).into_iter().enumerate() {
         if !built.contains_key(&id) {
             let (outer, voids) = &solids[&id];
-            built.insert(id, solid(&file, feature, *outer, voids)?);
+            built.insert(id, solid(file, feature, *outer, voids)?);
         }
         let mut body = built[&id].transformed(&at);
         // Each one has names of its own, the way a pattern's copies do.
@@ -2768,22 +2847,32 @@ pub struct StepStructure {
 
 /// Which distinct solids a file has, in the order `read_step_parts` gives them, and where it uses each. Nothing gets built.
 pub fn read_step_structure(text: &str) -> Result<StepStructure> {
-    let (file, solids) = solids_of(text)?;
+    let (file, solids, surfaces) = contents_of(text)?;
     let placements = Placements::of(&file)?;
+    if solids.is_empty() {
+        let ids: BTreeSet<usize> = surfaces.keys().copied().collect();
+        return Ok(structure_of(&file, &placements, &ids, &|id| surfaces[&id].len()).0);
+    }
     let ids: BTreeSet<usize> = solids.keys().copied().collect();
-    Ok(structure_of(&file, &placements, &ids).0)
+    Ok(structure_of(&file, &placements, &ids, &|_| 1).0)
 }
 
 /// Each distinct solid in a STEP file once, as a body in its own coordinates. `read_step_structure` says where it's used.
 pub fn read_step_parts(text: &str, feature: u32) -> Result<Vec<Body>> {
-    let (file, solids) = solids_of(text)?;
+    let (file, solids, surfaces) = contents_of(text)?;
     let placements = Placements::of(&file)?;
-    let ids: BTreeSet<usize> = solids.keys().copied().collect();
-    let (_, order) = structure_of(&file, &placements, &ids);
+    let only_sheets = solids.is_empty();
+    let ids: BTreeSet<usize> = if only_sheets { surfaces.keys().copied().collect() } else { solids.keys().copied().collect() };
+    let count = |id: usize| if only_sheets { surfaces[&id].len() } else { 1 };
+    let (_, order) = structure_of(&file, &placements, &ids, &count);
     let mut out = Vec::with_capacity(order.len());
-    for (k, id) in order.iter().enumerate() {
-        let (outer, voids) = &solids[id];
-        let mut body = solid(&file, feature, *outer, voids)?;
+    for (k, (id, shell)) in order.iter().enumerate() {
+        let mut body = if only_sheets {
+            sheet(&file, feature, surfaces[id][*shell])?
+        } else {
+            let (outer, voids) = &solids[id];
+            solid(&file, feature, *outer, voids)?
+        };
         if k > 0 {
             body.mark_copy(feature, k as u32);
         }
@@ -2793,22 +2882,24 @@ pub fn read_step_parts(text: &str, feature: u32) -> Result<Vec<Body>> {
 }
 
 /// The structure of a file, and its distinct solids in order.
-fn structure_of(file: &File, placements: &Placements, ids: &BTreeSet<usize>) -> (StepStructure, Vec<usize>) {
-    let mut order: Vec<usize> = Vec::new();
+fn structure_of(file: &File, placements: &Placements, ids: &BTreeSet<usize>, shells: &dyn Fn(usize) -> usize) -> (StepStructure, Vec<(usize, usize)>) {
+    let mut order: Vec<(usize, usize)> = Vec::new();
     let mut instances = Vec::new();
     for (id, at) in placements.placed_solids(ids) {
-        let part = order.iter().position(|o| *o == id).unwrap_or_else(|| {
-            order.push(id);
-            order.len() - 1
-        });
-        instances.push((part, at));
+        for shell in 0..shells(id) {
+            let part = order.iter().position(|o| *o == (id, shell)).unwrap_or_else(|| {
+                order.push((id, shell));
+                order.len() - 1
+            });
+            instances.push((part, at));
+        }
     }
-    let names = order.iter().enumerate().map(|(k, id)| placements.name_of(file, *id).unwrap_or_else(|| format!("Part {}", k + 1))).collect();
+    let names = order.iter().enumerate().map(|(k, (id, _))| placements.name_of(file, *id).unwrap_or_else(|| format!("Part {}", k + 1))).collect();
     (StepStructure { names, instances }, order)
 }
 
-/// Reads a file as far as its solids, refusing what can't be brought in.
-fn solids_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>)> {
+/// Reads a file as far as its solids and its surface models' shells, refusing what can't be brought in.
+fn contents_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>, BTreeMap<usize, Vec<usize>>)> {
     let items = parse(text)?;
     let (length, angle) = units(&items)?;
     let file = File { items, length, angle };
@@ -2820,9 +2911,14 @@ fn solids_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>)> {
     let mut others: BTreeMap<&str, usize> = BTreeMap::new();
     // The solids, in file order.
     let mut solids: BTreeMap<usize, SolidShells> = BTreeMap::new();
+    let mut surfaces: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (&id, instance) in &file.items {
         for (name, args) in instance {
             match name.as_str() {
+                "SHELL_BASED_SURFACE_MODEL" => {
+                    let shells = File::list(args.get(1))?.iter().map(|s| File::id(Some(s))).collect::<Result<Vec<usize>>>()?;
+                    surfaces.insert(id, shells);
+                }
                 "MANIFOLD_SOLID_BREP" | "FACETED_BREP" => {
                     solids.insert(id, (File::id(args.get(1))?, Vec::new()));
                 }
@@ -2847,12 +2943,24 @@ fn solids_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>)> {
             }
         }
     }
+    // Construction geometry isn't part of the shape, and OpenCASCADE leaves it out too.
+    for instance in file.items.values() {
+        for (name, args) in instance {
+            if name == "CONSTRUCTIVE_GEOMETRY_REPRESENTATION" {
+                for item in File::list(args.get(1)).unwrap_or(&[]) {
+                    if let Ok(id) = File::id(Some(item)) {
+                        surfaces.remove(&id);
+                    }
+                }
+            }
+        }
+    }
     if !others.is_empty() {
         let list: Vec<String> = others.iter().map(|(n, c)| format!("{c} {n}")).collect();
         return Err(Error::Unsupported(format!("this file has solids of kinds that can't be imported yet: {}. Boundary representations can", list.join(", "))));
     }
-    if solids.is_empty() {
-        let surface_model = file.items.values().any(|i| i.iter().any(|(n, _)| n == "SHELL_BASED_SURFACE_MODEL" || n == "GEOMETRIC_CURVE_SET" || n == "CURVE_BOUNDED_SURFACE"));
+    if solids.is_empty() && surfaces.is_empty() {
+        let surface_model = file.items.values().any(|i| i.iter().any(|(n, _)| n == "GEOMETRIC_CURVE_SET" || n == "CURVE_BOUNDED_SURFACE"));
         return Err(if surface_model {
             Error::Unsupported("this file holds surfaces or curves, not closed solids".into())
         } else {
@@ -2860,7 +2968,11 @@ fn solids_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>)> {
         });
     }
     // Refuse everything at once, naming it all, before doing any work.
-    let shells: Vec<usize> = solids.values().flat_map(|(o, v)| std::iter::once(*o).chain(v.iter().map(|x| x.0))).collect();
+    let mut shells: Vec<usize> = solids.values().flat_map(|(o, v)| std::iter::once(*o).chain(v.iter().map(|x| x.0))).collect();
+    // With solids in the file, its other surfaces aren't brought in unless they're asked for.
+    if solids.is_empty() {
+        shells.extend(surfaces.values().flatten().copied());
+    }
     let missing = unsupported_surfaces(&file, &shells);
     if !missing.is_empty() {
         let list: Vec<String> = missing.iter().map(|(n, c)| format!("{c} on {n}")).collect();
@@ -2869,5 +2981,5 @@ fn solids_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>)> {
             list.join(", ")
         )));
     }
-    Ok((file, solids))
+    Ok((file, solids, surfaces))
 }

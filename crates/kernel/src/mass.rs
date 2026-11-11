@@ -497,6 +497,10 @@ pub fn mass_properties(body: &Body) -> MassProps {
     forget_traced_nodes();
     let reference = body.aabb().center();
     let mut out = MassProps::default();
+    // An open surface encloses nothing, and the flux through one depends on where it's measured from.
+    if body.sheet {
+        return sheet_properties(body, reference);
+    }
     for face in &body.faces {
         let (v, a) = face_integrals(body, face, reference);
         out.volume += v;
@@ -508,6 +512,25 @@ pub fn mass_properties(body: &Body) -> MassProps {
         let coarse: f64 = body.faces.iter().map(|f| face_integrals_with(body, f, reference, gauss_12()).0).sum();
         // What's left at the coarser rule, plus what rounding can leave behind in a sum of this size.
         out.volume_error = (coarse - out.volume).abs() + 1e-13 * out.volume.abs();
+    }
+    forget_traced_nodes();
+    out
+}
+
+/// A sheet's area, and the volume of whichever of its shells do close.
+fn sheet_properties(body: &Body, reference: Vec3) -> MassProps {
+    let uses = body.edge_uses();
+    let closed = |shell: &[usize]| shell.iter().all(|&f| body.faces[f].loops.iter().flatten().all(|c| uses[c.edge].len() == 2));
+    let mut out = MassProps::default();
+    for shell in &body.shells {
+        let counts = closed(shell);
+        for &f in shell {
+            let (v, a) = face_integrals(body, &body.faces[f], reference);
+            out.area += a;
+            if counts {
+                out.volume += v;
+            }
+        }
     }
     forget_traced_nodes();
     out

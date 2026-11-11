@@ -35,7 +35,7 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("feature_move", "Moves a feature in the history, if that keeps every reference pointing backward, then rebuilds.", r#"{"id": {"type": "integer"}, "position": {"type": "integer"}}"#, r#"["id", "position"]"#),
     ("features_list", "The history: each feature's id, name, type, state and any error.", "{}", "[]"),
     ("rebuild", "Rebuilds, reusing whatever didn't change. Gives each feature's state and the solid's volume, area, size and validity.", r#"{"upto": {"type": "integer", "description": "Stop after the feature at this position, to see an earlier state."}}"#, "[]"),
-    ("bodies_list", "The document's bodies: each one's name, the feature that made it, volume, area, faces and size. Separate bodies can touch or overlap, as an assembly's parts do.", "{}", "[]"),
+    ("bodies_list", "The document's bodies: each one's name, the feature that made it, volume, area, faces and size, and whether it's a sheet, an open surface with no volume. Separate bodies can touch or overlap, as an assembly's parts do.", "{}", "[]"),
     ("app_set", "Keeps data for an app with a feature, or with the document if no id is given. It's stored as it is and changes nothing in the model, so it's for things like where a dimension's label sits.", r#"{"id": {"type": "integer"}, "app": {"description": "Anything. Leave it out to clear what's there."}}"#, "[]"),
     ("faces_list", "The solid's faces with their stable names, surface type, area, center and outward normal, and the axis of a round one. One name can cover several faces, such as a pattern's copies. Each face's key is its own, and an edge selection takes a key wherever it takes a face name.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
     ("edges_list", "The solid's edges with their stable names, curve type, length and ends, a selection for each, ready to use in a fillet or chamfer, and each end named as an extrude's up_to_vertex takes it.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
@@ -383,7 +383,7 @@ impl Session {
                     let props = mass_properties(&b.body);
                     let bounds = b.body.aabb();
                     let maker = self.doc.feature(b.id.feature).map_or(String::new(), |f| f.name.clone());
-                    Value::obj(vec![
+                    let mut items = vec![
                         ("body", Value::str(b.id.text())),
                         ("made_by", Value::str(maker)),
                         ("volume", num(props.volume)),
@@ -391,7 +391,12 @@ impl Session {
                         ("faces", Value::Num(b.body.faces.len() as f64)),
                         ("box_min", vec3(bounds.min)),
                         ("box_max", vec3(bounds.max)),
-                    ])
+                    ];
+                    if b.body.sheet {
+                        items.push(("sheet", Value::Bool(true)));
+                        items.push(("boundary_edges", Value::Num(b.body.boundary_edges().len() as f64)));
+                    }
+                    Value::obj(items)
                 })
                 .collect(),
         )
@@ -488,6 +493,10 @@ impl Session {
                 let touching = body.contact_vertices();
                 if touching > 0 {
                     solid.push(("touching_points", Value::Num(touching as f64)));
+                }
+                if o.bodies.iter().any(|b| b.body.sheet) {
+                    solid.push(("sheets", Value::Num(o.bodies.iter().filter(|b| b.body.sheet).count() as f64)));
+                    solid.push(("sheet_note", Value::str("a sheet is an open surface: it has area, and no volume unless it closes")));
                 }
                 if o.bodies.len() > 1 {
                     solid.push(("volume_note", Value::str("the bodies are separate, so this counts twice wherever they overlap")));
@@ -815,7 +824,10 @@ fn edges_value(body: &Body, of_edge: &[String]) -> R<Value> {
         } else {
             Value::obj(vec![("between", Value::Arr(faces.clone()))])
         };
-        let select = if shared && key_pairs.iter().filter(|p| **p == key_pairs[e]).count() > 1 {
+        // A sheet's boundary edge has one face, so it's picked by where it is.
+        let select = if uses[e].len() < 2 {
+            Value::obj(vec![("near", vec3(midpoint)), ("tolerance", Value::Num(1e-3))])
+        } else if shared && key_pairs.iter().filter(|p| **p == key_pairs[e]).count() > 1 {
             let near = Value::obj(vec![("near", vec3(midpoint)), ("tolerance", Value::Num(1e-3))]);
             Value::obj(vec![("both", Value::Arr(vec![between, near]))])
         } else {
@@ -833,6 +845,9 @@ fn edges_value(body: &Body, of_edge: &[String]) -> R<Value> {
         ];
         if let Some(owner) = of_edge.get(e) {
             items.push(("body", Value::str(owner)));
+        }
+        if uses[e].len() < 2 {
+            items.push(("boundary", Value::Bool(true)));
         }
         match &edge.curve {
             Curve::Line { dir, .. } => {

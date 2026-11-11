@@ -1179,7 +1179,7 @@ fn finish(mut work: Body, new_faces: Vec<Face>, _original: &Body, index: &Index,
             }
         }
     }
-    let mut out = Body { vertices, edges, faces: Vec::with_capacity(work.faces.len()), shells: Vec::new(), tolerance: work.tolerance };
+    let mut out = Body { vertices, edges, faces: Vec::with_capacity(work.faces.len()), shells: Vec::new(), tolerance: work.tolerance, sheet: false };
     for f in std::mem::take(&mut work.faces) {
         let i = out.add_face(f.surface, f.flipped, f.loops, f.tag);
         out.faces[i].origin = f.origin;

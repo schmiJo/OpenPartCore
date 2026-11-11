@@ -402,6 +402,24 @@ fn pockets(doc: &mut Document, _: usize) {
 
 /// Two flanges bolted together. Every part is a body of its own, so they stay separate parts though they touch all around,
 /// and a change to one part leaves the others alone.
+fn panel(doc: &mut Document, _: usize) {
+    // An open curve, swept into a sheet with no thickness and no inside.
+    let curve = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::OpenPath {
+            start: point("-width / 2", 0.0),
+            moves: vec![Move::Spline { through: vec![point("-width / 6", "wave"), point("width / 6", "-wave"), point("width / 2", 0.0)] }],
+        })],
+    ));
+    doc.with(Op::extrude(curve, 0.0, "height", Mode::Surface));
+    // A round window through it, from a sketch standing in front of it.
+    let window = doc.with(Op::sketch(
+        Placement::new(point3(0.0, "-2 * width", 0.0), point3(0.0, 1.0, 0.0), point3(1.0, 0.0, 0.0)),
+        vec![Region::new(Shape::circle(0.0, "-height / 2", "hole"))],
+    ));
+    doc.with(Op::Trim { tool: TrimTool::Sketch(window), keep: TrimKeep::Outside });
+}
+
 fn joint(doc: &mut Document, _: usize) {
     for (name, value) in [("nut_h", "0.8 * bolt"), ("nut_r", "0.95 * bolt"), ("head_h", "0.6 * bolt"), ("head_r", "0.85 * bolt"), ("tail", "3")] {
         doc.set_parameter(name, value).expect("valid derived parameters");
@@ -675,6 +693,12 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("lip", "Lip radius", 14.0, 30.0, 22.0),
         mm("pin", "Cross hole", 4.0, 12.0, 8.0),
     ];
+    static PANEL: [ParamDef; 4] = [
+        mm("width", "Width", 80.0, 200.0, 140.0),
+        mm("height", "Height", 40.0, 100.0, 70.0),
+        mm("wave", "Wave", 4.0, 30.0, 16.0),
+        mm("hole", "Window radius", 5.0, 18.0, 12.0),
+    ];
     static JOINT: [ParamDef; 5] = [
         mm("outer", "Flange diameter", 110.0, 160.0, 130.0),
         mm("circle", "Bolt circle", 60.0, 90.0, 80.0),
@@ -801,7 +825,7 @@ pub fn catalog() -> &'static [ModelDef] {
         choices: &STRESS_NAMES,
     }];
     static SLIDER_CRANK: [ParamDef; 3] = [mm("crank", "Crank length", 15.0, 80.0, 30.0), mm("rod", "Rod length", 40.0, 160.0, 100.0), deg("angle", "Crank angle", 0.0, 720.0, 30.0)];
-    static MODELS: [ModelDef; 20] = [
+    static MODELS: [ModelDef; 21] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -881,6 +905,14 @@ pub fn catalog() -> &'static [ModelDef] {
             params: &SLIDER_CRANK,
             build: slider_crank,
             assembly: Some(AssemblyStep { assemble: assemble_slider_crank, drive: "angle", readout: slider_crank_readout }),
+        },
+        ModelDef {
+            id: "panel",
+            name: "Surface panel",
+            blurb: "A sheet: an open curve swept into a surface with no thickness, with a window cut through it by a sketch. It has area and no volume. Turn it round and it's the same from behind.",
+            params: &PANEL,
+            build: panel,
+            assembly: None,
         },
         ModelDef {
             id: "spring",

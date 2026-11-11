@@ -249,6 +249,38 @@ pub fn min_sample_gap(size: f64) -> f64 {
     size / 16384.0
 }
 
+/// Whether a sheet's mesh is torn nowhere but its boundary: the mesh edges left open are exactly the segments of the edges
+/// that only one face uses. On a solid, which has none, that's the same as being watertight.
+pub fn open_only_at_boundary(body: &Body, mesh: &Mesh) -> bool {
+    let key = |p: Vec3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+    let pair = |a: Vec3, b: Vec3| {
+        let (x, y) = (key(a), key(b));
+        if x <= y {
+            (x, y)
+        } else {
+            (y, x)
+        }
+    };
+    let mut wanted: HashMap<([u64; 3], [u64; 3]), i64> = HashMap::default();
+    for e in body.boundary_edges() {
+        for w in mesh.edge_lines[e].windows(2) {
+            *wanted.entry(pair(w[0], w[1])).or_insert(0) += 1;
+        }
+    }
+    let total: i64 = wanted.values().sum();
+    let open = mesh.open_edges();
+    if open.len() as i64 != total {
+        return false;
+    }
+    open.iter().all(|&(a, b)| {
+        let k = pair(a, b);
+        wanted.get(&k).is_some_and(|n| *n > 0) && {
+            *wanted.get_mut(&k).unwrap() -= 1;
+            true
+        }
+    })
+}
+
 /// Tessellates a body into a watertight mesh.
 ///
 /// Two edges leaving a vertex at a small angle can have chords that cross even

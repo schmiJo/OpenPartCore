@@ -25,6 +25,7 @@ It runs natively and in the browser through WebAssembly.
 - **Output:** exact volume and area, a watertight mesh, STL and STEP, and offscreen PNG images.
 - **Extrudes as in Onshape:** any regions from any constrained sketches, ending at a length, through all, up to the next surface, or up to a face, a part or a vertex, on planes and on curved surfaces extended as far as they need to go.
 - **Assemblies, as in Onshape:** tabs of Part Studios and assemblies, instances that follow their parts, mate connectors found from faces and edges, eight kinds of mate with limits, gears, racks and screws, sub-assemblies, dragging, interference and a parts list, and STEP assemblies in and out.
+- **Sheets:** open surfaces as bodies of their own, filled from a region, swept from an open curve or copied from a solid's faces, cut by a solid, a plane or a sketch, thickened into a solid, or sewn into one, and through STEP both ways.
 - **Input:** STEP files with analytic surfaces, swept curves, free-form surfaces, faceted solids and assemblies, healing what real files get wrong, and tested against OpenCASCADE on 108 files from other systems: 100 read. Anything else is refused by name.
 - **For agents:** an MCP server for building, editing and inspecting parts by stable names. See
   [docs/MCP.md](docs/MCP.md).
@@ -110,6 +111,7 @@ The file format is described in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
 | `crates/kernel/src/blend.rs` | Fillets and chamfers |
 | `crates/kernel/src/multi.rs`, `tweak.rs` | Many tools at once, sweeps; offset, shell and draft |
 | `crates/kernel/src/helix.rs`, `delete.rs`, `thicken.rs` | Helix, delete face and thicken |
+| `crates/kernel/src/sheet.rs` | Sheet bodies: making them, and sewing them |
 | `crates/kernel/src/mass.rs` | Volume and area from the B-rep through Green's theorem |
 | `crates/kernel/src/tess/` | Exact-predicate triangulator and meshing |
 | `crates/kernel/src/export/` | STL and STEP |

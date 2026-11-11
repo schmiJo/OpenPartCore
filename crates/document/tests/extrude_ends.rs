@@ -889,3 +889,53 @@ fn a_file_with_a_bad_end_or_pick_is_refused_and_says_why() {
     refused(r#""type": "extrude", "sketch": 1, "length": 1, "opposite": 1"#, "opposite");
     refused(r#""type": "extrude", "sketch": 1, "length": 1, "regions": 3"#, "regions");
 }
+
+// ----- With sheets -----
+
+fn surface_of(sketch: FeatureId, picks: &[(FeatureId, RegionId)], length: f64, opposite: bool) -> Op {
+    let regions = picks.iter().map(|(sketch, region)| RegionPick { sketch: *sketch, region: *region }).collect();
+    Op::Extrude { sketch, start: 0.0.into(), length: length.into(), mode: Mode::Surface, regions, end: ExtrudeEnd::Blind, opposite }
+}
+
+#[test]
+fn a_surface_extrude_takes_picked_regions_from_several_sketches() {
+    let mut doc = Document::new();
+    let low = sketch_on(&mut doc, Placement::xy(0.0), three_regions());
+    let high = sketch_on(&mut doc, Placement::xy(30.0), circle_sketch(0.0, 0.0, 4.0));
+    let (circle, other) = (region_of_area(&doc, low, PI * 25.0), region_of_area(&doc, high, PI * 16.0));
+    doc.add(surface_of(low, &[(low, circle), (high, other)], 10.0, false)).unwrap();
+    let o = ok(&mut doc);
+    assert_eq!(o.bodies.len(), 2);
+    assert!(o.bodies.iter().all(|b| b.body.sheet));
+    // The walls of each circle and nothing else: no ends, and not the square.
+    let area: f64 = o.bodies.iter().map(|b| mass_properties(&b.body).area).sum();
+    near(area, 2.0 * PI * (5.0 + 4.0) * 10.0, 1e-6, "two tubes' walls");
+    near(total(&o), 0.0, 1e-12, "no volume");
+    let high_one = o.bodies.iter().find(|b| (mass_properties(&b.body).area - 80.0 * PI).abs() < 1e-6).unwrap();
+    let (lo, hi) = lowest_highest(&high_one.body, Vec3::Z);
+    near(lo, 30.0, 1e-9, "from the high sketch");
+    near(hi, 40.0, 1e-9, "along its normal");
+    // Their walls are named apart, though both circles are entity 1 of their sketches.
+    let tags = |b: &NamedBody| b.body.faces.iter().map(|f| f.tag).collect::<Vec<_>>();
+    assert!(tags(&o.bodies[0]).iter().all(|t| !tags(&o.bodies[1]).contains(t)));
+}
+
+#[test]
+fn a_surface_extrude_goes_the_other_way_and_refuses_an_end() {
+    let mut doc = Document::new();
+    let s = sketch_on(&mut doc, Placement::xy(0.0), circle_sketch(0.0, 0.0, 5.0));
+    doc.add(surface_of(s, &[], 10.0, true)).unwrap();
+    let o = ok(&mut doc);
+    assert!(o.bodies[0].body.sheet);
+    let (lo, hi) = lowest_highest(&o.bodies[0].body, Vec3::Z);
+    near(lo, -10.0, 1e-9, "below");
+    near(hi, 0.0, 1e-9, "from the sketch");
+    near(mass_properties(&o.bodies[0].body).area, 100.0 * PI, 1e-6, "a tube's wall");
+    // A surface to a face isn't built, and it says so rather than doing something else.
+    let mut doc = Document::new();
+    let plate = doc.add(solid(10.0, 10.0, 2.0, [0.0, 0.0, 30.0])).unwrap();
+    let s = sketch_on(&mut doc, Placement::xy(0.0), circle_sketch(0.0, 0.0, 5.0));
+    doc.add(Op::Extrude { sketch: s, start: 0.0.into(), length: 0.0.into(), mode: Mode::Surface, regions: Vec::new(), end: ExtrudeEnd::UpToFace(FaceKey::plain(plate.start_cap())), opposite: false }).unwrap();
+    let why = failure(&mut doc);
+    assert!(why.contains("surface") && why.contains("length"), "{why}");
+}

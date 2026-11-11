@@ -139,6 +139,7 @@ fn merge_faces(body: Body) -> Result<Body> {
         faces: Vec::with_capacity(groups.len()),
         shells: Vec::new(),
         tolerance: body.tolerance,
+        sheet: body.sheet,
     };
     for root in roots {
         let group = &groups[&root];

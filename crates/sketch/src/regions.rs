@@ -63,7 +63,8 @@ impl Seg {
         }
     }
 
-    fn reversed(&self) -> Seg {
+    /// The same piece of curve, running the other way.
+    pub fn reversed(&self) -> Seg {
         let kind = match self.kind {
             SegKind::Line { a, b } => SegKind::Line { a: b, b: a },
             SegKind::Arc { center, radius, a0, a1 } => SegKind::Arc { center, radius, a0: a1, a1: a0 },

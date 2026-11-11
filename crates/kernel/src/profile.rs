@@ -338,6 +338,58 @@ impl Wire {
     }
 }
 
+impl Wire {
+    /// Whether the end of this chain comes back to its start.
+    pub fn is_closed(&self) -> bool {
+        match (self.segs.first(), self.segs.last()) {
+            (Some(a), Some(b)) => b.end().dist(a.start()) <= TOL,
+            _ => false,
+        }
+    }
+
+    /// Checks a chain that needn't close: connected, not too short, in the plane and crossing nowhere.
+    pub fn check_open(&self) -> Result<()> {
+        if self.segs.is_empty() {
+            return Err(Error::InvalidProfile("an open curve has to have something in it".to_string()));
+        }
+        for (i, s) in self.segs.iter().enumerate() {
+            if let SegGeom::Spline(ref c) = s.geom {
+                if c.points().iter().any(|p| p.z != 0.0) {
+                    return Err(Error::InvalidProfile("a spline in a sketch has to lie in the plane of the sketch".to_string()));
+                }
+                c.face_pieces()?;
+            }
+            let (a, b) = (s.start(), s.end());
+            if !(a.x.abs().max(a.y.abs()).max(b.x.abs()).max(b.y.abs()) <= MAX_COORD) {
+                return Err(Error::InvalidProfile(format!("a coordinate is beyond the {MAX_COORD} mm this kernel works within")));
+            }
+            if !s.length().is_finite() || s.length() < MIN_FEATURE {
+                return Err(Error::InvalidProfile(format!("segment {i} of an open curve is too short ({:e})", s.length())));
+            }
+            if let Some(next) = self.segs.get(i + 1) {
+                if s.end().dist(next.start()) > TOL {
+                    return Err(Error::InvalidProfile(format!("an open curve has a gap of {:e} after segment {i}", s.end().dist(next.start()))));
+                }
+            }
+        }
+        let flat = self.flatten();
+        for i in 0..flat.len() {
+            for j in i + 1..flat.len() {
+                let (a, b, si) = flat[i];
+                let (c, d, sj) = flat[j];
+                let curved = |k: usize| matches!(self.segs[k].geom, SegGeom::Spline(_));
+                if (si == sj || si + 1 == sj) && (!(curved(si) || curved(sj)) || j == i + 1) {
+                    continue;
+                }
+                if segments_cross(a, b, c, d) {
+                    return Err(Error::InvalidProfile(format!("an open curve crosses itself between segments {si} and {sj}")));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Pieces per knot interval when a spline is checked for crossings.
 const FLAT_PER_SPAN: usize = 16;
 
@@ -401,6 +453,11 @@ impl PathBuilder {
         self.next_id += 1;
         self.cursor = v2(end.x, end.y);
         self
+    }
+
+    /// Finishes the path as it is, without closing it, for a sheet to sweep.
+    pub fn open(self) -> Wire {
+        Wire { segs: self.segs }
     }
 
     /// Finishes the wire, adding a closing line if the cursor is not at the start.

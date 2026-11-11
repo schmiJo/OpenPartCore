@@ -6,6 +6,9 @@
 //!
 //! Geometry: curves match their vertices, edges lie on the surfaces of the faces
 //! using them, and loops wind the right way in the face chart.
+//!
+//! A sheet, and only a body declared to be one, may have edges used by one coedge, which are its boundary. The rest of the
+//! topology holds for it in its open form, and the geometry is the same.
 
 use crate::math::*;
 use crate::topo::{Body, Coedge, Face};
@@ -30,11 +33,19 @@ pub struct Report {
 pub fn validate(body: &Body) -> Result<Report, Vec<String>> {
     let mut errors = Vec::new();
     check_loops(body, &mut errors);
-    check_edge_use(body, &mut errors);
-    if errors.is_empty() {
-        check_vertex_fans(body, &mut errors);
-    }
-    let genus = check_euler(body, &mut errors);
+    let genus = if body.sheet {
+        check_open_edge_use(body, &mut errors);
+        if errors.is_empty() {
+            check_open_fans(body, &mut errors);
+        }
+        check_open_euler(body, &mut errors)
+    } else {
+        check_edge_use(body, &mut errors);
+        if errors.is_empty() {
+            check_vertex_fans(body, &mut errors);
+        }
+        check_euler(body, &mut errors)
+    };
     check_geometry(body, &mut errors);
     if errors.is_empty() {
         check_windings(body, &mut errors);
@@ -170,6 +181,122 @@ fn check_euler(body: &Body, errors: &mut Vec<String>) -> Vec<usize> {
             genus.push(0);
         } else {
             genus.push(((2 - chi) / 2) as usize);
+        }
+    }
+    let total: usize = body.shells.iter().map(Vec::len).sum();
+    if total != body.faces.len() {
+        errors.push(format!("shells list {total} faces but the body has {}", body.faces.len()));
+    }
+    genus
+}
+
+/// An edge of a sheet is its boundary, used once, or between two faces, used once each way.
+fn check_open_edge_use(body: &Body, errors: &mut Vec<String>) {
+    for (i, uses) in body.edge_uses().iter().enumerate() {
+        match uses.as_slice() {
+            [_] => {}
+            [a, b] => {
+                if a.3 == b.3 {
+                    errors.push(format!("edge {i} is used twice in the same direction (faces {} and {})", a.0, b.0));
+                }
+            }
+            _ => errors.push(format!("edge {i} is used by {} coedges, not 1 or 2", uses.len())),
+        }
+    }
+}
+
+fn root_of(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
+}
+
+/// A sheet's vertex has one fan of faces too, which is open if it's on the boundary. Going from a loop's coedge to the next
+/// stays in one fan, and so does going across an edge, as both of its faces have the same end of it.
+fn check_open_fans(body: &Body, errors: &mut Vec<String>) {
+    let mut parent: Vec<usize> = (0..body.edges.len() * 2).collect();
+    let mut seen = vec![false; body.edges.len() * 2];
+    for face in &body.faces {
+        for lp in &face.loops {
+            for i in 0..lp.len() {
+                let (a, b) = (lp[i], lp[(i + 1) % lp.len()]);
+                let arriving = a.edge * 2 + usize::from(!a.reversed);
+                let leaving = b.edge * 2 + usize::from(b.reversed);
+                seen[arriving] = true;
+                seen[leaving] = true;
+                let (x, y) = (root_of(&mut parent, arriving), root_of(&mut parent, leaving));
+                parent[x] = y;
+            }
+        }
+    }
+    let mut fans: HashMap<usize, crate::hash::HashSet<usize>> = HashMap::default();
+    for (e, edge) in body.edges.iter().enumerate() {
+        for (node, v) in [(e * 2, edge.v0), (e * 2 + 1, edge.v1)] {
+            if seen[node] {
+                let r = root_of(&mut parent, node);
+                fans.entry(v).or_default().insert(r);
+            }
+        }
+    }
+    for (v, list) in fans {
+        if list.len() != 1 {
+            errors.push(format!("vertex {v} joins {} separate fans of faces (a pinch)", list.len()));
+        }
+    }
+}
+
+/// V - E + F - H = 2 - 2G - B for a connected orientable surface with B boundary loops, with the loops counted from the edges
+/// used once. It's only of use on what has passed the fans, as every boundary vertex then has two boundary edges.
+fn check_open_euler(body: &Body, errors: &mut Vec<String>) -> Vec<usize> {
+    let uses = body.edge_uses();
+    let mut genus = Vec::new();
+    for (s, shell) in body.shells.iter().enumerate() {
+        let mut vertices = crate::hash::HashSet::default();
+        let mut edges = crate::hash::HashSet::default();
+        let mut holes = 0i64;
+        for &f in shell {
+            let face = &body.faces[f];
+            holes += face.loops.len() as i64 - 1;
+            for lp in &face.loops {
+                for &c in lp {
+                    edges.insert(c.edge);
+                    vertices.insert(body.start_vertex(c));
+                }
+            }
+        }
+        // The boundary's loops: its vertices, joined along its edges.
+        let mut parent: HashMap<usize, usize> = HashMap::default();
+        fn root(parent: &mut HashMap<usize, usize>, mut x: usize) -> usize {
+            while let Some(&p) = parent.get(&x) {
+                if p == x {
+                    break;
+                }
+                x = p;
+            }
+            parent.insert(x, x);
+            x
+        }
+        for &e in &edges {
+            if uses[e].len() == 1 {
+                let (x, y) = (root(&mut parent, body.edges[e].v0), root(&mut parent, body.edges[e].v1));
+                parent.insert(x, y);
+            }
+        }
+        let ends: Vec<usize> = parent.keys().copied().collect();
+        let mut tops = crate::hash::HashSet::default();
+        for v in ends {
+            tops.insert(root(&mut parent, v));
+        }
+        let boundaries = tops.len() as i64;
+        let (v, e, f) = (vertices.len() as i64, edges.len() as i64, shell.len() as i64);
+        let doubled_genus = 2 - boundaries - (v - e + f - holes);
+        if doubled_genus < 0 || doubled_genus % 2 != 0 {
+            errors.push(format!("shell {s} fails Euler-Poincare: V={v} E={e} F={f} H={holes} with {boundaries} boundary loops"));
+            genus.push(0);
+        } else {
+            genus.push((doubled_genus / 2) as usize);
         }
     }
     let total: usize = body.shells.iter().map(Vec::len).sum();
