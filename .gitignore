@@ -4,3 +4,6 @@
 *.step
 !/docs/**
 __pycache__/
+# Local worktrees: mine on branch next, and the sub-agents'.
+/.worktrees
+/.claude/worktrees
