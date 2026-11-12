@@ -73,6 +73,8 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 |---|---|
 | `sketch` | `plane` (default XY; `{"on_plane": "top"}` or `{"on_plane": 7}` puts it on a [plane](#planes) and it follows it, and with `"on_face": "f2:end"` it follows that flat face, keeping its own origin), `regions` |
 | `plane` | A plane, not a part: `plane_type` and its fields, and `flip`. See [Planes](#planes) |
+| `sheet_metal` | `sketch`, `thickness`, `bend_radius` (default the thickness), `k_factor` (default 0.45), `depth` for a chain of lines, `flip`. A new sheet metal part. See [Sheet metal](#sheet-metal) |
+| `flange` | `edges` (a [selection](#edge-selections)), `length`, `degrees` (default 90), `alignment` (`outer`, the default, `inner` or `bend`), `bend_radius` (default the part's), `flip`. See [Sheet metal](#sheet-metal) |
 | `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
 | `loft` | `sections`, in order, each a sketch id, for a sketch holding one outline, or a region `{"sketch": 2, "region": "r..."}`, so that one sketch with several outlines can feed it, and `mode`. Straight between two, and a smooth cubic through three or more. A region that has gone fails the feature, saying what's there |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. Optionally `regions`, as an extrude has them: see [below](#extrude-regions-and-ends) |
@@ -173,6 +175,43 @@ origin is where the world's origin is seen along its normal, so that it doesn't 
 Where nothing gives a plane its x, it runs along X on a plane nearer level than upright, and on any other it's level, to
 the right as you face the plane. A name that covers several faces, such as a pattern's copies, has to have them all in one
 plane, or one surface for an axis or a tangent: otherwise use a [key](#face-keys) for one of them.
+
+## Sheet metal
+
+A sheet metal part is one thickness all through, made of flat walls and the bends between them, and it can be laid out
+flat. `sheet_metal` makes one from a sketch, as a new part:
+
+- **From one region,** a plate: the region `thickness` thick, on the side of the sketch its normal points to, or the
+  other with `flip`. Its holes are holes in the plate.
+- **From one chain of lines,** an `open_path` or a constrained sketch's open curves: walls `depth` deep along the sketch's
+  normal, on the chain's left as it runs, or its right with `flip`, with a bend at each corner. The lines are one face of
+  the sheet: where the chain turns toward the sheet, they're the bend's outside, and its inside radius is `bend_radius`.
+
+A `flange` adds a bend and a wall along each edge it's given, where a wall's face meets its side, the face that's the
+sheet's thickness across. It bends toward the face the edge is on, by `degrees`, or away from it with `flip`. `length` is
+from the outer virtual sharp, where the outsides of the wall and the flange would meet without the bend, to the flange's
+end. `alignment` says where the bend goes: `outer` puts the flange's outside face through the edge, so the part's outside
+size stays the same; `inner` puts its inside face through the edge; and `bend` starts the bend at the edge. For `outer`
+and `inner`, the wall is cut back to make room for the bend. Where two edges of one flange feature meet at a corner, each
+flange stops as far short of the corner as the wall is cut back, which leaves the corner open with a square cut out of it.
+
+```json
+{"id": 2, "name": "Tray", "type": "sheet_metal", "sketch": 1, "thickness": 2, "bend_radius": 2, "k_factor": 0.45}
+{"id": 3, "name": "Sides", "type": "flange", "edges": {"any": [{"between": ["f2:end", "f2:side.0"]}, {"between": ["f2:end", "f2:side.2"]}]}, "length": 20}
+{"id": 5, "name": "Bracket", "type": "sheet_metal", "sketch": 4, "thickness": 1.5, "depth": 30}
+```
+
+A flange's faces are named as an extrude's of its outline across the edge: `side.0` the bend's outside, `side.1` the
+wall's outside, `side.2` its end, `side.3` its inside and `side.4` the bend's inside, with `start` and `end` at the
+flange's two ends. The flange for the second edge a feature is given is `region.1`, and so on. A chain's faces go along
+the lines first, a wall and then a bend at each corner, then across the far end, back along the other side, and across
+the near end, so `side.0` is the first wall's face on the lines' side.
+
+The MCP's `flat_pattern` lays a part out flat. It's unfolded from the plate's face on its sketch, or the first wall's face
+on the lines' side, which stays where it is, and each wall beyond a bend is laid down where it would be with the bend
+undone, the bend itself a strip as long as its neutral line: its angle times its inner radius plus `k_factor` times the
+thickness. Holes cut through walls come with it. It gives the outline and holes, and each bend's middle line, its angle,
+inner radius, which way it goes, up toward the side away from the starting face or down, and the strip's width.
 
 ## Face keys
 

@@ -46,6 +46,7 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("sketch_regions", "The closed regions a sketch would use: those picked, or by default every other level of nesting, so a loop in a loop is a hole. Says which entity leaves a gap if there aren't any.", r#"{"sketch": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
     ("sketch_arrangement", "Every closed region a sketch's curves make, split at crossings and T-junctions, each with a stable id, plus the curves that make none and why.", r#"{"sketch": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
     ("planes_list", "Where each plane is: Top, Front and Right, then each plane feature and each sketch, in history order, with its position, origin, normal, and x and y directions, or why it didn't build. With upto, as the history stood after that position, for rolling back past them.", r#"{"upto": {"type": "integer", "description": "As after the feature at this position."}}"#, "[]"),
+    ("flat_pattern", "A sheet metal part laid out flat, unfolded from its first wall's face on its sketch's side, which stays where it is: the frame it lies in (z into the sheet), its outline and holes as lines and arcs in that frame's x and y, each bend's middle line there with its angle, inner radius, whether what's beyond it goes up (toward +z) and how wide its strip is, its size, thickness and k-factor. With body, that part, and without, the only sheet metal part. With upto, as the history stood after that position.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names."}, "upto": {"type": "integer", "description": "As after the feature at this position."}}"#, "[]"),
     ("vertices_list", "The solid's corners: where each is, the edges that meet there, and the vertex that picks it, {\"faces\": [...], \"near\": [x, y, z]}, as an extrude's up_to_vertex and a sketch's projected vertex take it.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
 ];
 
@@ -97,6 +98,63 @@ fn text(t: impl Into<String>) -> Value {
 fn num(v: f64) -> Value {
     // Rounded to a nanometre: enough for any decision, and far shorter to read.
     Value::Num((v * 1e6).round() / 1e6)
+}
+
+fn point2(p: coreshape::Vec2) -> Value {
+    Value::Arr(vec![Value::Num(p.x), Value::Num(p.y)])
+}
+
+/// A flat pattern as the MCP gives it.
+fn flat_value(flat: &FlatPattern) -> Value {
+    let outline: Vec<Value> = flat
+        .outline
+        .iter()
+        .map(|e| match e {
+            FlatEdge::Line { a, b } => Value::obj(vec![("line", Value::Arr(vec![point2(*a), point2(*b)]))]),
+            FlatEdge::Arc { center, radius, a, b, ccw } => Value::obj(vec![
+                ("arc", Value::Arr(vec![point2(*a), point2(*b)])),
+                ("center", point2(*center)),
+                ("radius", Value::Num(*radius)),
+                ("ccw", Value::Bool(*ccw)),
+            ]),
+            FlatEdge::Points(points) => Value::obj(vec![("points", Value::Arr(points.iter().map(|p| point2(*p)).collect()))]),
+        })
+        .collect();
+    let bends: Vec<Value> = flat
+        .bends
+        .iter()
+        .map(|b| {
+            Value::obj(vec![
+                ("line", Value::Arr(vec![point2(b.a), point2(b.b)])),
+                ("degrees", Value::Num(b.degrees)),
+                ("radius", Value::Num(b.radius)),
+                ("direction", Value::str(if b.up { "up" } else { "down" })),
+                ("width", Value::Num(b.width)),
+            ])
+        })
+        .collect();
+    let f = &flat.frame;
+    let mut lo = coreshape::v2(f64::MAX, f64::MAX);
+    let mut hi = coreshape::v2(f64::MIN, f64::MIN);
+    for e in &flat.outline {
+        let points = match e {
+            FlatEdge::Line { a, b } | FlatEdge::Arc { a, b, .. } => vec![*a, *b],
+            FlatEdge::Points(p) => p.clone(),
+        };
+        for p in points {
+            lo = coreshape::v2(lo.x.min(p.x), lo.y.min(p.y));
+            hi = coreshape::v2(hi.x.max(p.x), hi.y.max(p.y));
+        }
+    }
+    Value::obj(vec![
+        ("frame", Value::obj(vec![("origin", vec3(f.origin)), ("x", vec3(f.x)), ("y", vec3(f.y)), ("z", vec3(f.z))])),
+        ("thickness", Value::Num(flat.thickness)),
+        ("k_factor", Value::Num(flat.k_factor)),
+        ("size", Value::Arr(vec![Value::Num(hi.x - lo.x), Value::Num(hi.y - lo.y)])),
+        ("area", Value::Num(mass_properties(&flat.body).volume / flat.thickness)),
+        ("outline", Value::Arr(outline)),
+        ("bends", Value::Arr(bends)),
+    ])
 }
 
 fn vec3(p: coreshape::Vec3) -> Value {
@@ -309,6 +367,16 @@ impl Session {
                 let upto = position_arg(args, "upto")?;
                 let o = self.doc.rebuild(upto);
                 Ok(vec![text(self.planes_value(&o).to_pretty())])
+            }
+            "flat_pattern" => {
+                let upto = position_arg(args, "upto")?;
+                let body = match args.get("body").and_then(Value::as_str) {
+                    Some(text) => Some(BodyId::parse(text).map_err(|e| e.to_string())?),
+                    None => None,
+                };
+                let o = self.doc.rebuild(upto);
+                let flat = self.doc.flat_pattern(&o, body).map_err(|e| e.to_string())?;
+                Ok(vec![text(flat_value(&flat).to_pretty())])
             }
             "vertices_list" => {
                 let scope = self.scope(args)?;

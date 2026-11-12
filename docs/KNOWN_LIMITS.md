@@ -470,6 +470,31 @@ All eight of Onshape's plane types are built, with `flip`, and sketches sit on t
 - A plane on a face whose name covers several faces, such as a pattern's copies, needs them all in one plane, and otherwise one face's key.
 - Mirror, trim, draft, an extrude's `up_to_face`, patterns and a transform's frames take planes and lines. A helix's axis and a transform's rotation still take numbers, as does a revolve's axis, which is drawn in its sketch.
 
+## Sheet metal
+
+Stage 1 of Onshape's sheet metal: a part from a sketch's one region (a plate) or one chain of lines (walls with a bend at
+each corner), flanges on edges, and flat patterns. Each part is made by extruding outlines, so its Booleans only put
+pieces together face to face. Checked against hand formulas: an L both ways round, a flange with each alignment both
+ways, a tray of four flanges, flats of each, and a hole through a wall coming out in the flat. Of 14 bugs put in on
+purpose, 13 were caught, and the one missed showed code that did nothing, which is gone.
+
+- **Every flange is checked for running into the part,** by volume: what it adds has to all be new. One that does is
+  refused, saying where.
+- **Every flat pattern is checked by volume:** laid flat, a part has to come to its own volume plus what the bends'
+  neutral lines add, width times thickness squared times angle times (k - 1/2). Anything not square through the sheet,
+  or not reached across bends from the face it starts from, fails that and is refused.
+- **Two flanges of one feature that meet at a corner** each stop short of it, leaving it open with a square cut out. A
+  flange from a later feature beside an earlier one's corner is refused, as the wall's side there now runs on into the
+  first flange's end: flanges that meet at a corner go in one feature, and the message says so.
+- **Not built yet:** arcs in a chain (only lines, with their bends made from `bend_radius`), hems (a bend of 180 degrees),
+  flanges along part of an edge and the reliefs they need, tabs, a bend along a sketch line, closing corners, rips and
+  joins, turning a part into sheet metal, forming tools, and DXF of the flat. Each is refused in plain words where it
+  could be asked for.
+- **A flat pattern refuses** a bend with anything cut across or into it, a rounded edge where a bend would be, a sheet
+  that closes on itself (it would need a rip), and a face going on smoothly from a wall that's neither flat nor a bend.
+- **Up and down** in a flat are seen from the side it's unfolded from: a bend is up when what's beyond it rises toward the
+  sheet's other side.
+
 ## Sweeps
 
 A sweep goes along steps, a sketch's curves or a part's edges: see [FILE_FORMAT.md](FILE_FORMAT.md#features). `crates/document/tests/sweep_paths.rs` holds each against Pappus: the profile's area times how far its centroid goes.

@@ -1373,3 +1373,32 @@ fn planes_list_gives_where_each_plane_is_and_sketch_tools_take_one() {
     let at = solved.get("sketch").unwrap().get("entities").unwrap().as_array().unwrap()[0].get("geometry").unwrap().get("at").unwrap().clone();
     assert_eq!(numbers(&at), vec![10.0, 20.0]);
 }
+
+#[test]
+fn flat_pattern_lays_a_sheet_metal_part_out() {
+    let root = folder("flat");
+    let mut c = Client::start(&root);
+    // Nothing to lay flat yet.
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","regions":[{"outer":{"type":"rect","x":0,"y":0,"w":100,"h":60}}]}}"#);
+    assert!(c.refused("flat_pattern", "{}").contains("no sheet metal part"));
+    // A plate 2 thick, and a flange 20 long on its edge at y = 60, bent up at the part's radius, 2.
+    c.ok("feature_add", r#"{"feature":{"type":"sheet_metal","sketch":1,"thickness":2}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"flange","edges":{"near":[50,60,2]},"length":20}}"#);
+    let flat = parsed(&c.ok("flat_pattern", "{}"));
+    let strip = std::f64::consts::PI / 2.0 * (2.0 + 0.45 * 2.0);
+    let mut size = numbers(flat.get("size").unwrap());
+    size.sort_by(f64::total_cmp);
+    assert!((size[0] - (56.0 + strip + 16.0)).abs() < 1e-9 && (size[1] - 100.0).abs() < 1e-9, "{size:?}");
+    assert_eq!(flat.get("thickness").and_then(Value::as_f64), Some(2.0));
+    assert_eq!(flat.get("k_factor").and_then(Value::as_f64), Some(0.45));
+    assert_eq!(flat.get("outline").and_then(Value::as_array).map(|l| l.len()), Some(4));
+    let bends = flat.get("bends").and_then(Value::as_array).unwrap();
+    assert_eq!(bends.len(), 1);
+    assert_eq!(bends[0].get("direction").and_then(Value::as_str), Some("up"));
+    assert_eq!(bends[0].get("degrees").and_then(Value::as_f64), Some(90.0));
+    assert!((bends[0].get("width").and_then(Value::as_f64).unwrap() - strip).abs() < 1e-9);
+    // As it stood before the flange, it's the plate.
+    let plate = parsed(&c.ok("flat_pattern", r#"{"upto":1}"#));
+    assert_eq!(plate.get("bends").and_then(Value::as_array).map(|l| l.len()), Some(0));
+    assert!((plate.get("area").and_then(Value::as_f64).unwrap() - 6000.0).abs() < 1e-6);
+}
