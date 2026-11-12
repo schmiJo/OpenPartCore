@@ -247,7 +247,7 @@ fn healed(doc: &mut Document, _: usize) {
     let block = doc.with(Op::extrude(plate, 0.0, "thick", Mode::Add));
     let circle = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle("width / 6", "depth / 2", "bore"))]));
     let hole = doc.with(Op::extrude(circle, -1.0, "thick + 2", Mode::Remove));
-    let row = doc.with(Op::Pattern { of: vec![hole], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: "width / 3".into() } });
+    let row = doc.with(Op::Pattern { of: vec![hole], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: "width / 3".into() } });
     let round = doc.with(Op::fillet(EdgeSelect::Between(block.end_cap(), block.side(0)), "round"));
     doc.with(Op::Chamfer { edges: EdgeSelect::Between(block.end_cap(), block.side(2)), distance: "round".into(), propagate: true });
     // The middle hole, and the fillet.
@@ -466,7 +466,7 @@ fn joint(doc: &mut Document, _: usize) {
     // The same in every other hole.
     doc.with(Op::Pattern {
         of: vec![bolt, nut],
-        along: PatternPath::Circular { center: point3(0.0, 0.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: "bolts".into(), degrees: 360.0.into() },
+        along: PatternPath::Circular { axis: LineRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 1.0)), count: "bolts".into(), degrees: 360.0.into() },
     });
 }
 

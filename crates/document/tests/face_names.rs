@@ -71,7 +71,7 @@ fn offset_and_draft_keep_every_name() {
     assert_eq!(counts(&mut doc), list(&BLOCK));
 
     let (mut doc, e) = block();
-    doc.with(Op::Draft { faces: vec![e.side(0)], pull: point3(0.0, 0.0, 1.0), neutral: point3(0.0, 0.0, 0.0), degrees: 3.0.into() });
+    doc.with(Op::Draft { faces: vec![e.side(0)], neutral: PlaneRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 1.0)), degrees: 3.0.into() });
     assert_eq!(counts(&mut doc), list(&BLOCK));
 }
 
@@ -79,14 +79,14 @@ fn offset_and_draft_keep_every_name() {
 fn a_mirror_or_pattern_copy_has_the_same_name_as_its_original() {
     // Nothing tells the copy from the original by name, and they aren't in the same plane.
     let (mut doc, _) = block();
-    doc.with(Op::Mirror { of: vec![], point: point3(50.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(50.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     assert_eq!(
         counts(&mut doc),
         list(&[("f2:start", 2), ("f2:end", 2), ("f2:side.0", 2), ("f2:side.1", 2), ("f2:side.2", 2), ("f2:side.3", 2)])
     );
 
     let (mut doc, _) = block();
-    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: 50.0.into() } });
+    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 50.0.into() } });
     assert_eq!(
         counts(&mut doc),
         list(&[("f2:start", 3), ("f2:end", 3), ("f2:side.0", 3), ("f2:side.1", 3), ("f2:side.2", 3), ("f2:side.3", 3)])
@@ -97,7 +97,7 @@ fn a_mirror_or_pattern_copy_has_the_same_name_as_its_original() {
 fn a_name_can_disappear_when_its_face_does() {
     // The mirror plane lies on f2:side.1, so that wall ends up inside the merged solid.
     let (mut doc, _) = block();
-    doc.with(Op::Mirror { of: vec![], point: point3(40.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(40.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     assert_eq!(
         counts(&mut doc),
         list(&[("f2:start", 1), ("f2:end", 1), ("f2:side.0", 1), ("f2:side.2", 1), ("f2:side.3", 2)])
@@ -131,7 +131,7 @@ fn a_whole_circle_is_two_faces_under_one_name() {
     let cut = doc.with(Op::extrude(hole, 0.0, 10.0, Mode::Remove));
     assert_eq!(counts(&mut doc), block_and(&[("f4:side.0", 2)]));
 
-    doc.with(Op::Pattern { of: vec![cut], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: 10.0.into() } });
+    doc.with(Op::Pattern { of: vec![cut], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 10.0.into() } });
     assert_eq!(counts(&mut doc), block_and(&[("f4:side.0", 6)]));
 }
 
@@ -141,7 +141,7 @@ fn names_do_not_change_with_a_dimension() {
         let (mut doc, e) = block();
         doc.with(Op::fillet(EdgeSelect::Between(e.end_cap(), e.side(0)), radius));
         doc.with(Op::Shell { open: vec![e.start_cap()], thickness: thickness.into() });
-        doc.with(Op::Mirror { of: vec![], point: point3(60.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+        doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(60.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
         counts(&mut doc)
     };
     assert_eq!(build(2.0, 1.0), build(3.5, 1.5));
@@ -175,7 +175,7 @@ fn volume(doc: &mut Document) -> f64 {
 
 fn mirrored() -> (Document, FeatureId, FeatureId) {
     let (mut doc, e) = block();
-    let m = doc.with(Op::Mirror { of: vec![], point: point3(50.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    let m = doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(50.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     (doc, e, m)
 }
 
@@ -193,7 +193,7 @@ fn copies_are_numbered_and_the_original_is_copy_zero() {
     assert!(list.contains(&"f2:end@f3.0".to_string()) && list.contains(&"f2:end@f3.1".to_string()), "{list:?}");
 
     let (mut doc, _) = block();
-    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: 50.0.into() } });
+    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 50.0.into() } });
     let list = keys(&mut doc);
     for i in 0..3 {
         assert!(list.contains(&format!("f2:start@f3.{i}")), "{list:?}");
@@ -203,7 +203,7 @@ fn copies_are_numbered_and_the_original_is_copy_zero() {
 #[test]
 fn a_copy_of_a_copy_says_both() {
     let (mut doc, _, _) = mirrored();
-    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: point3(0.0, 1.0, 0.0), count: 2.0.into(), spacing: 80.0.into() } });
+    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 1.0, 0.0)), count: 2.0.into(), spacing: 80.0.into() } });
     let list = keys(&mut doc);
     assert_eq!(list.len(), 24);
     for key in ["f2:end@f3.0@f4.0", "f2:end@f3.1@f4.0", "f2:end@f3.0@f4.1", "f2:end@f3.1@f4.1"] {
@@ -256,7 +256,7 @@ fn pieces_are_numbered_when_nothing_else_tells_them_apart() {
     assert!(list.contains(&"f4:side.0#0".to_string()) && list.contains(&"f4:side.0#1".to_string()), "{list:?}");
 
     // A pattern of that cut: two halves in each of three copies.
-    doc.with(Op::Pattern { of: vec![cut], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: 10.0.into() } });
+    doc.with(Op::Pattern { of: vec![cut], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 10.0.into() } });
     let list = keys(&mut doc);
     for copy in 0..3 {
         for piece in 0..2 {
@@ -351,7 +351,7 @@ fn a_feature_with_a_key_counts_as_using_every_feature_in_it() {
 #[test]
 fn copy_zero_still_means_the_original_when_there_are_no_copies() {
     let (mut doc, _) = block();
-    let p = doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 1.0.into(), spacing: 50.0.into() } });
+    let p = doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 1.0.into(), spacing: 50.0.into() } });
     let body = doc.rebuild(None).body.unwrap();
     let key = FaceKey::parse(&format!("f2:end@f{}.0", p.0)).unwrap();
     assert_eq!(find_faces(&body, &key).len(), 1);
@@ -362,7 +362,7 @@ fn copy_zero_still_means_the_original_when_there_are_no_copies() {
 fn a_merged_face_keeps_the_originals_key() {
     // The mirror plane lies on the block's wall, so its top and its copy's top become one face.
     let (mut doc, _) = block();
-    doc.with(Op::Mirror { of: vec![], point: point3(40.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(40.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     let list = keys(&mut doc);
     assert!(list.contains(&"f2:end".to_string()), "{list:?}");
 }
@@ -392,7 +392,7 @@ fn keys_do_not_change_with_a_dimension() {
         let e = doc.with(Op::extrude(s, 0.0, height, Mode::Add));
         doc.with(Op::fillet(EdgeSelect::OnFace(e.end_cap()), radius));
         doc.with(Op::Shell { open: vec![e.start_cap()], thickness: thickness.into() });
-        doc.with(Op::Mirror { of: vec![], point: point3(60.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+        doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(60.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
         keys(&mut doc)
     };
     assert_eq!(build(2.0, 1.0, 10.0), build(3.5, 1.5, 17.0));

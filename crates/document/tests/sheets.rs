@@ -353,7 +353,7 @@ fn what_needs_a_solid_refuses_a_sheet_it_names() {
     assert!(fails(&mut doc).contains("needs a solid"));
 
     let (mut doc, f) = setup();
-    doc.with(Op::Draft { faces: vec![f.end_cap()], pull: point3(0.0, 0.0, 1.0), neutral: point3(0.0, 0.0, 0.0), degrees: 5.0.into() });
+    doc.with(Op::Draft { faces: vec![f.end_cap()], neutral: PlaneRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 1.0)), degrees: 5.0.into() });
     assert!(fails(&mut doc).contains("needs a solid"));
 
     let (mut doc, f) = setup();
@@ -387,7 +387,7 @@ fn a_sheet_moves_copies_and_goes_away_as_any_body_does() {
     let mut doc = Document::new();
     let s = rect_sketch(&mut doc, 10.0, 10.0);
     let f = doc.with(Op::Fill { sketch: s });
-    doc.with(Op::Pattern { of: vec![f], along: PatternPath::Linear { direction: point3(0.0, 0.0, 1.0), count: 3.0.into(), spacing: 4.0.into() } });
+    doc.with(Op::Pattern { of: vec![f], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 0.0, 1.0)), count: 3.0.into(), spacing: 4.0.into() } });
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 3);
     assert!(o.bodies.iter().all(|b| b.body.sheet));
@@ -396,7 +396,7 @@ fn a_sheet_moves_copies_and_goes_away_as_any_body_does() {
     let mut doc = Document::new();
     let s = rect_sketch(&mut doc, 10.0, 10.0);
     let f = doc.with(Op::Fill { sketch: s });
-    doc.with(Op::Mirror { of: vec![f], point: point3(0.0, 0.0, 3.0), normal: point3(0.0, 0.0, 1.0) });
+    doc.with(Op::Mirror { of: vec![f], plane: PlaneRef::through(point3(0.0, 0.0, 3.0), point3(0.0, 0.0, 1.0)) });
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 2);
     assert!(o.bodies[1].body.vertices.iter().all(|p| p.z == 6.0));
@@ -552,19 +552,19 @@ fn a_trim_by_a_plane_keeps_the_side_its_normal_points_to() {
     let mut doc = Document::new();
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, 5.0))]));
     doc.with(surface_extrude(s, 10.0));
-    doc.with(Op::Trim { tool: TrimTool::Plane { point: point3(0.0, 0.0, 3.0), normal: point3(0.0, 0.0, 1.0) }, keep: TrimKeep::Outside });
+    doc.with(Op::Trim { tool: TrimTool::Plane(PlaneRef::through(point3(0.0, 0.0, 3.0), point3(0.0, 0.0, 1.0))), keep: TrimKeep::Outside });
     near(area_of(&ok(&mut doc), 0), TAU * 5.0 * 7.0, "above");
 
     let mut doc = Document::new();
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, 5.0))]));
     doc.with(surface_extrude(s, 10.0));
-    doc.with(Op::Trim { tool: TrimTool::Plane { point: point3(0.0, 0.0, 3.0), normal: point3(0.0, 0.0, 1.0) }, keep: TrimKeep::Inside });
+    doc.with(Op::Trim { tool: TrimTool::Plane(PlaneRef::through(point3(0.0, 0.0, 3.0), point3(0.0, 0.0, 1.0))), keep: TrimKeep::Inside });
     near(area_of(&ok(&mut doc), 0), TAU * 5.0 * 3.0, "below");
 
     let mut doc = Document::new();
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, 5.0))]));
     doc.with(surface_extrude(s, 10.0));
-    doc.with(Op::Trim { tool: TrimTool::Plane { point: point3(0.0, 0.0, 3.0), normal: point3(0.0, 0.0, 1.0) }, keep: TrimKeep::Both });
+    doc.with(Op::Trim { tool: TrimTool::Plane(PlaneRef::through(point3(0.0, 0.0, 3.0), point3(0.0, 0.0, 1.0))), keep: TrimKeep::Both });
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 2);
     near(area_of(&o, 0) + area_of(&o, 1), TAU * 5.0 * 10.0, "both");
@@ -674,13 +674,13 @@ fn a_file_of_surfaces_comes_in_as_sheets_whatever_the_mode() {
 fn a_trim_says_what_it_cant_do() {
     // No sheet to cut.
     let mut doc = Document::new();
-    doc.with(Op::Trim { tool: TrimTool::Plane { point: point3(0.0, 0.0, 0.0), normal: point3(0.0, 0.0, 1.0) }, keep: TrimKeep::Outside });
+    doc.with(Op::Trim { tool: TrimTool::Plane(PlaneRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 1.0))), keep: TrimKeep::Outside });
     assert!(fails(&mut doc).contains("no sheet"));
 
     // A solid, by name.
     let mut doc = Document::new();
     let b = doc.with(Op::solid(Primitive::Box { dx: 1.0.into(), dy: 1.0.into(), dz: 1.0.into() }, Placement::xy(0.0), Mode::Add));
-    let t = doc.with(Op::Trim { tool: TrimTool::Plane { point: point3(0.0, 0.0, 0.5), normal: point3(0.0, 0.0, 1.0) }, keep: TrimKeep::Outside });
+    let t = doc.with(Op::Trim { tool: TrimTool::Plane(PlaneRef::through(point3(0.0, 0.0, 0.5), point3(0.0, 0.0, 1.0))), keep: TrimKeep::Outside });
     doc.set_scope(t, vec![BodyId { feature: b, index: 0 }]).unwrap();
     assert!(fails(&mut doc).contains("this is a solid"));
 
@@ -703,7 +703,7 @@ fn a_trim_says_what_it_cant_do() {
     // A plane with no normal.
     let mut doc = Document::new();
     wide(&mut doc);
-    doc.with(Op::Trim { tool: TrimTool::Plane { point: point3(0.0, 0.0, 0.0), normal: point3(0.0, 0.0, 0.0) }, keep: TrimKeep::Outside });
+    doc.with(Op::Trim { tool: TrimTool::Plane(PlaneRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 0.0))), keep: TrimKeep::Outside });
     assert!(fails(&mut doc).contains("normal"));
 
     // A sketch with no regions, only an open curve.
@@ -733,7 +733,7 @@ fn every_new_thing_comes_back_from_the_file_the_same() {
     let extruded = doc.with(surface_extrude(open, 5.0));
     let cut = doc.with(Op::Trim { tool: TrimTool::Sketch(circle), keep: TrimKeep::Outside });
     doc.set_scope(cut, vec![BodyId { feature: fill, index: 0 }]).unwrap();
-    let plane = doc.with(Op::Trim { tool: TrimTool::Plane { point: point3(0.0, 0.0, 2.0), normal: point3(0.0, 0.0, 1.0) }, keep: TrimKeep::Both });
+    let plane = doc.with(Op::Trim { tool: TrimTool::Plane(PlaneRef::through(point3(0.0, 0.0, 2.0), point3(0.0, 0.0, 1.0))), keep: TrimKeep::Both });
     doc.set_scope(plane, vec![BodyId { feature: extruded, index: 0 }]).unwrap();
     let block = doc.with(Op::solid(Primitive::Box { dx: 1.0.into(), dy: 1.0.into(), dz: 1.0.into() }, Placement::at(point3(100.0, 0.0, 0.0)), Mode::NewBody));
     doc.with(Op::CopyFaces { faces: vec![FaceKey::plain(block.end_cap())] });

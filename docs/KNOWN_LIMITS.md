@@ -467,6 +467,7 @@ All eight of Onshape's plane types are built, with `flip`, and sketches sit on t
 - A line from a sketch is one of its lines: a sketch arc's or circle's axis isn't one yet, though a part's round edge's is (`{"axis_of": selection}`).
 - An edge's direction, and an axis's, are the kernel's own, as `edges_list` and `faces_list` give them, and a change elsewhere in the model can turn one round: `flip`, a negative angle or a negative distance turns a plane made from one back.
 - A plane on a face whose name covers several faces, such as a pattern's copies, needs them all in one plane, and otherwise one face's key.
+- Mirror, trim, draft, an extrude's `up_to_face`, patterns and a transform's frames take planes and lines. A helix's axis and a transform's rotation still take numbers, as does a revolve's axis, which is drawn in its sketch.
 
 ## Sweeps
 

@@ -19,6 +19,8 @@ pub(super) struct Reach<'a> {
     pub mode: Mode,
     pub env: &'a Env,
     pub tag: u32,
+    /// Where an end at a plane is.
+    pub plane: Option<Frame>,
 }
 
 /// One profile's tools for an end. `frame` is its sketch's frame, moved by the extrude's start.
@@ -36,6 +38,10 @@ pub(super) fn tools_to(profile: &Profile, frame: &Frame, opposite: bool, end: &E
             let surface = reach.all.iter().find_map(|h| find_faces(&h.body, key).first().map(|f| h.body.faces[*f].surface.clone()));
             let surface = surface.ok_or_else(|| Error::InvalidInput(format!("the face {} no longer exists in the model", key.text())))?;
             way.to_surface(profile, &surface, &format!("the face {}", key.text()))
+        }
+        ExtrudeEnd::UpToPlane(plane) => {
+            let at = reach.plane.ok_or_else(|| Error::InvalidInput(format!("{} wasn't worked out", plane.describe())))?;
+            way.to_surface(profile, &Surface::Plane(at), &plane.describe())
         }
         ExtrudeEnd::UpToPart(id) => {
             let part = reach.all.iter().find(|h| h.id == *id).ok_or_else(|| Error::InvalidInput(format!("it goes up to part {}, which isn't there at this point", id.text())))?;

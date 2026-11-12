@@ -63,7 +63,7 @@ fn it_counts_as_using_its_sections_and_can_be_cut_and_copied() {
     let (mut doc, a, b, l) = circles();
     assert!(doc.dependents(a).contains(&l) && doc.dependents(b).contains(&l));
     let one = volume(&mut doc);
-    doc.with(Op::Mirror { of: vec![], point: point3(30.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(30.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     assert!((volume(&mut doc) - 2.0 * one).abs() < 1e-6);
     let hole = doc.with(Op::sketch(Placement::new(point3(-20.0, 0.0, 10.0), point3(1.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)), vec![Region::new(Shape::circle(0.0, 0.0, 2.0))]));
     doc.with(Op::extrude(hole, 0.0, 40.0, Mode::Remove));

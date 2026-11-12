@@ -79,8 +79,8 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `sweep` | `sketch`, `path`, `mode`. `path` is a list of steps, `{"sketch": 5}` or `{"edges": selection}`: see below |
 | `helix` | `sketch`, `pitch` (how far along the axis one turn goes), `turns`, `point` (default origin) and `axis` (default +z) for the axis, `left_handed` (default false), `mode`. The sketch can hold the axis, for a spring or a thread, or lie across it, for a twisted bar |
 | `solid` | `shape`, its dimensions, `at` (default XY), `mode` |
-| `pattern` | `of` (feature ids, which can be other patterns and mirrors; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. |
-| `mirror` | `of` (as above), `point` (default origin), `normal` |
+| `pattern` | `of` (feature ids, which can be other patterns and mirrors; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. `direction` is `[x, y, z]` or any [line](#planes), whose direction it takes, and `axis` is `[x, y, z]` through `center`, or a line, which gives the center too, so there's no `center` with one: `{"axis": {"axis_of": "f4:side.0"}, "count": 6}` goes round a boss. A circular pattern turns right-handed about the axis's direction |
+| `mirror` | `of` (as above), and `plane`, any [plane](#planes), or `point` (default origin) and `normal` |
 | `fillet` | `edges`, `radius`, `propagate` (default true: follow tangent neighbours) |
 | `chamfer` | `edges`, `distance`, `propagate` (default true: follow tangent neighbours) |
 | `fillet_radii` | `sets`: a list of `{"edges": ..., "radius": r}`, or `{"edges": ..., "along": [{"at": 0, "radius": 2}, {"at": 1, "radius": 5}], "start": [x, y, z]}` for a radius going in straight lines between places along the chain of edges, from 0 to 1, measured from the end nearest `start`, or without one from the end with the lowest x, then y, then z. Different radii can meet at a corner: see [KNOWN_LIMITS.md](KNOWN_LIMITS.md#fillets-and-chamfers) |
@@ -94,15 +94,15 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `fill` | `sketch`: a flat [sheet](#sheets) filling each of its regions, facing along the sketch's normal, named as this feature's end cap: `f3:end` |
 | `copy_faces` | `faces` (names or keys): a copy of them as a sheet. What they're on stays as it is |
 | `sew` | `tolerance` (default 1e-6), and the `bodies` to join, by default every sheet. See [Sheets](#sheets) |
-| `trim` | What cuts: `tool`, a solid's name like `"f3"`, or `point` and `normal`, a plane, or `sketch`, whose regions cut straight through along its normal. And `keep`: `outside` (the default), `inside` or `both`. Acts on the `bodies` it names, by default every sheet. See [Sheets](#sheets) |
+| `trim` | What cuts: `tool`, a solid's name like `"f3"`, or `plane`, any [plane](#planes), or `point` and `normal`, a plane as numbers, or `sketch`, whose regions cut straight through along its normal. And `keep`: `outside` (the default), `inside` or `both`. Acts on the `bodies` it names, by default every sheet. See [Sheets](#sheets) |
 | `offset` | `distance`: every face moves out, or in if negative. Sharp edges stay sharp. |
 | `shell` | `thickness`, `open` (face names, default none). An inner wall is named for this feature, with the slot of the face it follows: `f9:side.3` lies behind `f2:side.3`. |
-| `draft` | `faces` (names), `degrees`, `pull` (default +z), `neutral` (a point on the plane where faces stay put; default the origin). A positive angle narrows the part along the pull, and widens a hole. |
+| `draft` | `faces` (names), `degrees`, and `neutral`: the plane where faces stay put, any [plane](#planes), whose normal is the pull, or a point on it, `[x, y, z]` (default the origin), with `pull` (default +z). A positive angle narrows the part along the pull, and widens a hole, so a negative one drafts the other way. |
 
 `mode` is `add`, `remove`, `intersect`, `new_body` or `surface`. A placement is `{"origin": [x, y, z], "z": [x, y, z], "x": [x, y, z]}`,
 where each part has a default: the origin, world Z, and world X (world Y if z runs along X). Or it's `{"on_plane": plane}`
 alone, any [plane](#planes) by name, which it then follows, taking its origin, normal and x from it: a sketch's, a solid's
-`at`, and a transform's `from` and `to` can be.
+`at`, and a transform's `from` and `to` can be, so a transform by frames can carry a part from one plane onto another.
 
 Solids: `box` (`dx dy dz`), `cylinder` (`radius height`), `cone` (`r0 r1 height`), `sphere` (`radius`),
 `torus` (`major minor`).
@@ -151,6 +151,9 @@ and what's after it waits.
 {"id": 9, "name": "Plane 6", "type": "plane", "plane_type": "tangent", "face": "f4:side.0", "degrees": 90}
 {"id": 10, "name": "Sketch 3", "type": "sketch", "plane": {"on_plane": 4}, "regions": [...]}
 ```
+
+Mirror, trim and draft take any plane, an extrude can end `up_to_face` at one, a pattern can go along or round any line,
+and a placement can be `{"on_plane": ...}`: see [Features](#features). Each follows what it names.
 
 Each plane has an origin, a normal and an x direction, and its y is the normal across x. The MCP's `planes_list` gives where
 each is, as the history stands or as it stood after any position. Planes, points and lines are named the same way wherever
@@ -258,7 +261,7 @@ A plain id is from `sketch`, and `{"sketch", "region"}` is from any constrained 
 | `"blind"` | At `length`. This is the default |
 | `"through_all"` | Past every part it acts on. A new solid stops flush with the furthest |
 | `"up_to_next"` | At the nearest surface in the way among the parts it acts on. A cut goes on through the material to its far side |
-| `{"type": "up_to_face", "face": "f1:end"}` | At that face's surface, extended as far as it needs to be. A plane, cylinder, cone, sphere or torus |
+| `{"type": "up_to_face", "face": "f1:end"}` | At that face's surface, extended as far as it needs to be. A plane, cylinder, cone, sphere or torus. `face` can also be a [plane](#planes): `"top"`, `"front"`, `"right"`, a plane feature's id, like `4`, or `{"point": [x, y, z], "normal": [x, y, z]}` |
 | `{"type": "up_to_part", "part": "f3"}` | At that part's nearest surface, going on past anything else |
 | `{"type": "up_to_vertex", "vertex": {"faces": [...], "near": [x, y, z]}}` | At a plane through the vertex those faces share, square to the direction. `near` says which if they share several. `edges_list` gives these for each edge's ends as `start_vertex` and `end_vertex` |
 | `{"type": "up_to_vertex", "vertex": {"point": [x, y, z]}}` | The same, through a place |

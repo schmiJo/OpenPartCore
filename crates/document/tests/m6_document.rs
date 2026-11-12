@@ -767,7 +767,7 @@ fn a_linear_pattern_of_a_cut_makes_a_row_of_holes() {
     doc.set_parameter("n", 5.0).unwrap();
     doc.with(Op::Pattern {
         of: vec![drill],
-        along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: "n".into(), spacing: 20.0.into() },
+        along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: "n".into(), spacing: 20.0.into() },
     });
     for n in [5.0, 2.0, 4.0] {
         doc.set_parameter("n", n).unwrap();
@@ -787,7 +787,7 @@ fn a_circular_pattern_goes_around() {
     let drill = doc.with(Op::extrude(h, -1.0, 6.0, Mode::Remove));
     doc.with(Op::Pattern {
         of: vec![drill],
-        along: PatternPath::Circular { center: point3(0.0, 0.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: 8.0.into(), degrees: 360.0.into() },
+        along: PatternPath::Circular { axis: LineRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 1.0)), count: 8.0.into(), degrees: 360.0.into() },
     });
     let o = doc.rebuild(None);
     assert!(o.failed.is_none(), "{:?}", o.steps);
@@ -801,7 +801,7 @@ fn a_partial_circular_pattern_ends_at_its_angle() {
     let d = doc.with(Op::solid(Primitive::Box { dx: 2.0.into(), dy: 2.0.into(), dz: 2.0.into() }, Placement::at(point3(20.0, -1.0, 0.0)), Mode::Add));
     doc.with(Op::Pattern {
         of: vec![d],
-        along: PatternPath::Circular { center: point3(0.0, 0.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: 3.0.into(), degrees: 90.0.into() },
+        along: PatternPath::Circular { axis: LineRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 1.0)), count: 3.0.into(), degrees: 90.0.into() },
     });
     let o = doc.rebuild(None);
     assert!(o.failed.is_none(), "{:?}", o.steps);
@@ -817,7 +817,7 @@ fn a_whole_body_can_be_patterned_and_copies_keep_their_names() {
     doc.with(Op::fillet(EdgeSelect::Between(e.end_cap(), e.side(0)), 1.0));
     let corner = 1.0 - PI / 4.0;
     let one = 20000.0 - PI * 9.0 * 5.0 - corner * 100.0;
-    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: point3(0.0, 1.0, 0.0), count: 3.0.into(), spacing: 50.0.into() } });
+    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 1.0, 0.0)), count: 3.0.into(), spacing: 50.0.into() } });
     let o = doc.rebuild(None);
     assert!(o.failed.is_none(), "{:?}", o.steps);
     assert!((vol(&o) - 3.0 * one).abs() < 1e-6, "{}", vol(&o));
@@ -835,7 +835,7 @@ fn a_whole_body_can_be_patterned_and_copies_keep_their_names() {
 fn a_mirror_doubles_a_half_and_a_listed_feature_alone() {
     // A half plate mirrored whole: the shared face goes, leaving one solid.
     let (mut doc, _, _) = plate_with_hole();
-    doc.with(Op::Mirror { of: vec![], point: point3(0.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(0.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     let o = doc.rebuild(None);
     assert!(o.failed.is_none(), "{:?}", o.steps);
     assert!((vol(&o) - 2.0 * (20000.0 - PI * 9.0 * 5.0)).abs() < 1e-6, "{}", vol(&o));
@@ -844,7 +844,7 @@ fn a_mirror_doubles_a_half_and_a_listed_feature_alone() {
     assert_eq!(validate(&body).unwrap().genus, vec![2]);
     // Only the hole, mirrored about the plate's middle.
     let (mut doc, _, drill) = plate_with_hole();
-    doc.with(Op::Mirror { of: vec![drill], point: point3(50.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    doc.with(Op::Mirror { of: vec![drill], plane: PlaneRef::through(point3(50.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     let o = doc.rebuild(None);
     assert!(o.failed.is_none(), "{:?}", o.steps);
     assert!((vol(&o) - (20000.0 - 2.0 * PI * 9.0 * 5.0)).abs() < 1e-7, "{}", vol(&o));
@@ -883,9 +883,9 @@ fn a_sweep_feature_follows_its_path_and_saves() {
 #[test]
 fn patterns_and_mirrors_save_and_refuse_with_reasons() {
     let (mut doc, _, drill) = plate_with_hole();
-    doc.with(Op::Pattern { of: vec![drill], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 2.0.into(), spacing: 20.0.into() } });
-    doc.with(Op::Pattern { of: vec![drill], along: PatternPath::Circular { center: point3(50.0, 20.0, 0.0), axis: point3(0.0, 0.0, 1.0), count: 2.0.into(), degrees: 360.0.into() } });
-    doc.with(Op::Mirror { of: vec![], point: point3(0.0, 0.0, 5.0), normal: point3(0.0, 0.0, 1.0) });
+    doc.with(Op::Pattern { of: vec![drill], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 2.0.into(), spacing: 20.0.into() } });
+    doc.with(Op::Pattern { of: vec![drill], along: PatternPath::Circular { axis: LineRef::through(point3(50.0, 20.0, 0.0), point3(0.0, 0.0, 1.0)), count: 2.0.into(), degrees: 360.0.into() } });
+    doc.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(0.0, 0.0, 5.0), point3(0.0, 0.0, 1.0)) });
     let text = doc.save_text();
     let mut back = Document::load_text(&text).unwrap();
     assert_eq!(back.features(), doc.features());
@@ -898,25 +898,25 @@ fn patterns_and_mirrors_save_and_refuse_with_reasons() {
     let s = d.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 5.0, 5.0))]));
     let x = d.with(Op::extrude(s, 0.0, 1.0, Mode::Add));
     let f = d.with(Op::fillet(EdgeSelect::OnFace(x.end_cap()), 0.2));
-    let p = d.with(Op::Pattern { of: vec![f], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 2.0.into(), spacing: 9.0.into() } });
+    let p = d.with(Op::Pattern { of: vec![f], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 2.0.into(), spacing: 9.0.into() } });
     let o = d.rebuild(None);
     match &o.steps[3].state {
         StepState::Failed(why) => assert!(why.contains("no solid to copy"), "{why}"),
         other => panic!("{other:?}"),
     }
-    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: point3(0.0, 0.0, 0.0), count: 2.0.into(), spacing: 9.0.into() } }).unwrap();
+    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 0.0, 0.0)), count: 2.0.into(), spacing: 9.0.into() } }).unwrap();
     match &d.rebuild(None).steps[3].state {
         StepState::Failed(why) => assert!(why.contains("non-zero"), "{why}"),
         other => panic!("{other:?}"),
     }
-    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 0.0.into(), spacing: 9.0.into() } }).unwrap();
+    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 0.0.into(), spacing: 9.0.into() } }).unwrap();
     assert!(matches!(d.rebuild(None).steps[3].state, StepState::Failed(_)));
     d.suppress(x, true).unwrap();
-    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 2.0.into(), spacing: 9.0.into() } }).unwrap();
+    d.edit(p, Op::Pattern { of: vec![x], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 2.0.into(), spacing: 9.0.into() } }).unwrap();
     assert!(d.rebuild(None).failed.is_some());
     let mut late = Document::new();
-    assert!(late.add(Op::Mirror { of: vec![FeatureId(5)], point: point3(0.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) }).is_err());
-    let m = late.with(Op::Mirror { of: vec![], point: point3(0.0, 0.0, 0.0), normal: point3(0.0, 0.0, 0.0) });
+    assert!(late.add(Op::Mirror { of: vec![FeatureId(5)], plane: PlaneRef::through(point3(0.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) }).is_err());
+    let m = late.with(Op::Mirror { of: vec![], plane: PlaneRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 0.0)) });
     let _ = m;
     assert!(late.rebuild(None).failed.is_some());
 }
@@ -959,7 +959,7 @@ fn offset_shell_and_draft_work_as_features_and_follow_dimensions() {
     let s = d.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::centered("20", "20"))]));
     let e = d.with(Op::extrude(s, 0.0, 10.0, Mode::Add));
     let sides: Vec<FaceRef> = (0..4).map(|i| e.side(i)).collect();
-    d.with(Op::Draft { faces: sides, pull: point3(0.0, 0.0, 1.0), neutral: point3(0.0, 0.0, 0.0), degrees: 5.0.into() });
+    d.with(Op::Draft { faces: sides, neutral: PlaneRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 0.0, 1.0)), degrees: 5.0.into() });
     d.with(Op::Offset { distance: 1.0.into() });
     let o = d.rebuild(None);
     assert!(o.failed.is_none(), "{:?}", o.steps);

@@ -59,7 +59,7 @@ fn deleting_a_hole_by_name_and_one_of_a_pattern_by_key() {
     doc.with(Op::extrude(plate, 0.0, 5.0, Mode::Add));
     let circle = doc.with(Op::sketch(Placement::xy(-1.0), vec![Region::new(Shape::circle(10.0, 10.0, 3.0))]));
     let hole = doc.with(Op::extrude(circle, 0.0, 7.0, Mode::Remove));
-    let pattern = doc.with(Op::Pattern { of: vec![hole], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: 20.0.into() } });
+    let pattern = doc.with(Op::Pattern { of: vec![hole], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 20.0.into() } });
     let all = volume(&mut doc);
     let one_hole = PI * 9.0 * 5.0;
     assert!((all - (6000.0 - 3.0 * one_hole)).abs() < 1e-9, "{all}");

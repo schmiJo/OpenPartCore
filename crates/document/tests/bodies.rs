@@ -667,7 +667,7 @@ fn copies_follow_what_they_copy_whichever_body_that_changed() {
     let bolt = named(&mut doc, "Bolt", Op::solid(Primitive::Cylinder { radius: "r".into(), height: 20.0.into() }, Placement::xy(0.0), Mode::NewBody));
     // The pattern's own body is this one, which has nothing to do with the bolt.
     named(&mut doc, "Plate", block(100.0, 100.0, 5.0, 50.0));
-    named(&mut doc, "Row", Op::Pattern { of: vec![bolt], along: PatternPath::Linear { direction: point3(0.0, 1.0, 0.0), count: 3.0.into(), spacing: 20.0.into() } });
+    named(&mut doc, "Row", Op::Pattern { of: vec![bolt], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 1.0, 0.0)), count: 3.0.into(), spacing: 20.0.into() } });
     let one = |r: f64| PI * r * r * 20.0;
     let o = ok(&mut doc);
     assert!((vol(&o.bodies[2].body) - one(2.0)).abs() < 1e-9);
@@ -841,7 +841,7 @@ fn copies_of_a_body_are_bodies_with_names_of_their_own() {
     let mut doc = Document::new();
     let plate = doc.with(block(100.0, 100.0, 5.0, 0.0));
     let bolt = doc.with(Op::solid(Primitive::Cylinder { radius: 2.0.into(), height: 20.0.into() }, Placement::at(point3(10.0, 10.0, -5.0)), Mode::NewBody));
-    let row = doc.with(Op::Pattern { of: vec![bolt], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 4.0.into(), spacing: 20.0.into() } });
+    let row = doc.with(Op::Pattern { of: vec![bolt], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 4.0.into(), spacing: 20.0.into() } });
     let o = ok(&mut doc);
     let names: Vec<String> = o.bodies.iter().map(|b| b.id.text()).collect();
     assert_eq!(names, vec![format!("f{}", plate.0), format!("f{}", bolt.0), format!("f{}", row.0), format!("f{}.1", row.0), format!("f{}.2", row.0)]);
@@ -856,7 +856,7 @@ fn copies_of_a_body_are_bodies_with_names_of_their_own() {
     let texts: std::collections::HashSet<String> = keys.iter().map(FaceKey::text).collect();
     assert_eq!(texts.len(), keys.len());
     // A mirror is the same.
-    doc.with(Op::Mirror { of: vec![bolt], point: point3(50.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
+    doc.with(Op::Mirror { of: vec![bolt], plane: PlaneRef::through(point3(50.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 6);
     assert!((o.bodies[5].body.aabb().center().x - 90.0).abs() < 1e-3);
@@ -870,7 +870,7 @@ fn copies_of_what_a_feature_added_join_what_they_land_on() {
     doc.set_scope(boss, one(a)).unwrap();
     // A later body, which they don't reach.
     doc.with(block(10.0, 10.0, 10.0, 500.0));
-    doc.with(Op::Pattern { of: vec![boss], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: 20.0.into() } });
+    doc.with(Op::Pattern { of: vec![boss], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 20.0.into() } });
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 2);
     let one = PI * 3.0;
@@ -883,7 +883,7 @@ fn a_pattern_of_a_whole_part_makes_parts() {
     let mut doc = Document::new();
     doc.with(block(5.0, 5.0, 5.0, 0.0));
     let b = doc.with(block(5.0, 5.0, 5.0, 100.0));
-    let p = doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: point3(0.0, 1.0, 0.0), count: 3.0.into(), spacing: 20.0.into() } });
+    let p = doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 1.0, 0.0)), count: 3.0.into(), spacing: 20.0.into() } });
     doc.set_scope(p, one(b)).unwrap();
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 4);
@@ -894,7 +894,7 @@ fn a_pattern_of_a_whole_part_makes_parts() {
     // Close enough to touch, they're one.
     let mut doc = Document::new();
     doc.with(block(5.0, 5.0, 5.0, 0.0));
-    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: 5.0.into() } });
+    doc.with(Op::Pattern { of: vec![], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 5.0.into() } });
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 1);
     assert!((vol(&o.bodies[0].body) - 375.0).abs() < 1e-9);

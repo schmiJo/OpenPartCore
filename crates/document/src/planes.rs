@@ -335,7 +335,6 @@ impl PlaneDef {
 pub(crate) enum Geo<'a> {
     Place(&'a Placement),
     Plane(&'a PlaneRef),
-    Point(&'a PointRef),
     Line(&'a LineRef),
     Def(&'a PlaneDef, bool),
 }
@@ -352,7 +351,6 @@ impl<'a> Geo<'a> {
                 }
             }
             Geo::Plane(p) => p.references(out),
-            Geo::Point(p) => p.references(out),
             Geo::Line(l) => l.references(out),
             Geo::Def(d, _) => d.references(out),
         }
@@ -363,13 +361,12 @@ impl<'a> Geo<'a> {
             Geo::Place(p) => p.on_plane.iter().for_each(|r| r.planes(out)),
             Geo::Plane(p) => p.planes(out),
             Geo::Def(d, _) => d.planes(out),
-            Geo::Point(_) | Geo::Line(_) => {}
+            Geo::Line(_) => {}
         }
     }
 
     pub(crate) fn sketches(&self, out: &mut Vec<FeatureId>) {
         match self {
-            Geo::Point(p) => p.sketches(out),
             Geo::Line(l) => l.sketches(out),
             Geo::Def(d, _) => d.sketches(out),
             Geo::Place(_) | Geo::Plane(_) => {}
@@ -385,7 +382,6 @@ impl<'a> Geo<'a> {
                 }
             }
             Geo::Plane(p) => p.exprs(out),
-            Geo::Point(p) => p.exprs(out),
             Geo::Line(l) => l.exprs(out),
             Geo::Def(d, _) => d.exprs(out),
         }

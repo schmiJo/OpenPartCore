@@ -625,8 +625,8 @@ pub enum Mode {
 pub enum TrimTool {
     /// A solid body.
     Body(BodyId),
-    /// A plane through a point. `Outside` is the side its normal points to.
-    Plane { point: Point3, normal: Point3 },
+    /// A plane. `Outside` is the side its normal points to.
+    Plane(PlaneRef),
     /// A sketch's regions, swept through the sheet along the sketch's normal, as a cookie cutter is.
     Sketch(FeatureId),
 }
@@ -745,15 +745,15 @@ pub enum Op {
     Pattern { of: Vec<FeatureId>, along: PatternPath },
     /// Reflects earlier features, or the whole body if `of` is empty, across a plane, adding them to
     /// the originals. A reflection keeps names too.
-    Mirror { of: Vec<FeatureId>, point: Point3, normal: Point3 },
+    Mirror { of: Vec<FeatureId>, plane: PlaneRef },
     /// Moves every face outward by a distance, or inward if negative. Sharp edges stay sharp.
     Offset { distance: Expr },
     /// Hollows the body to walls of a thickness, leaving named faces open. An inner wall is named
     /// for this feature, with the slot of the face it follows: `f9:side.3` lies behind `f2:side.3`.
     Shell { open: Vec<FaceRef>, thickness: Expr },
-    /// Tapers named faces along a pull direction, keeping them in place on the neutral plane through
-    /// `neutral`. A positive angle narrows the part along the pull, and widens a hole.
-    Draft { faces: Vec<FaceRef>, pull: Point3, neutral: Point3, degrees: Expr },
+    /// Tapers named faces, keeping them in place on the neutral plane, along a pull that is its normal. A positive angle
+    /// narrows the part along the pull, and widens a hole.
+    Draft { faces: Vec<FaceRef>, neutral: PlaneRef, degrees: Expr },
     /// Moves the bodies it acts on, or with `copy` leaves them and adds moved copies of them, as bodies of their own.
     Transform { motion: Motion, copy: bool },
     /// Deletes the bodies it names.
@@ -797,6 +797,8 @@ pub enum ExtrudeEnd {
     UpToPart(BodyId),
     /// At a plane through a vertex, square to the direction.
     UpToVertex(VertexRef),
+    /// At a plane: Top, Front, Right, a plane feature, or one given as numbers.
+    UpToPlane(PlaneRef),
 }
 
 /// A vertex, as the end of an extrude.
@@ -874,10 +876,11 @@ pub enum SweepPath {
 /// Where a pattern's copies go. `count` includes the original.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternPath {
-    Linear { direction: Point3, count: Expr, spacing: Expr },
-    /// Around an axis. Copies are evenly spaced over `degrees`. A full turn has no copy at the end, as
-    /// that would be the original; anything less goes from the original to the end of the angle.
-    Circular { center: Point3, axis: Point3, count: Expr, degrees: Expr },
+    /// Along a line's direction. Only its direction counts.
+    Linear { direction: LineRef, count: Expr, spacing: Expr },
+    /// Around a line. Copies are evenly spaced over `degrees`, right-handed about its direction. A full turn has no copy
+    /// at the end, as that would be the original; anything less goes from the original to the end of the angle.
+    Circular { axis: LineRef, count: Expr, degrees: Expr },
 }
 
 impl Op {
@@ -962,6 +965,8 @@ impl Op {
             Op::Sketch { plane, .. } | Op::ConstrainedSketch { plane, .. } | Op::Solid { at: plane, .. } if following(plane) => vec![Geo::Place(plane)],
             Op::Transform { motion: Motion::Frames { from, to }, .. } => [from, to].into_iter().filter(|p| following(p)).map(Geo::Place).collect(),
             Op::Plane { def, flip } => vec![Geo::Def(def, *flip)],
+            Op::Mirror { plane, .. } | Op::Draft { neutral: plane, .. } | Op::Trim { tool: TrimTool::Plane(plane), .. } | Op::Extrude { end: ExtrudeEnd::UpToPlane(plane), .. } => vec![Geo::Plane(plane)],
+            Op::Pattern { along: PatternPath::Linear { direction: line, .. } | PatternPath::Circular { axis: line, .. }, .. } => vec![Geo::Line(line)],
             _ => Vec::new(),
         }
     }
@@ -1133,12 +1138,7 @@ impl Op {
         match self {
             Op::ImportStep { .. } | Op::ImportStepParts { .. } | Op::Fill { .. } | Op::CopyFaces { .. } => {}
             Op::Sew { tolerance } => out.extend(tolerance.iter()),
-            Op::Trim { tool, .. } => {
-                if let TrimTool::Plane { point, normal } = tool {
-                    out.extend(point.iter());
-                    out.extend(normal.iter());
-                }
-            }
+            Op::Trim { .. } => {}
             Op::Sketch { plane, regions } => {
                 place(plane, &mut out);
                 for r in regions {
@@ -1214,27 +1214,13 @@ impl Op {
                 SweepPath::Edges(edges) => edges.collect_exprs(&mut out),
             },
             Op::Pattern { along, .. } => match along {
-                PatternPath::Linear { direction, count, spacing } => {
-                    out.extend(direction.iter());
-                    out.extend([count, spacing]);
-                }
-                PatternPath::Circular { center, axis, count, degrees } => {
-                    out.extend(center.iter());
-                    out.extend(axis.iter());
-                    out.extend([count, degrees]);
-                }
+                PatternPath::Linear { count, spacing, .. } => out.extend([count, spacing]),
+                PatternPath::Circular { count, degrees, .. } => out.extend([count, degrees]),
             },
-            Op::Mirror { point, normal, .. } => {
-                out.extend(point.iter());
-                out.extend(normal.iter());
-            }
+            Op::Mirror { .. } => {}
             Op::Offset { distance } => out.push(distance),
             Op::Shell { thickness, .. } => out.push(thickness),
-            Op::Draft { pull, neutral, degrees, .. } => {
-                out.extend(pull.iter());
-                out.extend(neutral.iter());
-                out.push(degrees);
-            }
+            Op::Draft { degrees, .. } => out.push(degrees),
             Op::Fillet { edges, radius, .. } => {
                 edges.collect_exprs(&mut out);
                 out.push(radius);
@@ -1748,7 +1734,7 @@ fn trim_parts(
     tool: &TrimTool,
     keep: TrimKeep,
     all: &[Held],
-    at_point: &dyn Fn(&Point3) -> Result<Vec3>,
+    plane_at: &dyn Fn(&PlaneRef) -> Result<Frame>,
     sketch_output: &dyn Fn(&FeatureId) -> Result<SketchOutput>,
 ) -> Result<(Option<Body>, Option<Body>)> {
     let (want_out, want_in) = (keep != TrimKeep::Inside, keep != TrimKeep::Outside);
@@ -1762,8 +1748,9 @@ fn trim_parts(
             let inside = want_in.then(|| trim_sheet(sheet, &solid.body, Keep::Inside)).transpose()?;
             Ok((outside, inside))
         }
-        TrimTool::Plane { point, normal } => {
-            let (p, n) = (at_point(point)?, at_point(normal)?);
+        TrimTool::Plane(plane) => {
+            let f = plane_at(plane)?;
+            let (p, n) = (f.origin, f.z);
             let outside = want_out.then(|| trim_sheet_by_plane(sheet, p, n, Keep::Outside)).transpose()?;
             let inside = want_in.then(|| trim_sheet_by_plane(sheet, p, n, Keep::Inside)).transpose()?;
             Ok((outside, inside))
@@ -2097,7 +2084,6 @@ impl Document {
             let text = match g {
                 Geo::Place(p) => format!("{:?}", look.placement(p)?),
                 Geo::Plane(p) => format!("{:?}", look.plane(p)?),
-                Geo::Point(p) => format!("{:?}", look.point(p)?),
                 Geo::Line(l) => format!("{:?}", look.line(l)?),
                 Geo::Def(d, flip) => format!("{:?}", look.def(d, flip)?),
             };
@@ -2646,7 +2632,11 @@ impl Document {
                 if surface && *end != ExtrudeEnd::Blind {
                     return Err(Error::InvalidInput("a surface is extruded to a length: through all and up to something are only built for solids".into()));
                 }
-                let reach = up_to::Reach { all, scope, mode: *mode, env, tag };
+                let plane = match end {
+                    ExtrudeEnd::UpToPlane(p) => Some(look.plane(p)?),
+                    _ => None,
+                };
+                let reach = up_to::Reach { all, scope, mode: *mode, env, tag, plane };
                 let offset = num(start, env)?;
                 // What one profile makes, going from a frame already moved by the start.
                 let made_from = |p: &Profile, shifted: &Frame| -> Result<Vec<Body>> {
@@ -2875,15 +2865,12 @@ impl Document {
                 applied(tools, *mode)
             }
             Op::Pattern { of, along } => {
-                let moves = pattern_moves(along, env)?;
+                let moves = pattern_moves(along, env, &look)?;
                 self.copied(scope, of, tag, |b| moves.iter().map(|m| b.transformed(m)).collect())
             }
-            Op::Mirror { of, point, normal } => {
-                let n = at_point(normal)?;
-                if !(n.norm() >= 1e-12 && n.norm() <= 1e150) {
-                    return Err(Error::InvalidInput("a mirror's normal must have a sensible, non-zero length".into()));
-                }
-                let m = Mirror::new(at_point(point)?, n);
+            Op::Mirror { of, plane } => {
+                let f = look.plane(plane)?;
+                let m = Mirror::new(f.origin, f.z);
                 self.copied(scope, of, tag, |b| vec![b.mirrored(&m)])
             }
             Op::ImportStep { text, mode: Mode::Surface } => sheets(coreshape::import::step::read_step_sheets(text, tag)?),
@@ -2942,14 +2929,15 @@ impl Document {
                 }
                 Ok(out.done(None))
             }
-            Op::Draft { faces, pull, neutral, degrees } => {
+            Op::Draft { faces, neutral, degrees } => {
                 let everything = whole().ok_or_else(|| Error::InvalidInput("a draft needs a body to work on".into()))?;
                 let picked = named_faces(&everything, faces)?;
                 if picked.is_empty() {
                     return Err(Error::InvalidInput("a draft needs at least one face".into()));
                 }
                 only_on_sheets(all, &picked, |b| b.faces.len(), "a draft")?;
-                let (p, n, a) = (at_point(pull)?, at_point(neutral)?, num(degrees, env)?.to_radians());
+                let plane = look.plane(neutral)?;
+                let (p, n, a) = (plane.z, plane.origin, num(degrees, env)?.to_radians());
                 let mut out = Changes::default();
                 for (at, list) in by_body(all, scope, &picked, |b| b.faces.len()) {
                     out.settle(scope[at].0, draft(&scope[at].1, &list, p, n, a).map_err(|e| on_body(e, scope[at].0, scope.len() > 1))?, tag);
@@ -3103,7 +3091,7 @@ impl Document {
                 }
                 let mut out = Changes::default();
                 for (id, sheet) in list {
-                    let (outside, inside) = trim_parts(sheet, tool, *keep, all, &at_point, &sketch_output).map_err(|e| on_body(e, *id, scope.len() > 1))?;
+                    let (outside, inside) = trim_parts(sheet, tool, *keep, all, &|r| look.plane(r), &sketch_output).map_err(|e| on_body(e, *id, scope.len() > 1))?;
                     match (outside, inside) {
                         (Some(a), Some(b)) => {
                             out.settle(*id, a, tag);
@@ -3566,23 +3554,14 @@ fn named_for_face(mut body: Body, feature: u32, entry: u32, from: FaceTag, acros
 }
 
 /// The rigid moves that take the original to each of a pattern's copies.
-fn pattern_moves(along: &PatternPath, env: &Env) -> Result<Vec<Frame>> {
-    let at = |p: &Point3| -> Result<Vec3> { Ok(v3(num(&p[0], env)?, num(&p[1], env)?, num(&p[2], env)?)) };
-    let unit = |p: &Point3, what: &str| -> Result<Vec3> {
-        let d = at(p)?;
-        if d.norm() >= 1e-12 && d.norm() <= 1e150 {
-            Ok(d.normalized())
-        } else {
-            Err(Error::InvalidInput(format!("a pattern's {what} must have a sensible, non-zero length")))
-        }
-    };
+fn pattern_moves(along: &PatternPath, env: &Env, look: &Looker) -> Result<Vec<Frame>> {
     Ok(match along {
         PatternPath::Linear { direction, count, spacing } => {
-            let (d, n, step) = (unit(direction, "direction")?, count_of(count, env, "a pattern's count")?, num(spacing, env)?);
+            let (d, n, step) = (look.line(direction)?.1, count_of(count, env, "a pattern's count")?, num(spacing, env)?);
             (1..n).map(|k| Frame::translation(d * (step * k as f64))).collect()
         }
-        PatternPath::Circular { center, axis, count, degrees } => {
-            let (c, a, n) = (at(center)?, unit(axis, "axis")?, count_of(count, env, "a pattern's count")?);
+        PatternPath::Circular { axis, count, degrees } => {
+            let ((c, a), n) = (look.line(axis)?, count_of(count, env, "a pattern's count")?);
             let total = num(degrees, env)?;
             let full = (total.abs() - 360.0).abs() < 1e-9;
             if !full && total.abs() > 360.0 {
@@ -3692,6 +3671,7 @@ fn extrude_end_value(end: &ExtrudeEnd) -> Value {
         ExtrudeEnd::ThroughAll => Value::str("through_all"),
         ExtrudeEnd::UpToNext => Value::str("up_to_next"),
         ExtrudeEnd::UpToFace(key) => Value::obj(vec![("type", Value::str("up_to_face")), ("face", Value::str(key.text()))]),
+        ExtrudeEnd::UpToPlane(plane) => Value::obj(vec![("type", Value::str("up_to_face")), ("face", plane_ref_value(plane))]),
         ExtrudeEnd::UpToPart(part) => Value::obj(vec![("type", Value::str("up_to_part")), ("part", Value::str(part.text()))]),
         ExtrudeEnd::UpToVertex(vertex) => {
             let on = match vertex {
@@ -3717,7 +3697,14 @@ fn read_extrude_end(v: &Value) -> Result<ExtrudeEnd> {
         "blind" => ExtrudeEnd::Blind,
         "through_all" => ExtrudeEnd::ThroughAll,
         "up_to_next" => ExtrudeEnd::UpToNext,
-        "up_to_face" => ExtrudeEnd::UpToFace(FaceKey::parse(text("face")?)?),
+        // A face's name or key, or a plane: Top, Front, Right, a plane feature's id, or one given.
+        "up_to_face" => {
+            let face = end.get("face").ok_or_else(|| Error::InvalidInput("an extrude's up_to_face end needs \"face\"".into()))?;
+            match face.as_str() {
+                Some(name) if !matches!(name, "top" | "front" | "right") => ExtrudeEnd::UpToFace(FaceKey::parse(name)?),
+                _ => ExtrudeEnd::UpToPlane(read_plane_ref(face)?),
+            }
+        }
         "up_to_part" => ExtrudeEnd::UpToPart(BodyId::parse(text("part")?)?),
         "up_to_vertex" => {
             let on = end.get("vertex").ok_or_else(|| Error::InvalidInput("an extrude's up_to_vertex end needs \"vertex\"".into()))?;
@@ -4263,10 +4250,11 @@ pub fn op_value(op: &Op) -> Value {
             let mut items = vec![("type", Value::str("trim"))];
             match tool {
                 TrimTool::Body(id) => items.push(("tool", Value::str(id.text()))),
-                TrimTool::Plane { point, normal } => {
+                TrimTool::Plane(PlaneRef::Given { point, normal }) => {
                     items.push(("point", point3_value(point)));
                     items.push(("normal", point3_value(normal)));
                 }
+                TrimTool::Plane(plane) => items.push(("plane", plane_ref_value(plane))),
                 TrimTool::Sketch(id) => items.push(("sketch", Value::Num(id.0 as f64))),
             }
             items.push((
@@ -4339,25 +4327,38 @@ pub fn op_value(op: &Op) -> Value {
             let mut items = vec![("type", Value::str("pattern")), ("of", ids_value(of))];
             match along {
                 PatternPath::Linear { direction, count, spacing } => {
-                    items.push(("direction", point3_value(direction)));
+                    items.push(("direction", match direction {
+                        LineRef::Given { direction, .. } => point3_value(direction),
+                        line => line_ref_value(line),
+                    }));
                     items.push(("count", expr_value(count)));
                     items.push(("spacing", expr_value(spacing)));
                 }
-                PatternPath::Circular { center, axis, count, degrees } => {
-                    items.push(("center", point3_value(center)));
-                    items.push(("axis", point3_value(axis)));
+                PatternPath::Circular { axis, count, degrees } => {
+                    match axis {
+                        LineRef::Given { point, direction } => {
+                            items.push(("center", point3_value(point)));
+                            items.push(("axis", point3_value(direction)));
+                        }
+                        line => items.push(("axis", line_ref_value(line))),
+                    }
                     items.push(("count", expr_value(count)));
                     items.push(("degrees", expr_value(degrees)));
                 }
             }
             Value::obj(items)
         }
-        Op::Mirror { of, point, normal } => Value::obj(vec![
-            ("type", Value::str("mirror")),
-            ("of", ids_value(of)),
-            ("point", point3_value(point)),
-            ("normal", point3_value(normal)),
-        ]),
+        Op::Mirror { of, plane } => {
+            let mut items = vec![("type", Value::str("mirror")), ("of", ids_value(of))];
+            match plane {
+                PlaneRef::Given { point, normal } => {
+                    items.push(("point", point3_value(point)));
+                    items.push(("normal", point3_value(normal)));
+                }
+                plane => items.push(("plane", plane_ref_value(plane))),
+            }
+            Value::obj(items)
+        }
         Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => Value::obj(vec![
             ("type", Value::str("helix")),
             ("sketch", Value::Num(sketch.0 as f64)),
@@ -4381,13 +4382,18 @@ pub fn op_value(op: &Op) -> Value {
             ("open", face_list_value(open)),
             ("thickness", expr_value(thickness)),
         ]),
-        Op::Draft { faces, pull, neutral, degrees } => Value::obj(vec![
-            ("type", Value::str("draft")),
-            ("faces", face_list_value(faces)),
-            ("pull", point3_value(pull)),
-            ("neutral", point3_value(neutral)),
-            ("degrees", expr_value(degrees)),
-        ]),
+        Op::Draft { faces, neutral, degrees } => {
+            let mut items = vec![("type", Value::str("draft")), ("faces", face_list_value(faces))];
+            match neutral {
+                PlaneRef::Given { point, normal } => {
+                    items.push(("pull", point3_value(normal)));
+                    items.push(("neutral", point3_value(point)));
+                }
+                plane => items.push(("neutral", plane_ref_value(plane))),
+            }
+            items.push(("degrees", expr_value(degrees)));
+            Value::obj(items)
+        }
         Op::Fillet { edges, radius, propagate } => Value::obj(vec![
             ("type", Value::str("fillet")),
             ("edges", edge_select_value(edges)),
@@ -4655,15 +4661,16 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::Sew { tolerance: v.get("tolerance").map(read_expr).transpose()? })
         }
         "trim" => {
-            with(&["type", "tool", "point", "normal", "sketch", "keep"])?;
-            let tool = match (v.get("tool"), v.get("point"), v.get("sketch")) {
-                (Some(t), None, None) => {
+            with(&["type", "tool", "point", "normal", "plane", "sketch", "keep"])?;
+            let tool = match (v.get("tool"), v.get("point"), v.get("sketch"), v.get("plane")) {
+                (Some(t), None, None, None) => {
                     let name = t.as_str().ok_or_else(|| Error::InvalidInput("a trim's \"tool\" must be the name of a body, like f3 or f3.2".into()))?;
                     TrimTool::Body(BodyId::parse(name)?)
                 }
-                (None, Some(p), None) => TrimTool::Plane { point: read_point3(p)?, normal: read_point3(field(v, "normal", "a trim by a plane")?)? },
-                (None, None, Some(_)) => TrimTool::Sketch(read_sketch_id(v)?),
-                _ => return Err(Error::InvalidInput("a trim takes one of \"tool\", a body, \"point\" and \"normal\", a plane, or \"sketch\"".into())),
+                (None, Some(p), None, None) => TrimTool::Plane(PlaneRef::Given { point: read_point3(p)?, normal: read_point3(field(v, "normal", "a trim by a plane")?)? }),
+                (None, None, Some(_), None) => TrimTool::Sketch(read_sketch_id(v)?),
+                (None, None, None, Some(p)) if v.get("normal").is_none() => TrimTool::Plane(read_plane_ref(p)?),
+                _ => return Err(Error::InvalidInput("a trim takes one of \"tool\", a body, \"plane\", or \"point\" and \"normal\", a plane, or \"sketch\"".into())),
             };
             let keep = match v.get("keep").and_then(Value::as_str) {
                 None | Some("outside") => TrimKeep::Outside,
@@ -4757,29 +4764,43 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             let of = read_ids(v)?;
             let along = if v.get("direction").is_some() {
                 with(&["type", "of", "direction", "count", "spacing"])?;
+                let direction = field(v, "direction", "a linear pattern")?;
                 PatternPath::Linear {
-                    direction: read_point3(field(v, "direction", "a linear pattern")?)?,
+                    direction: if direction.as_array().is_some() { LineRef::along(read_point3(direction)?) } else { read_line_ref(direction)? },
                     count: expr_field(v, "count", "a pattern")?,
                     spacing: expr_field(v, "spacing", "a linear pattern")?,
                 }
             } else {
                 with(&["type", "of", "center", "axis", "count", "degrees"])?;
-                PatternPath::Circular {
-                    center: v.get("center").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
-                    axis: v.get("axis").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 1.0)),
-                    count: expr_field(v, "count", "a pattern")?,
-                    degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)),
-                }
+                let axis = match v.get("axis") {
+                    Some(line) if line.as_array().is_none() => {
+                        if v.get("center").is_some() {
+                            return Err(Error::InvalidInput("a circular pattern round a line takes its center from the line, so it has no \"center\"".into()));
+                        }
+                        read_line_ref(line)?
+                    }
+                    axis => LineRef::Given {
+                        point: v.get("center").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
+                        direction: axis.map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 1.0)),
+                    },
+                };
+                PatternPath::Circular { axis, count: expr_field(v, "count", "a pattern")?, degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)) }
             };
             Ok(Op::Pattern { of, along })
         }
         "mirror" => {
-            with(&["type", "of", "point", "normal"])?;
-            Ok(Op::Mirror {
-                of: read_ids(v)?,
-                point: v.get("point").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
-                normal: read_point3(field(v, "normal", "a mirror")?)?,
-            })
+            with(&["type", "of", "point", "normal", "plane"])?;
+            let plane = match v.get("plane") {
+                Some(_) if v.get("point").is_some() || v.get("normal").is_some() => {
+                    return Err(Error::InvalidInput("a mirror takes \"plane\", or \"point\" and \"normal\", not both".into()))
+                }
+                Some(plane) => read_plane_ref(plane)?,
+                None => PlaneRef::Given {
+                    point: v.get("point").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
+                    normal: read_point3(field(v, "normal", "a mirror")?)?,
+                },
+            };
+            Ok(Op::Mirror { of: read_ids(v)?, plane })
         }
         "helix" => {
             with(&["type", "sketch", "point", "axis", "pitch", "turns", "left_handed", "mode"])?;
@@ -4819,12 +4840,20 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
         }
         "draft" => {
             with(&["type", "faces", "pull", "neutral", "degrees"])?;
-            Ok(Op::Draft {
-                faces: read_face_list(v, "faces")?,
-                pull: v.get("pull").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 1.0)),
-                neutral: v.get("neutral").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
-                degrees: expr_field(v, "degrees", "a draft")?,
-            })
+            // A neutral plane, whose normal is the pull, or a point on it and the pull as numbers.
+            let neutral = match v.get("neutral") {
+                Some(plane) if plane.as_array().is_none() => {
+                    if v.get("pull").is_some() {
+                        return Err(Error::InvalidInput("with a neutral plane, the pull is its normal, so a draft has no \"pull\" as well. A negative angle drafts the other way".into()));
+                    }
+                    read_plane_ref(plane)?
+                }
+                point => PlaneRef::Given {
+                    point: point.map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
+                    normal: v.get("pull").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 1.0)),
+                },
+            };
+            Ok(Op::Draft { faces: read_face_list(v, "faces")?, neutral, degrees: expr_field(v, "degrees", "a draft")? })
         }
         "fillet" => {
             with(&["type", "edges", "radius", "propagate"])?;

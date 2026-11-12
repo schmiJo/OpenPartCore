@@ -198,7 +198,7 @@ fn a_name_that_picks_several_faces_extrudes_them_all() {
     let mut doc = Document::new();
     block(&mut doc, 30.0, 10.0, 2.0, [0.0; 3], Mode::Add);
     let boss = doc.add(Op::solid(Primitive::Cylinder { radius: 1.0.into(), height: 3.0.into() }, Placement::at(point3(5.0, 5.0, 2.0)), Mode::Add)).unwrap();
-    doc.add(Op::Pattern { of: vec![boss], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 3.0.into(), spacing: 10.0.into() } }).unwrap();
+    doc.add(Op::Pattern { of: vec![boss], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 10.0.into() } }).unwrap();
     // Twice, which takes each face once.
     doc.add(Op::extrude_faces(keys(&["f2:end", "f2:end@f3.1"]), 2.0, Mode::NewBody)).unwrap();
     let o = ok(&mut doc);

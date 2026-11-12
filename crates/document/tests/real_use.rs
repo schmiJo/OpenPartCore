@@ -72,8 +72,8 @@ fn grid_of_holes(nx: f64, ny: f64) -> (Document, FeatureId, FeatureId, FeatureId
     doc.with(Op::extrude(s, 0.0, 5.0, Mode::Add));
     let c = doc.with(Op::sketch(Placement::xy(-1.0), vec![Region::new(Shape::circle(10.0, 10.0, 2.0))]));
     let hole = doc.with(Op::extrude(c, 0.0, 7.0, Mode::Remove));
-    let across = doc.with(Op::Pattern { of: vec![hole], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: nx.into(), spacing: 20.0.into() } });
-    let up = doc.with(Op::Pattern { of: vec![hole, across], along: PatternPath::Linear { direction: point3(0.0, 1.0, 0.0), count: ny.into(), spacing: 20.0.into() } });
+    let across = doc.with(Op::Pattern { of: vec![hole], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: nx.into(), spacing: 20.0.into() } });
+    let up = doc.with(Op::Pattern { of: vec![hole, across], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 1.0, 0.0)), count: ny.into(), spacing: 20.0.into() } });
     (doc, hole, across, up)
 }
 
@@ -95,8 +95,8 @@ fn a_pattern_can_copy_a_mirror_and_one_of_new_bodies_makes_new_bodies() {
     let mut doc = Document::new();
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(5.0, 0.0, 2.0, 2.0))]));
     let e = doc.with(Op::extrude(s, 0.0, 2.0, Mode::NewBody));
-    let m = doc.with(Op::Mirror { of: vec![e], point: point3(0.0, 0.0, 0.0), normal: point3(1.0, 0.0, 0.0) });
-    doc.with(Op::Pattern { of: vec![e, m], along: PatternPath::Linear { direction: point3(0.0, 1.0, 0.0), count: 3.0.into(), spacing: 10.0.into() } });
+    let m = doc.with(Op::Mirror { of: vec![e], plane: PlaneRef::through(point3(0.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
+    doc.with(Op::Pattern { of: vec![e, m], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 1.0, 0.0)), count: 3.0.into(), spacing: 10.0.into() } });
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 6);
     assert!((vol(&o) - 6.0 * 8.0).abs() < 1e-9, "{}", vol(&o));
@@ -111,9 +111,9 @@ fn a_pattern_of_a_cut_and_an_add_together_can_be_made_but_not_copied_again() {
     let hole = doc.with(Op::extrude(c, 0.0, 7.0, Mode::Remove));
     let b = doc.with(Op::sketch(Placement::xy(5.0), vec![Region::new(Shape::circle(30.0, 10.0, 2.0))]));
     let boss = doc.with(Op::extrude(b, 0.0, 3.0, Mode::Add));
-    let both = doc.with(Op::Pattern { of: vec![hole, boss], along: PatternPath::Linear { direction: point3(0.0, 1.0, 0.0), count: 2.0.into(), spacing: 20.0.into() } });
+    let both = doc.with(Op::Pattern { of: vec![hole, boss], along: PatternPath::Linear { direction: LineRef::along(point3(0.0, 1.0, 0.0)), count: 2.0.into(), spacing: 20.0.into() } });
     ok(&mut doc);
-    doc.with(Op::Pattern { of: vec![both], along: PatternPath::Linear { direction: point3(1.0, 0.0, 0.0), count: 2.0.into(), spacing: 50.0.into() } });
+    doc.with(Op::Pattern { of: vec![both], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 2.0.into(), spacing: 50.0.into() } });
     let o = doc.rebuild(None);
     assert!(o.failed.is_some());
     let StepState::Failed(why) = &o.steps[o.failed.unwrap()].state else { panic!() };
