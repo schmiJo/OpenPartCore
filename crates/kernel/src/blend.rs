@@ -18,7 +18,7 @@ use crate::build::{box_solid, extrude, revolve, sphere};
 use crate::curve::Curve;
 use crate::error::{Error, Result};
 use crate::math::*;
-use crate::profile::{PathBuilder, Profile};
+use crate::profile::{PathBuilder, Profile, Wire};
 use crate::surface::Surface;
 use crate::topo::{Body, Edge, FaceOrigin, FaceTag};
 
@@ -66,8 +66,9 @@ enum End {
     Flush,
     /// Run past the end by this far: there is nothing there to damage.
     Extend(f64),
-    /// Run past the end and then trim to this plane, keeping the side `keep` is on.
-    Clip { plane: Frame, keep: Vec3, reach: f64 },
+    /// Run past the end and then trim to this plane, keeping the side `keep` is on. On a circular run, only what's within
+    /// `back` (an angle) of the end, or past it, is trimmed, as further round the run can be on either side of the plane.
+    Clip { plane: Frame, keep: Vec3, reach: f64, back: f64 },
 }
 
 /// How a blend treats the edges it was given.
@@ -922,6 +923,8 @@ fn end_condition(
         }
     }
     let size = index.bounds.diagonal();
+    // A face on the same surface as one the edge runs between, like the other half of a boss's side, is no wall.
+    blockers.retain(|f| !run.faces.iter().any(|g| coincident(&body.faces[*f].surface, &body.faces[*g].surface, size).is_some()));
     blockers.dedup_by(|a, b| coincident(&body.faces[*a].surface, &body.faces[*b].surface, size).is_some());
 
     let plane_of = |f: usize| match body.faces[f].surface {
@@ -949,12 +952,48 @@ fn end_condition(
             if plane.z.cross(dir).norm() > 1e-6 {
                 // An oblique wall: the tool has to end along it, not square across. Which side of it to keep is the side the
                 // middle of the run is on. Right at the end, the section can already be on the other side of a slanted wall.
-                let inward = section.lift(c, section.station);
-                return Ok(End::Clip { plane, keep: inward, reach: reach_section * 3.0 + margin });
+                let reach = reach_section * 3.0 + margin;
+                let Curve::Circle { radius, .. } = run.curve else {
+                    let inward = section.lift(c, section.station);
+                    return Ok(End::Clip { plane, keep: inward, reach, back: 0.0 });
+                };
+                // Round a circle, though, the middle of a run that goes most of the way round, from one wall of a rib to the
+                // other, say, is on the other side of either wall. The edge's circle meets the wall's plane here and at most
+                // once more: where it's at a signed distance a + b cos t + c sin t, it's at that distance 0 at angles
+                // phi +- w. Back from here as far as the other one, it's on the side to keep. A wall the circle only touches,
+                // as where a web runs tangent into a boss, it never crosses.
+                let sense = if v == run.v1 { 1.0 } else { -1.0 };
+                let other = other_crossing(&section.frame, radius, &plane, station, sense);
+                let back = other.unwrap_or(TAU).min(run.t1 - run.t0) / 2.0;
+                let keep = section.lift(v2(radius, 0.0), station - sense * back);
+                // Where trimming starts, all of the section has to be on that side, or the trim would notch the tool there.
+                let side = |p: Vec3| (p - plane.origin).dot(plane.z);
+                let on = side(keep).signum();
+                if points.iter().any(|&q| side(section.lift(q, station - sense * back)) * on <= 0.0) {
+                    return Err(Error::InvalidInput(format!(
+                        "the wall where this edge ends, at ({:.4}, {:.4}, {:.4}), crosses the blend's way before the edge gets there",
+                        vertex.x, vertex.y, vertex.z
+                    )));
+                }
+                // Going on round far enough would bring the tool back to the side it came from, past where this trim acts.
+                let reach = other.map_or(reach, |o| reach.min(0.9 * (TAU - o) * radius));
+                return Ok(End::Clip { plane, keep, reach, back });
             }
         }
     }
     Ok(End::Flush)
+}
+
+/// How far back from angle `station`, going against `sense`, a circle meets a plane again that it meets at `station`: at a
+/// signed distance a + b cos t + c sin t from the plane, it's on the plane at angles phi +- w. None if it only touches it.
+fn other_crossing(circle: &Frame, radius: f64, plane: &Frame, station: f64, sense: f64) -> Option<f64> {
+    let (a, b, c) = ((circle.origin - plane.origin).dot(plane.z), radius * circle.x.dot(plane.z), radius * circle.y.dot(plane.z));
+    let m = b.hypot(c);
+    if m <= 1e-12 {
+        return None;
+    }
+    let (phi, w) = (c.atan2(b), (-a / m).clamp(-1.0, 1.0).acos());
+    [phi + w, phi - w].iter().map(|root| (sense * (station - root)).rem_euclid(TAU)).filter(|d| *d > 1e-6 && *d < TAU - 1e-6).reduce(f64::min)
 }
 
 /// Large box covering one side of a plane, around a region.
@@ -998,15 +1037,89 @@ fn sweep(profile: &Profile, run: &Run, section: &Section, ends: [End; 2], featur
         let frame = Frame { origin: f.origin - f.z * e0, ..f };
         extrude(profile, &frame, length + e0 + e1, feature)?
     };
-    for end in &ends {
-        if let End::Clip { plane, keep, reach } = end {
-            let centre = *keep;
-            // Big enough for all of the tool, however long its run.
-            let keep_side = half_space(plane, *keep, centre, reach * 4.0 + tool.aabb().diagonal() * 2.0, feature)?;
-            tool = boolean_with(&tool, &keep_side, BoolOp::Intersect, Checks::Interim)?;
+    for (i, end) in ends.iter().enumerate() {
+        let End::Clip { plane, keep, reach, back } = end else {
+            continue;
+        };
+        // Big enough for all of the tool, however long its run.
+        let big = reach * 4.0 + tool.aabb().diagonal() * 2.0;
+        match run.curve {
+            Curve::Circle { radius, .. } if section.circular && !run.closed => {
+                // Only around this end: what's past the wall and within a wedge from `back` before the end to a little
+                // past where the tool stops, short of the other end's.
+                let left = TAU - (run.t1 - run.t0) - (e0 + e1) / radius;
+                if left < 1e-6 {
+                    return Err(Error::InvalidInput("the two ends of this blend meet each other going round".into()));
+                }
+                let (from, to) = if i == 0 { (run.t0 - e0 / radius - left / 4.0, run.t0 + back) } else { (run.t1 - back, run.t1 + e1 / radius + left / 4.0) };
+                let far_side = *keep - plane.z * (2.0 * (*keep - plane.origin).dot(plane.z));
+                let past = half_space(plane, far_side, *keep, big, feature)?;
+                let around = wedge(&section.frame, from, to, radius + big, big, feature)?;
+                let cutter = boolean_with(&around, &past, BoolOp::Intersect, Checks::Interim)?;
+                tool = boolean_with(&tool, &cutter, BoolOp::Subtract, Checks::Interim)?;
+            }
+            _ => {
+                let keep_side = half_space(plane, *keep, *keep, big, feature)?;
+                tool = boolean_with(&tool, &keep_side, BoolOp::Intersect, Checks::Interim)?;
+            }
         }
     }
     Ok(tool)
+}
+
+/// The part of space at angles `from` to `to` about `frame.z`, out to `radius` and `height` either side of `frame.origin`.
+fn wedge(frame: &Frame, from: f64, to: f64, radius: f64, height: f64, feature: u32) -> Result<Body> {
+    let n = ((to - from) / (PI / 8.0)).ceil().max(1.0) as usize;
+    let step = (to - from) / n as f64;
+    // Chords this far out stay outside `radius`.
+    let r = radius / (step / 2.0).cos();
+    let mut points = vec![v2(0.0, 0.0)];
+    points.extend((0..=n).map(|k| {
+        let (s, c) = (from + step * k as f64).sin_cos();
+        v2(r * c, r * s)
+    }));
+    let base = Frame { origin: frame.origin - frame.z * height, ..*frame };
+    extrude(&Profile::new(Wire::polygon(&points)), &base, 2.0 * height, feature)
+}
+
+/// On a circular run, a trimmed end goes on round only as far as leaves room for the other end. Held back like that, it
+/// still has to get past its wall all across the section, or it wouldn't end on the wall.
+fn fit_ends(run: &Run, section: &Section, points: &[Vec2], mut ends: [End; 2]) -> Result<[End; 2]> {
+    let Curve::Circle { radius, .. } = run.curve else {
+        return Ok(ends);
+    };
+    let clips = ends.iter().filter(|e| matches!(e, End::Clip { .. })).count();
+    if run.closed || !section.circular || clips == 0 {
+        return Ok(ends);
+    }
+    let fixed: f64 = ends
+        .iter()
+        .map(|e| match e {
+            End::Extend(x) => x / radius,
+            _ => 0.0,
+        })
+        .sum();
+    let share = (0.8 * (TAU - (run.t1 - run.t0)) - fixed) / clips as f64;
+    for (i, end) in ends.iter_mut().enumerate() {
+        let End::Clip { plane, keep, reach, .. } = end else {
+            continue;
+        };
+        if *reach <= share * radius {
+            continue;
+        }
+        *reach = share.max(0.0) * radius;
+        let at = if i == 0 { run.t0 - *reach / radius } else { run.t1 + *reach / radius };
+        let side = |p: Vec3| (p - plane.origin).dot(plane.z);
+        let on = side(*keep);
+        if points.iter().any(|&q| side(section.lift(q, at)) * on >= 0.0) {
+            let corner = section.lift(points[0], if i == 0 { run.t0 } else { run.t1 });
+            return Err(Error::InvalidInput(format!(
+                "there isn't room for this blend to end on the wall at ({:.4}, {:.4}, {:.4}): it would run into its own other end",
+                corner.x, corner.y, corner.z
+            )));
+        }
+    }
+    Ok(ends)
 }
 
 /// Records which faces a blend's tool stands in for, and which copy it's in. A neighbour merged across a
@@ -1068,8 +1181,9 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
         if section.circular && points.iter().any(|q| q.x < -TOL) {
             return Err(Error::InvalidInput("the blend crosses the axis of this circular edge".into()));
         }
-        let ends = if run.closed {
-            [End::Flush, End::Flush]
+        // Where an end can't be fitted to its wall, that's handled as a tool that couldn't be made: it can still stop short.
+        let ends: Result<[End; 2]> = if run.closed {
+            Ok([End::Flush, End::Flush])
         } else {
             let (d0, d1, s0, s1) = if section.circular {
                 (-run.curve.derivative(run.t0).normalized(), run.curve.derivative(run.t1).normalized(), run.t0, run.t1)
@@ -1077,10 +1191,8 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
                 let d = section.frame.z;
                 (-d, d, 0.0, run.t1 - run.t0)
             };
-            [
-                end_condition(body, &index, run, &runs, &section, &points, corner.convex, run.v0, d0, s0)?,
-                end_condition(body, &index, run, &runs, &section, &points, corner.convex, run.v1, d1, s1)?,
-            ]
+            end_condition(body, &index, run, &runs, &section, &points, corner.convex, run.v0, d0, s0)
+                .and_then(|e0| Ok([e0, end_condition(body, &index, run, &runs, &section, &points, corner.convex, run.v1, d1, s1)?]))
         };
         // Where a contact has nothing to land on, part of the way along, it's only wrong if the tool would then do damage:
         // cut into material beyond the wall, or stick out with nothing under it. Otherwise there's a hole there, say, and
@@ -1125,7 +1237,11 @@ fn blend(body: &Body, edges: &[usize], kind: Kind, feature: u32) -> Result<Body>
             let short = Run { t0: from, t1: to, ..run.clone() };
             Some(section_of(&short, size).and_then(|place| sweep(&profile, &short, &place, [End::Flush, End::Flush], feature)))
         };
-        let swept = sweep(&profile, run, &section, ends, feature);
+        let (ends, swept) = match ends.and_then(|ends| fit_ends(run, &section, &points, ends)) {
+            Ok(ends) => (ends, sweep(&profile, run, &section, ends, feature)),
+            // Not flush, so no mitre is made at these ends, as none was for a trimmed end that couldn't be made.
+            Err(why) => ([End::Extend(0.0), End::Extend(0.0)], Err(why)),
+        };
         let mut short = false;
         let mut tool = match swept {
             Ok(tool) => tool,
@@ -1443,6 +1559,30 @@ mod tests {
 
     fn block() -> Body {
         box_solid(&Frame::WORLD, 20.0, 10.0, 6.0, 1).unwrap()
+    }
+
+    /// A circle of radius 10, cut by planes 6 above its centre in y and 8 beside it in x, and touched by one 10 above it.
+    #[test]
+    fn where_a_circle_meets_a_wall_again() {
+        let circle = Frame::new(v3(5.0, -3.0, 2.0), Vec3::Z, Vec3::X);
+        let across = |p: Vec3, n: Vec3| Frame::new(p, n, n.any_perpendicular());
+        let (s, c) = (0.6f64.asin(), 0.8f64.acos());
+        // The first is met at s and at pi - s. Going back from pi - s, as at the far end of a run, s is pi - 2s back.
+        let y6 = across(v3(0.0, 3.0, 0.0), Vec3::Y);
+        let back = other_crossing(&circle, 10.0, &y6, PI - s, 1.0).unwrap();
+        assert!((back - (PI - 2.0 * s)).abs() < 1e-12, "{back}");
+        // From s, going back the other way, the same.
+        let back = other_crossing(&circle, 10.0, &y6, s, -1.0).unwrap();
+        assert!((back - (PI - 2.0 * s)).abs() < 1e-12, "{back}");
+        // At the far end of a run that goes the long way round from pi - s to s + 2 pi, the other crossing is pi + 2s back.
+        let back = other_crossing(&circle, 10.0, &y6, s, 1.0).unwrap();
+        assert!((back - (PI + 2.0 * s)).abs() < 1e-12, "{back}");
+        // The second, facing the other way: met at -c and c.
+        let back = other_crossing(&circle, 10.0, &across(v3(13.0, 0.0, 0.0), -Vec3::X), c, 1.0).unwrap();
+        assert!((back - 2.0 * c).abs() < 1e-12, "{back}");
+        // Touched, at pi / 2 and nowhere else, and a plane it lies in.
+        assert_eq!(other_crossing(&circle, 10.0, &across(v3(0.0, 7.0, 0.0), Vec3::Y), PI / 2.0, 1.0), None);
+        assert_eq!(other_crossing(&circle, 10.0, &across(v3(0.0, 0.0, 2.0), Vec3::Z), 0.3, 1.0), None);
     }
 
     /// Points along the top edge at y = 0, which is convex.

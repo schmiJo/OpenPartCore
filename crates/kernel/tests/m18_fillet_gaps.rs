@@ -696,3 +696,62 @@ fn a_drafted_cups_rounded_bottom() {
 
 /// OpenCASCADE's volume for the same fillets.
 const CUP: f64 = 200556.54495936664;
+
+/// A boss's root, rounded where a rib runs into the boss, so that the edge goes most of the way round, from one of the
+/// rib's walls to the other. What it adds is the whole ring a ball rolling round the root makes, less what of it is
+/// already inside the rib: the strip `|y| < g / 2` of it on the rib's side.
+#[test]
+fn a_boss_root_interrupted_by_a_rib() {
+    let (big, g, r) = (12.0, 3.0, 2.0);
+    let plate = bx(-60.0, -40.0, 0.0, 120.0, 80.0, 6.0, 1);
+    let boss = union(&plate, &cyl(30.0, 0.0, 6.0, big, 20.0, 2)).unwrap();
+    let ribbed = union(&boss, &bx(-30.0, -g / 2.0, 6.0, 60.0, g, 12.0, 3)).unwrap();
+    let before = sound(&ribbed, "plate, boss and rib");
+    let done = fillet(&ribbed, &[edge_at(&ribbed, v3(30.0 + big, 0.0, 6.0))], r, 4).unwrap();
+    let added = sound(&done, "the boss's root rounded") - before;
+    // Across the fillet, at a distance u out from the boss: how high the fillet stands there.
+    let height = |u: f64| r - (r * r - (r - u) * (r - u)).max(0.0).sqrt();
+    let ring = simpson(0.0, r, |u| height(u) * (big + u) * 2.0 * PI);
+    let in_rib = simpson(0.0, r, |u| height(u) * (big + u) * 2.0 * (g / 2.0 / (big + u)).asin());
+    close(ring, 2.0 * PI * (big + r * (10.0 - 3.0 * PI) / (12.0 - 3.0 * PI)) * k(r), 1e-6, "the whole ring by Pappus");
+    close(added, ring - in_rib, 1e-6, "the boss's root rounded beside the rib");
+}
+
+/// The same, rounding the boss's top rim, with the rib standing higher than the boss, so the rim goes from one of the
+/// rib's walls round to the other. What it takes off is the ring, less the strip of it inside the rib.
+#[test]
+fn a_boss_rim_interrupted_by_a_taller_rib() {
+    let (big, g, r) = (12.0, 3.0, 2.0);
+    let plate = bx(-60.0, -40.0, 0.0, 120.0, 80.0, 6.0, 1);
+    let boss = union(&plate, &cyl(30.0, 0.0, 6.0, big, 20.0, 2)).unwrap();
+    let ribbed = union(&boss, &bx(-30.0, -g / 2.0, 6.0, 60.0, g, 24.0, 3)).unwrap();
+    let before = sound(&ribbed, "plate, boss and a taller rib");
+    let done = fillet(&ribbed, &[edge_at(&ribbed, v3(30.0 + big, 0.0, 26.0))], r, 4).unwrap();
+    let taken = before - sound(&done, "the boss's rim rounded");
+    // At a distance u in from the rim: how deep the fillet goes there.
+    let depth = |u: f64| r - (r * r - (r - u) * (r - u)).max(0.0).sqrt();
+    let ring = simpson(0.0, r, |u| depth(u) * (big - u) * 2.0 * PI);
+    let in_rib = simpson(0.0, r, |u| depth(u) * (big - u) * 2.0 * (g / 2.0 / (big - u)).asin());
+    close(ring, 2.0 * PI * (big - r * (10.0 - 3.0 * PI) / (12.0 - 3.0 * PI)) * k(r), 1e-6, "the whole ring by Pappus");
+    close(taken, ring - in_rib, 1e-6, "the boss's rim rounded beside the rib");
+}
+
+/// A connecting rod, whose web runs tangent into its bosses: rounding where the web's faces meet them. Each edge ends where
+/// the web's side touches the boss, a wall its circle never crosses, and the ball runs off the web's face there. This
+/// kernel's own volume, as OpenCASCADE refuses these; it was this before ends on circles were trimmed only near the end.
+#[test]
+fn a_web_running_tangent_into_its_bosses() {
+    for (length, want) in [(100.0, 52896.9995), (120.0, 58478.5323)] {
+        let (big, small) = (22.0f64, 13.0f64);
+        let lean = ((big - small) / length).asin();
+        let (c, s) = (lean.cos(), lean.sin());
+        let (a, b, d, e) = (v2(big * c, big * s), v2(small * c, length + small * s), v2(-small * c, length + small * s), v2(-big * c, big * s));
+        let wire = PathBuilder::new(e).arc_to(a, v2(0.0, 0.0), true).line_to(b).arc_to(d, v2(0.0, length), true).close();
+        let web = extrude(&Profile::new(wire), &Frame::translation(v3(0.0, 0.0, -4.0)), 8.0, 1).unwrap();
+        let bosses = union(&cyl(0.0, 0.0, -8.0, big, 16.0, 2), &cyl(0.0, length, -8.0, small, 16.0, 3)).unwrap();
+        let rod = union(&web, &bosses).unwrap();
+        let edges = edges_at(&rod, &[v3(0.0, big, 4.0), v3(0.0, length - small, 4.0), v3(0.0, big, -4.0), v3(0.0, length - small, -4.0)]);
+        let done = fillet(&rod, &edges, 2.0, 4).unwrap_or_else(|e| panic!("L {length}: {e}"));
+        close(sound(&done, "the rod's web rounded into its bosses"), want, 1e-8, "the rod's web rounded into its bosses");
+    }
+}

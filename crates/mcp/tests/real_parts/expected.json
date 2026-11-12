@@ -46,7 +46,7 @@
   "p41_spring": {"state": "whole", "volume": 2931.2724884626773, "volume_from": "formula", "trouble": []},
   "p42_fluted_knob": {"state": "whole", "volume": 25637.869467361317, "volume_from": "occt", "trouble": []},
   "p43_drafted_cup": {"state": "refused", "volume": 200555.88842813065, "volume_from": "occt mesh 0.003, as its integrator is 0.28% off on these fitted faces", "trouble": ["f6 shell (Hollow)"]},
-  "p44_drafted_bosses": {"state": "refused", "volume": 71892.13148310939, "volume_from": "occt", "trouble": ["f10 fillet (Boss roots)"]},
+  "p44_drafted_bosses": {"state": "whole", "volume": 72010.76694679898, "volume_from": "occt", "trouble": []},
   "p45_dovetail_slide": {"state": "whole", "volume": 199253.5399670615, "volume_from": "occt", "trouble": []},
   "p46_morse_taper": {"state": "whole", "volume": 18507.230197962468, "volume_from": "occt", "trouble": []},
   "p47_flanged_bushing": {"state": "whole", "volume": 9243.951379131462, "volume_from": "occt", "trouble": []},
