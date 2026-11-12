@@ -518,3 +518,47 @@ fn a_sketch_tool_can_solve_on_a_plane() {
     let coreshape_sketch::Geometry::Point { at } = solved.sketch.entity(pt).unwrap().geometry else { panic!() };
     assert!((at[0] - 6.0).abs() < 1e-9 && (at[1] - 4.0).abs() < 1e-9, "{at:?}");
 }
+
+/// A sketch of a point and a line, as Onshape places a three-point plane, builds with no regions. Only what needs a region
+/// from it fails, saying why it has none.
+#[test]
+fn a_sketch_with_no_closed_region_still_places_a_plane() {
+    let mut doc = Document::new();
+    let mut s = Sketch::new();
+    let p = s.point(0.0, 5.0);
+    let l = s.line([0.0, 0.0], [10.0, 0.0]);
+    let sk = doc.add(Op::ConstrainedSketch { plane: Placement::on_plane(PlaneRef::Front), sketch: s.clone() }).unwrap();
+    // On Front, the sketch's x is X and its y is Z: through (0, 0, 5), the origin and (10, 0, 0), facing -Y.
+    let plane = feature(
+        &mut doc,
+        &format!(r#"{{"type": "plane", "plane_type": "three_point", "points": [{{"sketch": {0}, "point": "{1}"}}, {{"sketch": {0}, "point": "{2}.start"}}, {{"sketch": {0}, "point": "{2}.end"}}]}}"#, sk.0, p.0, l.0),
+    );
+    is(&mut doc, plane, [0.0, 0.0, 5.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]);
+    let extrude = feature(&mut doc, &format!(r#"{{"type": "extrude", "sketch": {}, "length": 5}}"#, sk.0));
+    let why = failure(&mut doc);
+    assert!(why.contains(&format!("an extrude needs a closed region, and the sketch f{} has none: the sketch isn't closed", sk.0)), "{why}");
+    // With the line made construction, there's nothing outside construction geometry, and a fill says so.
+    s.set_construction(l, true).unwrap();
+    doc.edit(sk, Op::ConstrainedSketch { plane: Placement::on_plane(PlaneRef::Front), sketch: s }).unwrap();
+    doc.delete(extrude).unwrap();
+    is(&mut doc, plane, [0.0, 0.0, 5.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]);
+    feature(&mut doc, &format!(r#"{{"type": "fill", "sketch": {}}}"#, sk.0));
+    let why = failure(&mut doc);
+    assert!(why.contains("a fill needs a closed region") && why.contains("outside construction geometry"), "{why}");
+}
+
+/// Up to the plane a sketch is on there's no length to go, and that's what it says, not that it's -0.000000 behind.
+#[test]
+fn extruding_up_to_the_sketch_s_own_plane_says_so_plainly() {
+    let mut doc = Document::new();
+    feature(&mut doc, r#"{"type": "sketch", "plane": {"on_plane": "top"}, "regions": [{"outer": {"type": "circle", "cx": 0, "cy": 0, "r": 5}}]}"#);
+    let up = feature(&mut doc, r#"{"type": "extrude", "sketch": 1, "length": 0, "end": {"type": "up_to_face", "face": "top"}}"#);
+    let why = failure(&mut doc);
+    assert!(why.contains("the Top plane is where the sketch is") && !why.contains("-0"), "{why}");
+    // A plane 5 below it is 5 behind it.
+    doc.delete(up).unwrap();
+    let below = feature(&mut doc, r#"{"type": "plane", "plane_type": "offset", "plane": "top", "distance": -5}"#);
+    feature(&mut doc, &format!(r#"{{"type": "extrude", "sketch": 1, "length": 0, "end": {{"type": "up_to_face", "face": {}}}}}"#, below.0));
+    let why = failure(&mut doc);
+    assert!(why.contains("it's 5 behind it"), "{why}");
+}

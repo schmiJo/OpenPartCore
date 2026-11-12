@@ -395,8 +395,11 @@ fn an_open_sketch_says_which_entity_has_the_free_end() {
     let f = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
     doc.add(Op::extrude(f, 0.0, 1.0, Mode::Add)).unwrap();
     let o = doc.rebuild(None);
-    match &o.steps[0].state {
-        StepState::Failed(why) => assert!(why.contains("isn't closed"), "{why}"),
+    // The sketch builds, as one with no region can still place a plane, and the extrude that needs a region says why
+    // there's none.
+    assert_eq!(o.steps[0].state, StepState::Rebuilt);
+    match &o.steps[1].state {
+        StepState::Failed(why) => assert!(why.contains("isn't closed: entity") && why.contains("free end"), "{why}"),
         other => panic!("{other:?}"),
     }
 }

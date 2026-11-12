@@ -150,6 +150,12 @@ pub(super) fn vertex_at(vertex: &VertexRef, all: &[Held], env: &Env) -> Result<V
     }
 }
 
+/// A length as it reads best: to six places, without the zeros after them, so 5 and not 5.000000.
+fn short(x: f64) -> String {
+    let text = format!("{x:.6}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 impl Way {
     /// Which end of an extrude is at the sketch, and which is far from it. Going backward, the kernel names them by where they are.
     fn slots(&self) -> (u32, u32) {
@@ -161,8 +167,12 @@ impl Way {
     }
 
     fn flat(&self, profile: &Profile, h: f64, what: &str) -> Result<Vec<Body>> {
-        if h <= MIN_FEATURE {
-            return Err(Error::InvalidInput(format!("{what} isn't ahead of the sketch, it's {:.6} behind it: \"opposite\" goes the other way", -h)));
+        // Right on the sketch's plane, there's nothing to go either way, and printing its distance gives -0.000000.
+        if h.abs() <= MIN_FEATURE {
+            return Err(Error::InvalidInput(format!("{what} is where the sketch is, in its plane, so there's no length to extrude up to it")));
+        }
+        if h < 0.0 {
+            return Err(Error::InvalidInput(format!("{what} isn't ahead of the sketch, it's {} behind it: \"opposite\" goes the other way", short(-h))));
         }
         Ok(vec![extrude(profile, &self.frame, self.sign * h, self.tag)?])
     }

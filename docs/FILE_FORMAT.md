@@ -448,7 +448,10 @@ A face swept from entity 7 of feature 3 is named `f3:side.7`, whatever order thi
 arcs and circles that aren't `construction` are cut at every crossing and T-junction, and each area they
 enclose is a region with a permanent id. By default a sketch builds from every other level of nesting, so a
 loop inside another is a hole, and a loop inside a hole starts a new region. Curves that enclose nothing
-are left out without failing. To build from particular regions, list them in an optional top-level
+are left out without failing. A sketch with no closed region at all, such as a few points or one line to place a plane
+by, or a sweep's path, still builds, so that planes, sweeps and constraints can name its points and lines. Only a feature
+that needs a region from it fails: an extrude, revolve, loft, sweep, helix, fill or trim says that it needs one, and why
+the sketch has none, such as a free end. To build from particular regions, list them in an optional top-level
 `"picked_regions": ["r0123456789ab"]`. If one of them stops existing, the feature fails and says so. The
 field is only written when something is picked, so sketches with no picks are saved as before. The geometry
 is only a starting position: it needn't meet the constraints, and the nearer it is, the likelier it lands on

@@ -1342,8 +1342,11 @@ fn planes_list_gives_where_each_plane_is_and_sketch_tools_take_one() {
     let root = folder("planes");
     let mut c = Client::start(&root);
     c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":10,"dy":20,"dz":30}}"#);
-    c.ok("feature_add", r#"{"feature":{"type":"plane","plane_type":"offset","plane":"top","distance":12}}"#);
+    let added = c.ok("feature_add", r#"{"feature":{"type":"plane","plane_type":"offset","plane":"top","distance":12}}"#);
+    // A plane makes no faces by design, and that's not worth a note.
+    assert!(!added.contains("left no faces"), "{added}");
     c.ok("feature_add", r#"{"feature":{"type":"sketch","plane":{"on_plane":2},"regions":[{"outer":{"type":"circle","r":1}}]}}"#);
+    assert!(!c.ok("rebuild", "{}").contains("left no faces"));
     let list = parsed(&c.ok("planes_list", "{}"));
     let list = list.as_array().unwrap();
     let names: Vec<&str> = list.iter().map(|p| p.get("name").and_then(Value::as_str).unwrap()).collect();

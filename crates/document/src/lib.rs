@@ -1784,10 +1784,8 @@ fn trim_parts(
             Ok((outside, inside))
         }
         TrimTool::Sketch(id) => {
-            let SketchOutput { frame, profiles, .. } = sketch_output(id)?;
-            if profiles.is_empty() {
-                return Err(Error::InvalidInput("cutting with a sketch takes its closed regions, and it has none".into()));
-            }
+            let out = sketch_output(id)?;
+            let (frame, profiles) = (out.frame, out.closed(*id, "cutting with a sketch")?);
             // Each region swept far enough to go right through the sheet both ways.
             let bounds = sheet.aabb();
             let reach = bounds.diagonal() + (bounds.center() - frame.origin).norm() + 10.0;
@@ -1910,6 +1908,20 @@ struct SketchOutput {
     solved: Option<Arc<coreshape_sketch::Sketch>>,
     /// Chains of curves that close nothing, for a surface to sweep.
     open: Arc<Vec<Wire>>,
+    /// Why it has no closed regions, when it has none. Such a sketch still builds, so that its points and lines can be
+    /// named, and only what needs a region from it fails.
+    no_regions: Option<String>,
+}
+
+impl SketchOutput {
+    /// Its closed regions, for a feature that needs one. With none, an error saying so, and why.
+    fn closed(&self, id: FeatureId, what: &str) -> Result<Arc<Vec<Profile>>> {
+        if self.profiles.is_empty() {
+            let why = self.no_regions.as_deref().unwrap_or("it has none");
+            return Err(Error::InvalidInput(format!("{what} needs a closed region, and the sketch f{} has none: {why}", id.0)));
+        }
+        Ok(self.profiles.clone())
+    }
 }
 
 /// New sheets as what a feature made: a body for each connected piece of each, which a pattern can copy.
@@ -2670,13 +2682,11 @@ impl Document {
             Op::Sketch { plane, regions } => {
                 let list = resolve_regions(regions, env)?;
                 let open = resolve_open(regions, env)?;
-                if list.is_empty() && open.is_empty() {
-                    return Err(Error::InvalidProfile("the sketch has no closed regions".into()));
-                }
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame: look.placement(plane)?, profiles: Arc::new(list), by_entity: false, solved: None, open: Arc::new(open) }))
+                let no_regions = list.is_empty().then(|| "the sketch has no closed regions".to_string());
+                Ok(sketched(SketchOutput { frame: look.placement(plane)?, profiles: Arc::new(list), by_entity: false, solved: None, open: Arc::new(open), no_regions }))
             }
             Op::ConstrainedSketch { plane, sketch } => {
                 let frame = look.placement(plane)?;
@@ -2693,16 +2703,16 @@ impl Document {
                 for wire in &open {
                     wire.check_open()?;
                 }
-                let regions = match solved.sketch.regions() {
-                    Ok(regions) => regions,
-                    Err(_) if !open.is_empty() && solved.sketch.picked_regions().is_empty() => Vec::new(),
+                let (regions, no_regions) = match solved.sketch.regions() {
+                    Ok(regions) => (regions, None),
+                    Err(e) if solved.sketch.picked_regions().is_empty() => (Vec::new(), Some(e.message)),
                     Err(e) => return Err(Error::InvalidProfile(e.message)),
                 };
                 let list = profiles_from_regions(&regions);
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame, profiles: Arc::new(list), by_entity: true, solved: Some(Arc::new(solved.sketch)), open: Arc::new(open) }))
+                Ok(sketched(SketchOutput { frame, profiles: Arc::new(list), by_entity: true, solved: Some(Arc::new(solved.sketch)), open: Arc::new(open), no_regions }))
             }
             Op::Extrude { sketch, start, length, mode, regions, faces, end, opposite } => {
                 // Each sketch it takes from, in the order they first come up.
@@ -2741,7 +2751,11 @@ impl Document {
                 let mut tools = Vec::new();
                 for (order, id) in sketches.iter().enumerate() {
                     let out = sketch_output(id)?;
-                    let list = if regions.is_empty() { out.profiles.clone() } else { Arc::new(picked_profiles(*id, &out, regions)?) };
+                    let list = match (regions.is_empty(), surface) {
+                        (true, true) => out.profiles.clone(),
+                        (true, false) => out.closed(*id, "an extrude")?,
+                        (false, _) => Arc::new(picked_profiles(*id, &out, regions)?),
+                    };
                     let shifted = Frame { origin: out.frame.origin + out.frame.z * offset, ..out.frame };
                     if surface && regions.is_empty() {
                         // A whole sketch as a surface: its regions' walls, and its open curves after them.
@@ -2812,7 +2826,11 @@ impl Document {
                 let mut tools = Vec::new();
                 for (order, id) in sketches.iter().enumerate() {
                     let out = sketch_output(id)?;
-                    let list: Vec<Profile> = if regions.is_empty() { out.profiles.to_vec() } else { picked_profiles(*id, &out, regions)? };
+                    let list: Vec<Profile> = match (regions.is_empty(), surface) {
+                        (true, true) => out.profiles.to_vec(),
+                        (true, false) => out.closed(*id, "a revolve")?.to_vec(),
+                        (false, _) => picked_profiles(*id, &out, regions)?,
+                    };
                     // A whole sketch as a surface takes its open curves too, which go around as a region's outline would.
                     let whole_surface = surface && regions.is_empty();
                     let mut all_curves = list;
@@ -2852,7 +2870,7 @@ impl Document {
                     let out = sketch_output(&section.sketch)?;
                     let profile = match section.region {
                         Some(region) => picked_profiles(section.sketch, &out, &[RegionPick { sketch: section.sketch, region }])?.remove(0),
-                        None => match out.profiles.as_slice() {
+                        None => match out.closed(section.sketch, "a loft's section")?.as_slice() {
                             [one] => one.clone(),
                             many => {
                                 return Err(Error::InvalidInput(format!(
@@ -2870,7 +2888,9 @@ impl Document {
                 applied(vec![coreshape::loft::loft(&refs, tag)?], *mode)
             }
             Op::Sweep { sketch, path, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity, .. } = sketch_output(sketch)?;
+                let out = sketch_output(sketch)?;
+                let list = if *mode == Mode::Surface { out.profiles.clone() } else { out.closed(*sketch, "a sweep")? };
+                let SketchOutput { frame, by_entity, .. } = out;
                 let along: Option<Vec<PathCurve>> = match path {
                     SweepPath::Steps(_) => None,
                     SweepPath::Sketch(id) => Some(path_from_sketch(*id, &sketch_output(id)?)?),
@@ -2911,7 +2931,9 @@ impl Document {
                 applied(tools, *mode)
             }
             Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => {
-                let SketchOutput { frame, profiles: list, by_entity, .. } = sketch_output(sketch)?;
+                let out = sketch_output(sketch)?;
+                let list = if *mode == Mode::Surface { out.profiles.clone() } else { out.closed(*sketch, "a helix")? };
+                let SketchOutput { frame, by_entity, .. } = out;
                 let motion = Helix { origin: at_point(point)?, axis: at_point(axis)?, pitch: num(pitch, env)?, turns: num(turns, env)?, left_handed: *left_handed };
                 let tools = list
                     .iter()
@@ -3143,8 +3165,10 @@ impl Document {
             }
             Op::BooleanBodies { operation, tools, keep_tools } => self.boolean_of_bodies(feature, scope, all, *operation, tools, *keep_tools),
             Op::Fill { sketch } => {
-                let SketchOutput { frame, profiles, by_entity, .. } = sketch_output(sketch)?;
-                let made = profiles.iter().map(|p| fill(p, &frame, tag)).collect::<Result<Vec<Body>>>()?;
+                let out = sketch_output(sketch)?;
+                let profiles = out.closed(*sketch, "a fill")?;
+                let made = profiles.iter().map(|p| fill(p, &out.frame, tag)).collect::<Result<Vec<Body>>>()?;
+                let by_entity = out.by_entity;
                 sheets(named_by_region(made, Vec::new(), by_entity))
             }
             Op::CopyFaces { faces } => {
