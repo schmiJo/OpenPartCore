@@ -149,7 +149,9 @@ and what's after it waits.
 {"id": 7, "name": "Plane 4", "type": "plane", "plane_type": "mid_plane", "planes": ["f2:side.1", "f2:side.3"], "flip": true}
 {"id": 8, "name": "Plane 5", "type": "plane", "plane_type": "curve_point", "edge": {"on_face": "f2:end"}, "fraction": 0.25}
 {"id": 9, "name": "Plane 6", "type": "plane", "plane_type": "tangent", "face": "f4:side.0", "degrees": 90}
-{"id": 10, "name": "Sketch 3", "type": "sketch", "plane": {"on_plane": 4}, "regions": [...]}
+{"id": 10, "name": "Plane 7", "type": "plane", "plane_type": "plane_point", "plane": "front", "point": [0, -12, 5]}
+{"id": 11, "name": "Plane 8", "type": "plane", "plane_type": "point_normal", "point": "origin", "line": {"axis_of": "f4:side.0"}}
+{"id": 12, "name": "Sketch 3", "type": "sketch", "plane": {"on_plane": 4}, "regions": [...]}
 ```
 
 Mirror, trim and draft take any plane, an extrude can end `up_to_face` at one, a pattern can go along or round any line,
