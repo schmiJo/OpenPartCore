@@ -41,7 +41,7 @@ mod keys;
 mod planes;
 mod sheet_metal;
 mod up_to;
-pub use sheet_metal::{Alignment, FlatBend, FlatEdge, FlatPattern};
+pub use sheet_metal::{Alignment, BendPosition, Corner, FlatBend, FlatEdge, FlatPattern, HemKind};
 use keys::Keys;
 pub use planes::{default_x, line_ref_value, plane_ref_value, point_ref_value, read_line_ref, read_plane_ref, read_point_ref, AlongEdge, LineRef, PlaneDef, PlaneRef, PointRef, TangentAt};
 use planes::{Geo, Looker};
@@ -780,11 +780,53 @@ pub enum Op {
     /// The sheet is on the region's side of the sketch, along its normal, or on the chain's left; `flip` puts it on the
     /// other side. `k_factor` (default 0.45) says where the neutral line is, as a fraction of the thickness from the
     /// inside of a bend, for laying it flat. It's a new part.
-    SheetMetal { sketch: FeatureId, thickness: Expr, bend_radius: Option<Expr>, k_factor: Option<Expr>, depth: Option<Expr>, flip: bool },
+    /// The part's defaults for what later features do to it: `minimal_gap` (default a tenth of the thickness) for closed
+    /// corners and straight hems, and `corner`, how flanges of one feature meet.
+    SheetMetal {
+        sketch: FeatureId,
+        thickness: Expr,
+        bend_radius: Option<Expr>,
+        k_factor: Option<Expr>,
+        depth: Option<Expr>,
+        flip: bool,
+        minimal_gap: Option<Expr>,
+        corner: Corner,
+    },
     /// A bend and a wall along each edge picked, where a sheet metal wall's face meets its side. It bends toward the face
     /// the edge is on, by `degrees` (default 90), or the other way with `flip`; `length` is from the outer virtual sharp;
-    /// `alignment` says where the bend goes; `bend_radius` defaults to the part's.
-    Flange { edges: EdgeSelect, length: Expr, degrees: Option<Expr>, alignment: Alignment, bend_radius: Option<Expr>, flip: bool },
+    /// `alignment` says where the bend goes; `bend_radius` defaults to the part's. Where two of its edges meet at a corner,
+    /// `corner` (default the part's) leaves it open or closes it, leaving `gap` (default the part's minimal gap).
+    Flange {
+        edges: EdgeSelect,
+        length: Expr,
+        degrees: Option<Expr>,
+        alignment: Alignment,
+        bend_radius: Option<Expr>,
+        flip: bool,
+        corner: Option<Corner>,
+        gap: Option<Expr>,
+    },
+    /// An edge folded back over its wall, as `kind` says. `length` is for straight and rounded hems from the outside of
+    /// the fold to the end, and for a teardrop the straight part after its fold; a roll has none. A straight hem leaves
+    /// `gap` (default the part's minimal gap) between the wall and what comes back over it; the others turn at
+    /// `bend_radius` (default the part's), and a teardrop or a roll by `degrees` (default 225 or 270).
+    Hem {
+        edges: EdgeSelect,
+        kind: HemKind,
+        length: Option<Expr>,
+        gap: Option<Expr>,
+        bend_radius: Option<Expr>,
+        degrees: Option<Expr>,
+        alignment: Alignment,
+        flip: bool,
+    },
+    /// The regions of a sketch on the plane of a sheet metal wall, made the sheet's thickness and joined to it.
+    Tab { sketch: FeatureId },
+    /// A sheet metal part bent along the one line in a sketch on the plane of one of its walls, by `degrees` (default 90)
+    /// at `bend_radius` (default the part's). The part on the line's left moves, seen from along the sketch's normal, or
+    /// on its right with `right`; it bends toward the side the sketch's normal points to, or the other way with `flip`.
+    /// `position` says where the bend is against the line.
+    Bend { sketch: FeatureId, degrees: Option<Expr>, bend_radius: Option<Expr>, position: BendPosition, flip: bool, right: bool },
 }
 
 /// A line in a sketch's plane to revolve around.
@@ -959,6 +1001,9 @@ impl Op {
             Op::Plane { .. } => "plane",
             Op::SheetMetal { .. } => "sheet_metal",
             Op::Flange { .. } => "flange",
+            Op::Hem { .. } => "hem",
+            Op::Tab { .. } => "tab",
+            Op::Bend { .. } => "bend",
         }
     }
 
@@ -1012,7 +1057,7 @@ impl Op {
     fn uses_open_curves_of(&self, id: FeatureId) -> bool {
         self.surface_from() == Some(id)
             || matches!(self, Op::Sweep { path: SweepPath::Sketch(along), .. } if *along == id)
-            || matches!(self, Op::SheetMetal { sketch, .. } if *sketch == id)
+            || matches!(self, Op::SheetMetal { sketch, .. } | Op::Bend { sketch, .. } if *sketch == id)
     }
 
     /// The sketch this makes a surface from, whose open curves it can use.
@@ -1053,6 +1098,9 @@ impl Op {
             Op::Plane { .. } => "Plane",
             Op::SheetMetal { .. } => "Sheet metal",
             Op::Flange { .. } => "Flange",
+            Op::Hem { .. } => "Hem",
+            Op::Tab { .. } => "Tab",
+            Op::Bend { .. } => "Bend",
         }
     }
 
@@ -1089,7 +1137,7 @@ impl Op {
                     SweepPath::Edges(edges) => edges.references(&mut out),
                 }
             }
-            Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::SheetMetal { sketch, .. } => out.push(*sketch),
+            Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::SheetMetal { sketch, .. } | Op::Tab { sketch } | Op::Bend { sketch, .. } => out.push(*sketch),
             Op::Loft { sections, .. } => out.extend(sections.iter().map(|s| s.sketch)),
             Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
             Op::Trim { tool: TrimTool::Body(body), .. } => out.push(body.feature),
@@ -1099,7 +1147,7 @@ impl Op {
                     key.references(&mut out);
                 }
             }
-            Op::Fillet { edges, .. } | Op::Chamfer { edges, .. } | Op::Flange { edges, .. } => edges.references(&mut out),
+            Op::Fillet { edges, .. } | Op::Chamfer { edges, .. } | Op::Flange { edges, .. } | Op::Hem { edges, .. } => edges.references(&mut out),
             Op::FilletRadii { sets } => {
                 for set in sets {
                     set.edges.references(&mut out);
@@ -1155,7 +1203,7 @@ impl Op {
             }
         }
         match self {
-            Op::ImportStep { .. } | Op::ImportStepParts { .. } | Op::Fill { .. } | Op::CopyFaces { .. } => {}
+            Op::ImportStep { .. } | Op::ImportStepParts { .. } | Op::Fill { .. } | Op::CopyFaces { .. } | Op::Tab { .. } => {}
             Op::Sew { tolerance } => out.extend(tolerance.iter()),
             Op::Trim { .. } => {}
             Op::Sketch { plane, regions } => {
@@ -1244,15 +1292,20 @@ impl Op {
                 edges.collect_exprs(&mut out);
                 out.push(radius);
             }
-            Op::SheetMetal { thickness, bend_radius, k_factor, depth, .. } => {
+            Op::SheetMetal { thickness, bend_radius, k_factor, depth, minimal_gap, .. } => {
                 out.push(thickness);
-                out.extend(bend_radius.iter().chain(k_factor).chain(depth));
+                out.extend(bend_radius.iter().chain(k_factor).chain(depth).chain(minimal_gap));
             }
-            Op::Flange { edges, length, degrees, bend_radius, .. } => {
+            Op::Flange { edges, length, degrees, bend_radius, gap, .. } => {
                 edges.collect_exprs(&mut out);
                 out.push(length);
-                out.extend(degrees.iter().chain(bend_radius));
+                out.extend(degrees.iter().chain(bend_radius).chain(gap));
             }
+            Op::Hem { edges, length, gap, bend_radius, degrees, .. } => {
+                edges.collect_exprs(&mut out);
+                out.extend(length.iter().chain(gap).chain(bend_radius).chain(degrees));
+            }
+            Op::Bend { degrees, bend_radius, .. } => out.extend(degrees.iter().chain(bend_radius)),
             Op::FilletRadii { sets } => {
                 for set in sets {
                     set.edges.collect_exprs(&mut out);
@@ -2029,6 +2082,50 @@ fn sheet_sizes(thickness: &Expr, bend_radius: Option<&Expr>, k_factor: Option<&E
     Ok((t, r, k))
 }
 
+/// A sheet metal part's sizes and the defaults later features take, from the feature that made it.
+#[derive(Clone, Copy, Debug)]
+struct Sheet {
+    t: f64,
+    r: f64,
+    k: f64,
+    gap: f64,
+    corner: Corner,
+    feature: FeatureId,
+}
+
+/// The sizes and defaults a sheet metal feature sets, checked.
+fn sheet_settings(op: &Op, feature: FeatureId, env: &Env) -> Result<Sheet> {
+    let Op::SheetMetal { thickness, bend_radius, k_factor, minimal_gap, corner, .. } = op else {
+        return Err(Error::InvalidInput("this isn't a sheet metal feature".into()));
+    };
+    let (t, r, k) = sheet_sizes(thickness, bend_radius.as_ref(), k_factor.as_ref(), env)?;
+    let gap = minimal_gap.as_ref().map_or(Ok(t / 10.0), |e| num(e, env))?;
+    if !(gap >= MIN_FEATURE) {
+        return Err(Error::InvalidInput(format!("a minimal gap has to be more than 0, not {gap}")));
+    }
+    Ok(Sheet { t, r, k, gap, corner: *corner, feature })
+}
+
+/// Which fields a hem of each kind takes, as a reader and a rebuild both check.
+fn check_hem_fields(kind: HemKind, length: bool, gap: bool, bend_radius: bool, degrees: bool) -> Result<()> {
+    let name = kind.word();
+    let (wants_length, takes_gap, takes_radius, takes_degrees) = match kind {
+        HemKind::Straight => (true, true, false, false),
+        HemKind::Rounded => (true, false, true, false),
+        HemKind::Teardrop => (true, false, true, true),
+        HemKind::Rolled => (false, false, true, true),
+    };
+    for (has, takes, field) in [(length, wants_length, "length"), (gap, takes_gap, "gap"), (bend_radius, takes_radius, "bend_radius"), (degrees, takes_degrees, "degrees")] {
+        if has && !takes {
+            return Err(Error::InvalidInput(format!("a {name} hem has no \"{field}\"")));
+        }
+    }
+    if wants_length && !length {
+        return Err(Error::InvalidInput(format!("a {name} hem needs a \"length\"")));
+    }
+    Ok(())
+}
+
 fn num(e: &Expr, env: &Env) -> Result<f64> {
     e.eval(env).map_err(Error::InvalidInput)
 }
@@ -2303,7 +2400,13 @@ impl Document {
             Op::Extrude { sketch, regions, .. } => sketch.iter().copied().chain(regions.iter().map(|r| r.sketch)).collect(),
             Op::Revolve { sketch, regions, .. } => std::iter::once(*sketch).chain(regions.iter().map(|r| r.sketch)).collect(),
             Op::Sweep { sketch, path: SweepPath::Sketch(along), .. } => vec![*sketch, *along],
-            Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } | Op::SheetMetal { sketch, .. } => vec![*sketch],
+            Op::Sweep { sketch, .. }
+            | Op::Helix { sketch, .. }
+            | Op::Fill { sketch }
+            | Op::Trim { tool: TrimTool::Sketch(sketch), .. }
+            | Op::SheetMetal { sketch, .. }
+            | Op::Tab { sketch }
+            | Op::Bend { sketch, .. } => vec![*sketch],
             Op::Loft { sections, .. } => sections.iter().map(|s| s.sketch).collect(),
             _ => Vec::new(),
         };
@@ -2336,8 +2439,8 @@ impl Document {
         Ok(())
     }
 
-    /// The sheet metal feature that made a part, the first if several did, and its thickness, bend radius and k-factor.
-    fn sheet_of(&self, body: &Body, env: &Env) -> Result<(f64, f64, f64, FeatureId)> {
+    /// The sheet metal feature that made a part, the first if several did, with its sizes and defaults.
+    fn sheet_of(&self, body: &Body, env: &Env) -> Result<Sheet> {
         let mut first: Option<usize> = None;
         for face in &body.faces {
             if let Some(at) = self.features.iter().position(|f| f.id.0 == face.tag.feature && matches!(f.op, Op::SheetMetal { .. })) {
@@ -2345,9 +2448,7 @@ impl Document {
             }
         }
         let feature = &self.features[first.ok_or_else(|| Error::InvalidInput("this part isn't sheet metal: no sheet metal feature made it".into()))?];
-        let Op::SheetMetal { thickness, bend_radius, k_factor, .. } = &feature.op else { unreachable!("found as sheet metal") };
-        let (t, r, k) = sheet_sizes(thickness, bend_radius.as_ref(), k_factor.as_ref(), env)?;
-        Ok((t, r, k, feature.id))
+        sheet_settings(&feature.op, feature.id, env)
     }
 
     /// A sheet metal part laid out flat, as `outcome` has it: the one named, or the only sheet metal part there is.
@@ -2368,7 +2469,7 @@ impl Document {
                 }
             }
         };
-        let (t, _, k, id) = self.sheet_of(&named.body, &env)?;
+        let Sheet { t, k, feature: id, .. } = self.sheet_of(&named.body, &env)?;
         let Some(Op::SheetMetal { sketch, .. }) = self.feature(id).map(|f| &f.op) else { unreachable!("found as sheet metal") };
         // A plate starts from the face on its sketch, a chain from its first wall's face on the lines' side.
         let plate = !self.sketch_output(*sketch)?.profiles.is_empty();
@@ -2597,9 +2698,13 @@ impl Document {
                     hash_text(body_key ^ mixed(&sketches), &own)
                 }
                 Op::Sweep { sketch, path: SweepPath::Sketch(along), .. } => hash_text(body_key ^ mixed(&[*sketch, *along]), &own),
-                Op::Sweep { sketch, .. } | Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::Trim { tool: TrimTool::Sketch(sketch), .. } | Op::SheetMetal { sketch, .. } => {
-                    hash_text(body_key ^ mixed(&[*sketch]), &own)
-                }
+                Op::Sweep { sketch, .. }
+                | Op::Helix { sketch, .. }
+                | Op::Fill { sketch }
+                | Op::Trim { tool: TrimTool::Sketch(sketch), .. }
+                | Op::SheetMetal { sketch, .. }
+                | Op::Tab { sketch }
+                | Op::Bend { sketch, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
                 Op::Loft { sections, .. } => hash_text(body_key ^ mixed(&sections.iter().map(|s| s.sketch).collect::<Vec<_>>()), &own),
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
                 _ => hash_text(body_key, &own),
@@ -3218,9 +3323,9 @@ impl Document {
                 Ok(out.done(None))
             }
             Op::Plane { def, flip } => Ok(RunResult { changed: Vec::new(), added: Vec::new(), sketch: None, tools: None, plane: Some(look.def(def, *flip)?) }),
-            Op::SheetMetal { sketch, thickness, bend_radius, k_factor, depth, flip } => {
+            Op::SheetMetal { sketch, depth, flip, .. } => {
                 let out = sketch_output(sketch)?;
-                let (t, r, _) = sheet_sizes(thickness, bend_radius.as_ref(), k_factor.as_ref(), env)?;
+                let Sheet { t, r, .. } = sheet_settings(&feature.op, feature.id, env)?;
                 let body = match (out.profiles.as_slice(), out.open.as_slice()) {
                     ([region], []) => extrude(region, &out.frame, if *flip { -t } else { t }, tag)?,
                     ([], [chain]) => {
@@ -3248,37 +3353,139 @@ impl Document {
                 };
                 applied(vec![body], Mode::NewBody)
             }
-            Op::Flange { edges, length, degrees, alignment, bend_radius, flip } => {
-                let everything = whole().ok_or_else(|| Error::InvalidInput("a flange needs a sheet metal part to go on".into()))?;
-                let picked = select_edges(edges, &everything, env)?;
-                if picked.is_empty() {
-                    return Err(Error::InvalidInput("a flange needs an edge to go on, and none is picked".into()));
-                }
+            Op::Flange { edges, length, degrees, alignment, bend_radius, flip, corner, gap } => {
                 let length = num(length, env)?;
                 let angle = degrees.as_ref().map_or(Ok(90.0), |e| num(e, env))?.to_radians();
-                let mut out = Changes::default();
-                let mut region = 0u32;
-                for (at, list) in by_body(all, scope, &picked, |b| b.edges.len()) {
-                    let (id, body) = &scope[at];
-                    let several = scope.len() > 1;
-                    let (t, r, _, _) = self.sheet_of(body, env).map_err(|e| on_body(e, *id, several))?;
-                    let radius = bend_radius.as_ref().map_or(Ok(r), |e| num(e, env))?;
-                    let size = sheet_metal::FlangeSize { length, angle, radius, thickness: t, alignment: *alignment, flip: *flip };
-                    let uses = body.edge_uses();
-                    let mut made = Vec::with_capacity(list.len());
-                    // Where two flanges meet at a corner, each stops short of it.
-                    let shared = |e: usize, v: usize| list.iter().any(|&o| o != e && (body.edges[o].v0 == v || body.edges[o].v1 == v));
-                    for &e in &list {
-                        let corners = [shared(e, body.edges[e].v0), shared(e, body.edges[e].v1)];
-                        let (piece, trim) = sheet_metal::flange(body, &uses, e, &size, corners, tag).map_err(|e| on_body(e, *id, several))?;
-                        made.push((with_region(piece, region), trim));
-                        region += 1;
+                self.fold_edges(edges, all, scope, env, tag, "flange", &|sheet| {
+                    let radius = bend_radius.as_ref().map_or(Ok(sheet.r), |e| num(e, env))?;
+                    let fold = sheet_metal::FlangeSize { length, angle, radius, thickness: sheet.t, alignment: *alignment }.fold()?;
+                    let gap = gap.as_ref().map_or(Ok(sheet.gap), |e| num(e, env))?;
+                    Ok((fold, *flip, corner.unwrap_or(sheet.corner), gap))
+                })
+            }
+            Op::Hem { edges, kind, length, gap, bend_radius, degrees, alignment, flip } => {
+                check_hem_fields(*kind, length.is_some(), gap.is_some(), bend_radius.is_some(), degrees.is_some())?;
+                let length = length.as_ref().map_or(Ok(0.0), |e| num(e, env))?;
+                self.fold_edges(edges, all, scope, env, tag, "hem", &|sheet| {
+                    let radius = match kind {
+                        HemKind::Straight => gap.as_ref().map_or(Ok(sheet.gap), |e| num(e, env))? / 2.0,
+                        _ => bend_radius.as_ref().map_or(Ok(sheet.r), |e| num(e, env))?,
+                    };
+                    let angle = match kind {
+                        HemKind::Straight | HemKind::Rounded => PI,
+                        HemKind::Teardrop => degrees.as_ref().map_or(Ok(225.0), |e| num(e, env))?.to_radians(),
+                        HemKind::Rolled => degrees.as_ref().map_or(Ok(270.0), |e| num(e, env))?.to_radians(),
+                    };
+                    let fold = sheet_metal::HemSize { kind: *kind, length, radius, angle, thickness: sheet.t, alignment: *alignment }.fold()?;
+                    Ok((fold, *flip, Corner::Open, sheet.gap))
+                })
+            }
+            Op::Tab { sketch } => {
+                let drawn = sketch_output(sketch)?;
+                let regions = drawn.closed(*sketch, "a tab")?;
+                let several = scope.len() > 1;
+                let mut parts: Vec<(BodyId, Body, Sheet, bool)> =
+                    scope.iter().filter_map(|(id, b)| self.sheet_of(b, env).ok().map(|s| (*id, (**b).clone(), s, false))).collect();
+                if parts.is_empty() {
+                    return Err(Error::InvalidInput("a tab needs a sheet metal part to go on".into()));
+                }
+                for (i, region) in regions.iter().enumerate() {
+                    let mut took = false;
+                    for (id, body, sheet, touched) in parts.iter_mut() {
+                        let joined = sheet_metal::tab(body, region, &drawn.frame, sheet.t, tag, &|b| with_region(b, i as u32)).map_err(|e| on_body(e, *id, several))?;
+                        if let Some(joined) = joined {
+                            (*body, *touched, took) = (joined, true, true);
+                            break;
+                        }
                     }
-                    out.settle(*id, sheet_metal::add_flanges(body, &made).map_err(|e| on_body(e, *id, several))?, tag);
+                    if !took {
+                        return Err(Error::InvalidInput(format!(
+                            "region {i} of the tab doesn't reach a sheet metal wall in its plane: draw it on the plane of a wall's face, overlapping or meeting the wall"
+                        )));
+                    }
+                }
+                let mut out = Changes::default();
+                for (id, body, _, touched) in parts {
+                    if touched {
+                        out.settle(id, body, tag);
+                    }
+                }
+                Ok(out.done(None))
+            }
+            Op::Bend { sketch, degrees, bend_radius, position, flip, right } => {
+                let drawn = sketch_output(sketch)?;
+                let line = match (drawn.profiles.as_slice(), drawn.open.as_slice()) {
+                    ([], [wire]) if wire.segs.len() == 1 => match wire.segs[0].geom {
+                        SegGeom::Line { a, b } => Some((a, b)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some((a, b)) = line else {
+                    return Err(Error::InvalidInput(format!(
+                        "a bend goes along the one line in its sketch, and this sketch has {} regions and {} chains of curves",
+                        drawn.profiles.len(),
+                        drawn.open.len()
+                    )));
+                };
+                let angle = degrees.as_ref().map_or(Ok(90.0), |e| num(e, env))?.to_radians();
+                let several = scope.len() > 1;
+                let middle = drawn.frame.to_world(v3((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, 0.0));
+                let mut out = Changes::default();
+                for (id, body) in scope {
+                    let Ok(sheet) = self.sheet_of(body, env) else { continue };
+                    if !body.aabb().inflated(4.0 * TOL).contains(middle) {
+                        continue;
+                    }
+                    let radius = bend_radius.as_ref().map_or(Ok(sheet.r), |e| num(e, env))?;
+                    let size = sheet_metal::LineBend { angle, radius, thickness: sheet.t, k_factor: sheet.k, position: *position, flip: *flip, right: *right };
+                    if let Some(bent) = sheet_metal::bend_along(body, &drawn.frame, a, b, &size, tag).map_err(|e| on_body(e, *id, several))? {
+                        out.settle(*id, bent, tag);
+                    }
+                }
+                if out.changed.is_empty() {
+                    return Err(Error::InvalidInput("the line to bend along isn't on the plane of a sheet metal wall".into()));
                 }
                 Ok(out.done(None))
             }
         }
+    }
+
+    /// Folds along edges of sheet metal parts, as a flange or a hem: `fold` says how, for each part, from its sizes and
+    /// defaults.
+    fn fold_edges(
+        &self,
+        edges: &EdgeSelect,
+        all: &[Held],
+        scope: &[(BodyId, Arc<Body>)],
+        env: &Env,
+        tag: u32,
+        what: &str,
+        fold: &dyn Fn(&Sheet) -> Result<(sheet_metal::Fold, bool, Corner, f64)>,
+    ) -> Result<RunResult> {
+        let everything = whole_of(all).ok_or_else(|| Error::InvalidInput(format!("a {what} needs a sheet metal part to go on")))?;
+        let picked = select_edges(edges, &everything, env)?;
+        if picked.is_empty() {
+            return Err(Error::InvalidInput(format!("a {what} needs an edge to go on, and none is picked")));
+        }
+        let mut out = Changes::default();
+        let mut region = 0u32;
+        for (at, list) in by_body(all, scope, &picked, |b| b.edges.len()) {
+            let (id, body) = &scope[at];
+            let several = scope.len() > 1;
+            let sheet = self.sheet_of(body, env).map_err(|e| on_body(e, *id, several))?;
+            let (shape, flip, corner, gap) = fold(&sheet).map_err(|e| on_body(e, *id, several))?;
+            let made = sheet_metal::folds(body, &list, &shape, flip, corner, gap, &format!("a {what}"), tag).map_err(|e| on_body(e, *id, several))?;
+            let made: Vec<(Body, Option<Body>)> = made
+                .into_iter()
+                .map(|(piece, trim)| {
+                    region += 1;
+                    (with_region(piece, region - 1), trim)
+                })
+                .collect();
+            out.settle(*id, sheet_metal::add_folds(body, &made, what).map_err(|e| on_body(e, *id, several))?, tag);
+        }
+        Ok(out.done(None))
     }
 
     /// A Boolean between bodies. As in Onshape, bodies that don't meet are refused, and without `keep_tools` the tools go.
@@ -3825,6 +4032,22 @@ fn expr_value(e: &Expr) -> Value {
         Some(n) => Value::Num(n),
         None => Value::str(e.text()),
     }
+}
+
+fn read_alignment(v: &Value, what: &str) -> Result<Alignment> {
+    match v.get("alignment") {
+        None => Ok(Alignment::Outer),
+        Some(a) => a
+            .as_str()
+            .and_then(Alignment::from_word)
+            .ok_or_else(|| Error::InvalidInput(format!("{what}'s \"alignment\" is \"outer\", \"inner\" or \"bend\""))),
+    }
+}
+
+fn read_corner(v: &Value, what: &str) -> Result<Option<Corner>> {
+    v.get("corner")
+        .map(|c| c.as_str().and_then(Corner::from_word).ok_or_else(|| Error::InvalidInput(format!("{what}'s \"corner\" is \"open\" or \"closed\""))))
+        .transpose()
 }
 
 fn read_flip(v: &Value) -> Result<bool> {
@@ -4419,9 +4642,9 @@ pub fn op_value(op: &Op) -> Value {
         Op::ImportStep { text, mode } => Value::obj(vec![("type", Value::str("import_step")), ("text", Value::str(text)), ("mode", mode_value(*mode))]),
         Op::ImportStepParts { text } => Value::obj(vec![("type", Value::str("import_step_parts")), ("text", Value::str(text))]),
         Op::Fill { sketch } => Value::obj(vec![("type", Value::str("fill")), ("sketch", Value::Num(sketch.0 as f64))]),
-        Op::SheetMetal { sketch, thickness, bend_radius, k_factor, depth, flip } => {
+        Op::SheetMetal { sketch, thickness, bend_radius, k_factor, depth, flip, minimal_gap, corner } => {
             let mut items = vec![("type", Value::str("sheet_metal")), ("sketch", Value::Num(sketch.0 as f64)), ("thickness", expr_value(thickness))];
-            for (key, e) in [("bend_radius", bend_radius), ("k_factor", k_factor), ("depth", depth)] {
+            for (key, e) in [("bend_radius", bend_radius), ("k_factor", k_factor), ("depth", depth), ("minimal_gap", minimal_gap)] {
                 if let Some(e) = e {
                     items.push((key, expr_value(e)));
                 }
@@ -4429,9 +4652,12 @@ pub fn op_value(op: &Op) -> Value {
             if *flip {
                 items.push(("flip", Value::Bool(true)));
             }
+            if *corner != Corner::Open {
+                items.push(("corner", Value::str(corner.word())));
+            }
             Value::obj(items)
         }
-        Op::Flange { edges, length, degrees, alignment, bend_radius, flip } => {
+        Op::Flange { edges, length, degrees, alignment, bend_radius, flip, corner, gap } => {
             let mut items = vec![("type", Value::str("flange")), ("edges", edge_select_value(edges)), ("length", expr_value(length))];
             if let Some(e) = degrees {
                 items.push(("degrees", expr_value(e)));
@@ -4444,6 +4670,46 @@ pub fn op_value(op: &Op) -> Value {
             }
             if *flip {
                 items.push(("flip", Value::Bool(true)));
+            }
+            if let Some(c) = corner {
+                items.push(("corner", Value::str(c.word())));
+            }
+            if let Some(e) = gap {
+                items.push(("gap", expr_value(e)));
+            }
+            Value::obj(items)
+        }
+        Op::Hem { edges, kind, length, gap, bend_radius, degrees, alignment, flip } => {
+            let mut items = vec![("type", Value::str("hem")), ("edges", edge_select_value(edges)), ("kind", Value::str(kind.word()))];
+            for (key, e) in [("length", length), ("gap", gap), ("bend_radius", bend_radius), ("degrees", degrees)] {
+                if let Some(e) = e {
+                    items.push((key, expr_value(e)));
+                }
+            }
+            if *alignment != Alignment::Outer {
+                items.push(("alignment", Value::str(alignment.word())));
+            }
+            if *flip {
+                items.push(("flip", Value::Bool(true)));
+            }
+            Value::obj(items)
+        }
+        Op::Tab { sketch } => Value::obj(vec![("type", Value::str("tab")), ("sketch", Value::Num(sketch.0 as f64))]),
+        Op::Bend { sketch, degrees, bend_radius, position, flip, right } => {
+            let mut items = vec![("type", Value::str("bend")), ("sketch", Value::Num(sketch.0 as f64))];
+            for (key, e) in [("degrees", degrees), ("bend_radius", bend_radius)] {
+                if let Some(e) = e {
+                    items.push((key, expr_value(e)));
+                }
+            }
+            if *position != BendPosition::Center {
+                items.push(("position", Value::str(position.word())));
+            }
+            if *flip {
+                items.push(("flip", Value::Bool(true)));
+            }
+            if *right {
+                items.push(("moves", Value::str("right")));
             }
             Value::obj(items)
         }
@@ -5065,7 +5331,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::Draft { faces: read_face_list(v, "faces")?, neutral, degrees: expr_field(v, "degrees", "a draft")? })
         }
         "sheet_metal" => {
-            with(&["type", "sketch", "thickness", "bend_radius", "k_factor", "depth", "flip"])?;
+            with(&["type", "sketch", "thickness", "bend_radius", "k_factor", "depth", "flip", "minimal_gap", "corner"])?;
             Ok(Op::SheetMetal {
                 sketch: read_sketch_id(v)?,
                 thickness: expr_field(v, "thickness", "sheet metal")?,
@@ -5073,24 +5339,69 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 k_factor: v.get("k_factor").map(read_expr).transpose()?,
                 depth: v.get("depth").map(read_expr).transpose()?,
                 flip: read_flip(v)?,
+                minimal_gap: v.get("minimal_gap").map(read_expr).transpose()?,
+                corner: read_corner(v, "sheet metal")?.unwrap_or(Corner::Open),
             })
         }
         "flange" => {
-            with(&["type", "edges", "length", "degrees", "alignment", "bend_radius", "flip"])?;
-            let alignment = match v.get("alignment") {
-                None => Alignment::Outer,
-                Some(a) => a
-                    .as_str()
-                    .and_then(Alignment::from_word)
-                    .ok_or_else(|| Error::InvalidInput("a flange's \"alignment\" is \"outer\", \"inner\" or \"bend\"".into()))?,
-            };
+            with(&["type", "edges", "length", "degrees", "alignment", "bend_radius", "flip", "corner", "gap"])?;
             Ok(Op::Flange {
                 edges: read_edge_select(field(v, "edges", "a flange")?)?,
                 length: expr_field(v, "length", "a flange")?,
                 degrees: v.get("degrees").map(read_expr).transpose()?,
-                alignment,
+                alignment: read_alignment(v, "a flange")?,
                 bend_radius: v.get("bend_radius").map(read_expr).transpose()?,
                 flip: read_flip(v)?,
+                corner: read_corner(v, "a flange")?,
+                gap: v.get("gap").map(read_expr).transpose()?,
+            })
+        }
+        "hem" => {
+            with(&["type", "edges", "kind", "length", "gap", "bend_radius", "degrees", "alignment", "flip"])?;
+            let kind = field(v, "kind", "a hem")?
+                .as_str()
+                .and_then(HemKind::from_word)
+                .ok_or_else(|| Error::InvalidInput("a hem's \"kind\" is \"straight\", \"rounded\", \"teardrop\" or \"rolled\"".into()))?;
+            let op = Op::Hem {
+                edges: read_edge_select(field(v, "edges", "a hem")?)?,
+                kind,
+                length: v.get("length").map(read_expr).transpose()?,
+                gap: v.get("gap").map(read_expr).transpose()?,
+                bend_radius: v.get("bend_radius").map(read_expr).transpose()?,
+                degrees: v.get("degrees").map(read_expr).transpose()?,
+                alignment: read_alignment(v, "a hem")?,
+                flip: read_flip(v)?,
+            };
+            if let Op::Hem { kind, length, gap, bend_radius, degrees, .. } = &op {
+                check_hem_fields(*kind, length.is_some(), gap.is_some(), bend_radius.is_some(), degrees.is_some())?;
+            }
+            Ok(op)
+        }
+        "tab" => {
+            with(&["type", "sketch"])?;
+            Ok(Op::Tab { sketch: read_sketch_id(v)? })
+        }
+        "bend" => {
+            with(&["type", "sketch", "degrees", "bend_radius", "position", "flip", "moves"])?;
+            let position = match v.get("position") {
+                None => BendPosition::Center,
+                Some(p) => p
+                    .as_str()
+                    .and_then(BendPosition::from_word)
+                    .ok_or_else(|| Error::InvalidInput("a bend's \"position\" is \"center\" or \"start\"".into()))?,
+            };
+            let right = match v.get("moves").map(|m| m.as_str()) {
+                None | Some(Some("left")) => false,
+                Some(Some("right")) => true,
+                Some(_) => return Err(Error::InvalidInput("what a bend \"moves\" is \"left\" or \"right\" of its line".into())),
+            };
+            Ok(Op::Bend {
+                sketch: read_sketch_id(v)?,
+                degrees: v.get("degrees").map(read_expr).transpose()?,
+                bend_radius: v.get("bend_radius").map(read_expr).transpose()?,
+                position,
+                flip: read_flip(v)?,
+                right,
             })
         }
         "fillet" => {

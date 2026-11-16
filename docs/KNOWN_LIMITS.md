@@ -472,24 +472,44 @@ All eight of Onshape's plane types are built, with `flip`, and sketches sit on t
 
 ## Sheet metal
 
-Stage 1 of Onshape's sheet metal: a part from a sketch's one region (a plate) or one chain of lines (walls with a bend at
-each corner), flanges on edges, and flat patterns. Each part is made by extruding outlines, so its Booleans only put
-pieces together face to face. Checked against hand formulas: an L both ways round, a flange with each alignment both
-ways, a tray of four flanges, flats of each, and a hole through a wall coming out in the flat. Of 14 bugs put in on
-purpose, 13 were caught, and the one missed showed code that did nothing, which is gone.
+Stages 1 and 2 of Onshape's sheet metal: a part from a sketch's one region (a plate) or one chain of lines (walls with a
+bend at each corner), flanges on edges, hems of four kinds, tabs, bends along a line, open and closed corners, defaults
+the part sets for what comes after, and flat patterns. Each part is made by extruding outlines, so its Booleans only put
+pieces together face to face.
 
-- **Every flange is checked for running into the part,** by volume: what it adds has to all be new. One that does is
-  refused, saying where.
+Checked against hand formulas, and each laid flat. Stage 1: an L both ways round, a flange with each alignment both
+ways, a tray of four flanges, and a hole through a wall coming out in the flat. Stage 2: each kind of hem, one flipped,
+two meeting at a corner; a tray with its corners closed, at two gaps, and one of flanges at 120 degrees; tabs beside
+and overlapping a plate from either face, and on a flange's wall; a bend along a line each way it can go, carrying a
+flange with it, whose flat has to be the one it started from; and a bend and a tab following their sketches. Of 14 bugs
+put in on purpose in stage 1, 13 were caught, and the one missed showed code that did nothing, which is gone. Of 20 in
+stage 2, all were caught, two of them only once a test moved a bend's line and a tab's sketch on their own.
+
+- **Every flange and hem is checked for running into the part,** by volume: what it adds has to all be new. So is the
+  side that moves in a bend along a line. One that does is refused, saying where.
 - **Every flat pattern is checked by volume:** laid flat, a part has to come to its own volume plus what the bends'
   neutral lines add, width times thickness squared times angle times (k - 1/2). Anything not square through the sheet,
   or not reached across bends from the face it starts from, fails that and is refused.
-- **Two flanges of one feature that meet at a corner** each stop short of it, leaving it open with a square cut out. A
-  flange from a later feature beside an earlier one's corner is refused, as the wall's side there now runs on into the
-  first flange's end: flanges that meet at a corner go in one feature, and the message says so.
-- **Not built yet:** arcs in a chain (only lines, with their bends made from `bend_radius`), hems (a bend of 180 degrees),
-  flanges along part of an edge and the reliefs they need, tabs, a bend along a sketch line, closing corners, rips and
-  joins, turning a part into sheet metal, forming tools, and DXF of the flat. Each is refused in plain words where it
-  could be asked for.
+- **Corners.** Folds of one feature that meet at a corner leave it open: each stops short by as far as it reaches back
+  over the wall, which for a flange of 90 degrees or less is as far as the wall is cut back, leaving a square cut out
+  of the corner, and for a hem or a flange leaning back over the wall is that and the minimal gap, so that they don't
+  touch. A closed corner is built for flanges of 90 degrees on edges meeting square at an outside corner, with a gap
+  more than 0 and less than the bend radius; others are refused, saying which. Its bends still leave a square hole.
+  Which flange runs over the other follows one rule, going round anticlockwise; choosing per corner, and corner reliefs
+  of other shapes, round or sized, aren't built.
+- **A fold from a later feature beside an earlier one's corner is refused,** as the wall's side there now runs on into
+  the first one's end: flanges and hems that meet at a corner go in one feature, and the message says so.
+- **Hems never touch their wall:** a straight hem keeps its gap, and a teardrop or a roll that would come back down onto
+  the wall is refused. A closed hem, folded flat with no gap, isn't built. The kernel makes an arc of more than half a
+  turn as two faces, which the flat pattern takes together as one bend.
+- **A tab is drawn in a wall's plane** and joins flat wall only: one over a bend is refused. Bend reliefs for a tab
+  aren't made.
+- **A bend along a line** takes one straight line, right across a flat wall, with nothing cut into or standing on the
+  strip that becomes the bend. A line crossing a hole or a flange's bend is refused, as is one that stops short, and
+  one of 180 degrees.
+- **Not built yet:** arcs in a chain (only lines, with their bends made from `bend_radius`), flanges along part of an
+  edge and the reliefs they need, rips and joins, turning a part into sheet metal, forming tools, a table of bends to
+  edit, and DXF of the flat. Each is refused in plain words where it could be asked for.
 - **A flat pattern refuses** a bend with anything cut across or into it, a rounded edge where a bend would be, a sheet
   that closes on itself (it would need a rip), and a face going on smoothly from a wall that's neither flat nor a bend.
 - **Up and down** in a flat are seen from the side it's unfolded from: a bend is up when what's beyond it rises toward the

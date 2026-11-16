@@ -73,8 +73,11 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 |---|---|
 | `sketch` | `plane` (default XY; `{"on_plane": "top"}` or `{"on_plane": 7}` puts it on a [plane](#planes) and it follows it, and with `"on_face": "f2:end"` it follows that flat face, keeping its own origin), `regions` |
 | `plane` | A plane, not a part: `plane_type` and its fields, and `flip`. See [Planes](#planes) |
-| `sheet_metal` | `sketch`, `thickness`, `bend_radius` (default the thickness), `k_factor` (default 0.45), `depth` for a chain of lines, `flip`. A new sheet metal part. See [Sheet metal](#sheet-metal) |
-| `flange` | `edges` (a [selection](#edge-selections)), `length`, `degrees` (default 90), `alignment` (`outer`, the default, `inner` or `bend`), `bend_radius` (default the part's), `flip`. See [Sheet metal](#sheet-metal) |
+| `sheet_metal` | `sketch`, `thickness`, `bend_radius` (default the thickness), `k_factor` (default 0.45), `depth` for a chain of lines, `flip`, and the part's defaults for what comes after: `minimal_gap` (default a tenth of the thickness) and `corner` (`open`, the default, or `closed`). A new sheet metal part. See [Sheet metal](#sheet-metal) |
+| `flange` | `edges` (a [selection](#edge-selections)), `length`, `degrees` (default 90), `alignment` (`outer`, the default, `inner` or `bend`), `bend_radius` (default the part's), `flip`, `corner` (default the part's) and `gap` (default the part's minimal gap) where its edges meet. See [Sheet metal](#sheet-metal) |
+| `hem` | `edges`, `kind` (`straight`, `rounded`, `teardrop` or `rolled`), `length` (not for `rolled`), `gap` (`straight` only, default the part's minimal gap), `bend_radius` (not for `straight`, default the part's), `degrees` (`teardrop`, default 225, and `rolled`, default 270), `alignment`, `flip`. See [Sheet metal](#sheet-metal) |
+| `tab` | `sketch`, whose regions are drawn on the plane of a sheet metal wall. See [Sheet metal](#sheet-metal) |
+| `bend` | `sketch`, holding one line on the plane of a sheet metal wall, `degrees` (default 90), `bend_radius` (default the part's), `position` (`center`, the default, or `start`), `moves` (`left`, the default, or `right`), `flip`. See [Sheet metal](#sheet-metal) |
 | `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
 | `loft` | `sections`, in order, each a sketch id, for a sketch holding one outline, or a region `{"sketch": 2, "region": "r..."}`, so that one sketch with several outlines can feed it, and `mode`. Straight between two, and a smooth cubic through three or more. A region that has gone fails the feature, saying what's there |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. Optionally `regions`, as an extrude has them: see [below](#extrude-regions-and-ends) |
@@ -206,6 +209,48 @@ wall's outside, `side.2` its end, `side.3` its inside and `side.4` the bend's in
 flange's two ends. The flange for the second edge a feature is given is `region.1`, and so on. A chain's faces go along
 the lines first, a wall and then a bend at each corner, then across the far end, back along the other side, and across
 the near end, so `side.0` is the first wall's face on the lines' side.
+
+**Corners.** With `"corner": "closed"`, two flanges of one feature that meet at a corner close it instead. Each one's
+bend still stops short, but its wall runs on into the corner: going round anticlockwise, seen from the side they bend
+toward, each flange's wall runs over the end of the next one's, out to that one's outside, and the next one's runs up to
+within `gap` of the first one's inside. That leaves a square hole where the bends would meet. It's built for flanges of
+90 degrees on edges that meet square at an outside corner of the wall, and `gap` has to be more than 0 and less than the
+bend radius. Each piece that runs on is named as its flange's wall, and its underside, over the hole, is `side.5`.
+
+**Hems** fold an edge back over its wall, toward the face the edge is on, or the other way with `flip`:
+
+- `straight`: half a turn with `gap` between the wall and what comes back over it, so the fold's inner radius is half
+  the gap, then straight to `length`, from the outside of the fold.
+- `rounded`: the same at `bend_radius`.
+- `teardrop`: a turn of `degrees`, more than 180, at `bend_radius`, then straight on for `length`, leaning back toward
+  the wall. One that would come back down onto the wall is refused.
+- `rolled`: a turn of `degrees`, more than 180 and less than 360, at `bend_radius`, and nothing after.
+
+`alignment` is as for a flange: `outer` puts the outside of the fold where the edge was, so the part's outside size
+stays the same, `inner` puts the inside of the fold there, and `bend` starts the fold at the edge, and the wall is cut
+back to make room. Hems on edges of one feature that meet at a corner each stop short of it by as far as they reach
+back over the wall, and the part's minimal gap more, so that they don't touch, and so do flanges of more than 90
+degrees, which lean back over it. A hem's faces are named as a flange's; a roll has no wall, so its end is `side.1`, the inside of its
+fold `side.2`.
+
+**A tab** is a region drawn on the plane of a wall, on either of its faces, made the sheet's thickness through the wall
+and joined to it. It can overlap the wall or only meet its side. Where it overlaps the part, that has to be flat wall
+square through the sheet: a tab over a bend is refused. Its faces are named as an extrude's of its region.
+
+**A bend along a line** folds a part along the one line in its sketch, which is drawn on the plane of a wall and has to
+go right across it, cutting the part in two. The part on the line's left moves, seen from along the sketch's normal, or
+on its right with `"moves": "right"`, and it bends toward the side the sketch's normal points to, or the other way with
+`flip`. The strip of wall that the bend's neutral line takes when laid flat becomes the bend, so the part's flat
+pattern stays just as it was. With `"position": "center"` that strip is centred on the line, and with `start` it starts
+at the line, on the side that moves. Everything on the side that moves goes with it, flanges included. The strip has to
+be plain flat wall right across, and the side that moves mustn't run into the rest of the part.
+
+```json
+{"id": 3, "name": "Sides", "type": "flange", "edges": {"any": [{"near": [50, 0, 2]}, {"near": [100, 30, 2]}]}, "length": 20, "corner": "closed"}
+{"id": 4, "name": "Lip", "type": "hem", "edges": {"near": [50, 60, 2]}, "kind": "rounded", "length": 12, "bend_radius": 3}
+{"id": 6, "name": "Ear", "type": "tab", "sketch": 5}
+{"id": 8, "name": "Fold", "type": "bend", "sketch": 7, "degrees": 90, "moves": "right"}
+```
 
 The MCP's `flat_pattern` lays a part out flat. It's unfolded from the plate's face on its sketch, or the first wall's face
 on the lines' side, which stays where it is, and each wall beyond a bend is laid down where it would be with the bend
