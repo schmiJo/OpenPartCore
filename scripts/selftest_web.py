@@ -203,6 +203,22 @@ driver = r"""
       check(`stress: ${catalog[catalog.findIndex((m) => m.id === "stress")].params[0].choices[c]}`, r.info.failed === null && r.info.openEdges === 0, r.info.features.map((f) => f.error).join("") || `V=${r.info.volume.toFixed(2)} shells=${r.info.shells}`);
     }
 
+    // The sheet metal tray lays flat when its View slider says Flat, and says how big the flat is.
+    await selectModel(catalog.findIndex((m) => m.id === "sheet"));
+    const folded = window.__lastBuild.info;
+    const viewSlider = document.getElementById("p-sheet-view");
+    viewSlider.value = "1";
+    viewSlider.dispatchEvent(new Event("input", {bubbles: true}));
+    await settle();
+    const laid = window.__lastBuild.info;
+    const flatRow = document.getElementById("rFlat");
+    check("sheet metal lays flat", laid.ok && laid.flat && laid.flat.bends === 5 && laid.openEdges === 0 && laid.volume < folded.volume, JSON.stringify(laid.flat));
+    check("the flat's size is shown", !flatRow.hidden && flatRow.textContent.includes("5 bends"), flatRow.textContent);
+    viewSlider.value = "0";
+    viewSlider.dispatchEvent(new Event("input", {bubbles: true}));
+    await settle();
+    check("and folds back up", window.__lastBuild.info.volume === folded.volume && flatRow.hidden, `${window.__lastBuild.info.volume}`);
+
     // Exports produce bytes in the right formats.
     const k = window.__viewer.kernel;
     const step = new TextDecoder().decode(await k.exportFile("step"));

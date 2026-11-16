@@ -358,7 +358,47 @@ fn build_into(out: &mut Output, model: usize, values: &[f64], rollback: i32, dra
     let doc = out.documents.entry((model, variant)).or_insert_with(|| def.document(variant));
     def.apply(doc, values);
     let outcome = doc.rebuild(upto);
+    if def.lays_flat(values) && upto.is_none() && outcome.failed.is_none() {
+        match doc.flat_pattern(&outcome, None) {
+            Ok(flat) => {
+                let shown = flat_outcome(outcome, &flat);
+                fill(out, &shown, draft);
+                if out.info.ends_with('}') {
+                    out.info.pop();
+                    let _ = write!(out.info, ",\"flat\":{}}}", flat_json(&flat));
+                }
+            }
+            Err(e) => {
+                fill(out, &outcome, draft);
+                out.info = format!("{{\"ok\":false,\"error\":{},\"features\":{},\"failed\":null,\"rebuilt\":0}}", json_str(&format!("it can't be laid flat: {e}")), features_json(&outcome));
+            }
+        }
+        return;
+    }
     fill(out, &outcome, draft);
+}
+
+/// A sheet metal part's flat pattern as an outcome to show, in place of the part.
+fn flat_outcome(outcome: Outcome, flat: &coreshape_document::FlatPattern) -> Outcome {
+    let body = Arc::new(flat.body.clone());
+    let id = outcome.bodies.first().map(|b| b.id).expect("a part to lay flat");
+    Outcome { steps: outcome.steps, body: Some(body.clone()), bodies: vec![NamedBody { id, body, first_face: 0, first_edge: 0 }], failed: None, planes: Vec::new() }
+}
+
+/// What the page shows of a flat pattern: its size and how many bends it has.
+fn flat_json(flat: &coreshape_document::FlatPattern) -> String {
+    let (mut lo, mut hi) = (v2(f64::MAX, f64::MAX), v2(f64::MIN, f64::MIN));
+    for e in &flat.outline {
+        let points = match e {
+            coreshape_document::FlatEdge::Line { a, b } | coreshape_document::FlatEdge::Arc { a, b, .. } => vec![*a, *b],
+            coreshape_document::FlatEdge::Points(p) => p.clone(),
+        };
+        for p in points {
+            (lo, hi) = (v2(lo.x.min(p.x), lo.y.min(p.y)), v2(hi.x.max(p.x), hi.y.max(p.y)));
+        }
+    }
+    let (a, b) = (hi.x - lo.x, hi.y - lo.y);
+    format!("{{\"length\":{},\"width\":{},\"bends\":{}}}", a.max(b), a.min(b), flat.bends.len())
 }
 
 /// Rebuilds a model. `rollback` is the index of the last feature to apply, or
@@ -697,6 +737,62 @@ mod tests {
     }
 
     // ----- The rest -----
+
+    /// The sheet metal tray shows its flat when View is Flat: the flat pattern's own body, which comes to the part's
+    /// volume plus what the neutral lines add, and how big it is and how many bends it undid. The hems lie flat beyond the
+    /// flanges, so the flat is wider than the part by about twice their height and hem.
+    #[test]
+    fn the_sheet_metal_tray_lays_flat() {
+        let at = models::catalog().iter().position(|m| m.id == "sheet").unwrap();
+        let def = &models::catalog()[at];
+        let mut values = def.defaults();
+        let mut out = Output::default();
+        build_into(&mut out, at, &values, -1, false);
+        let folded = coreshape_document::json::parse(&out.info).unwrap();
+        assert_eq!(folded.get("ok").and_then(|v| v.as_bool()), Some(true), "{}", out.info);
+        assert!(folded.get("flat").is_none());
+        let part = out.body.clone().unwrap();
+        let view = def.params.iter().position(|p| p.key == "view").unwrap();
+        values[view] = 1.0;
+        build_into(&mut out, at, &values, -1, false);
+        let info = coreshape_document::json::parse(&out.info).unwrap_or_else(|e| panic!("{e}: {}", out.info));
+        assert_eq!(info.get("ok").and_then(|v| v.as_bool()), Some(true), "{}", out.info);
+        let flat = info.get("flat").unwrap_or_else(|| panic!("{}", out.info));
+        let field = |k: &str| flat.get(k).and_then(|v| v.as_f64()).unwrap();
+        // Two flanges, two hems, and the leg's bend.
+        assert_eq!(field("bends"), 5.0);
+        let shown = out.body.clone().unwrap();
+        let mut doc = def.document(1);
+        def.apply(&mut doc, &values);
+        let o = doc.rebuild(None);
+        let pattern = doc.flat_pattern(&o, None).unwrap();
+        assert_eq!(mass_properties(&shown).volume.to_bits(), mass_properties(&pattern.body).volume.to_bits());
+        // Laid flat, each bend's strip is its neutral line, so the volume changes by width * angle * t^2 * (k - 1/2).
+        let t = 1.5;
+        let extra: f64 = pattern.bends.iter().map(|b| b.a.dist(b.b) * b.degrees.to_radians() * t * t * (0.45 - 0.5)).sum();
+        let (a, b) = (mass_properties(&part).volume, mass_properties(&shown).volume);
+        assert!((b - (a + extra)).abs() < 1e-6 * a, "flat {b}, part {a} and {extra}");
+        assert!(field("width") > 70.0 + 2.0 * (25.0 + 9.0) - 20.0 && field("width") < 70.0 + 2.0 * (25.0 + 9.0), "{}", out.info);
+        assert!(field("length") > 120.0 + 30.0, "{}", out.info);
+        // And it lays flat wherever the sliders are, by the same volume rule.
+        let mut rng = Rng::new(31);
+        for _ in 0..25 {
+            let values: Vec<f64> = def.params.iter().map(|p| if p.key == "view" { 1.0 } else { p.min + rng.int(0, ((p.max - p.min) / p.step).round() as i64) as f64 * p.step }).collect();
+            build_into(&mut out, at, &values, -1, false);
+            let info = coreshape_document::json::parse(&out.info).unwrap_or_else(|e| panic!("{e}: {}", out.info));
+            assert_eq!(info.get("ok").and_then(|v| v.as_bool()), Some(true), "{values:?}: {}", out.info);
+            let mut doc = def.document(1);
+            def.apply(&mut doc, &values);
+            let o = doc.rebuild(None);
+            let part = mass_properties(o.body.as_ref().unwrap()).volume;
+            let pattern = doc.flat_pattern(&o, None).unwrap();
+            let t = values[def.params.iter().position(|p| p.key == "thick").unwrap()];
+            let extra: f64 = pattern.bends.iter().map(|b| b.a.dist(b.b) * b.degrees.to_radians() * t * t * (0.45 - 0.5)).sum();
+            let shown = mass_properties(out.body.as_ref().unwrap()).volume;
+            assert!((shown - (part + extra)).abs() < 1e-6 * part, "{values:?}: flat {shown}, part {part} and {extra}");
+            assert_eq!(pattern.bends.len(), 5, "{values:?}");
+        }
+    }
 
     /// Every demo must build at its defaults.
     #[test]

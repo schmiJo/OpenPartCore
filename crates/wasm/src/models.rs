@@ -79,6 +79,11 @@ impl ModelDef {
         }
     }
 
+    /// Whether these slider values ask to see the part laid flat: a sheet metal model's View set to Flat.
+    pub fn lays_flat(&self, values: &[f64]) -> bool {
+        self.params.iter().zip(values).any(|(p, v)| p.key == "view" && p.choices.get(v.round().max(0.0) as usize) == Some(&"Flat"))
+    }
+
     pub fn defaults(&self) -> Vec<f64> {
         self.params.iter().map(|p| p.default).collect()
     }
@@ -353,6 +358,55 @@ fn flange(doc: &mut Document, _: usize) {
         })],
     ));
     doc.with(Op::extrude(bolts, -1.0, "thick + 2", Mode::Remove));
+}
+
+/// A sheet metal tray: a plate with two holes, a flange along each long side with a rounded hem along its top, and a tab
+/// at one end bent down along a line into a leg with a hole in it. The last slider lays it flat.
+fn sheet_tray(doc: &mut Document, _: usize) {
+    let s = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rect(0.0, 0.0, "width", "depth"))]));
+    let part = doc.with(Op::SheetMetal {
+        sketch: s,
+        thickness: "thick".into(),
+        bend_radius: None,
+        k_factor: None,
+        depth: None,
+        flip: false,
+        minimal_gap: None,
+        corner: Corner::Open,
+    });
+    let sides = doc.with(Op::Flange {
+        edges: EdgeSelect::Any(vec![EdgeSelect::Between(part.end_cap(), part.side(0)), EdgeSelect::Between(part.end_cap(), part.side(2))]),
+        length: "height".into(),
+        degrees: None,
+        alignment: Alignment::Outer,
+        bend_radius: None,
+        flip: false,
+        corner: None,
+        gap: None,
+    });
+    // Along each flange's top, folding over toward the inside.
+    doc.with(Op::Hem {
+        edges: EdgeSelect::Any(vec![
+            EdgeSelect::Between(sides.side(2), sides.side(3)),
+            EdgeSelect::Between(sides.region_side(1, 2), sides.region_side(1, 3)),
+        ]),
+        kind: HemKind::Rounded,
+        length: Some("hem".into()),
+        gap: None,
+        bend_radius: None,
+        degrees: None,
+        alignment: Alignment::Outer,
+        flip: false,
+    });
+    let holes = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle("width * 0.3", "depth / 2", "hole")), Region::new(Shape::circle("width * 0.7", "depth / 2", "hole"))]));
+    doc.with(Op::extrude(holes, -1.0, "thick + 2", Mode::Remove));
+    let ear = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rect("width", "depth / 2 - 15", 35.0, 30.0)).hole(Shape::circle("width + 26", "depth / 2", 5.0))]));
+    doc.with(Op::Tab { sketch: ear });
+    let line = doc.with(Op::sketch(
+        xy(),
+        vec![Region::new(Shape::OpenPath { start: point("width + 5", -10.0), moves: vec![Move::Line { to: point("width + 5", "depth + 10") }] })],
+    ));
+    doc.with(Op::Bend { sketch: line, degrees: Some("fold".into()), bend_radius: None, position: BendPosition::Start, flip: true, right: true });
 }
 
 fn rounded_block(doc: &mut Document, _: usize) {
@@ -753,6 +807,16 @@ pub fn catalog() -> &'static [ModelDef] {
         ParamDef { key: "tilt", label: "Window angle", unit: "deg", min: 0.0, max: 180.0, step: 1.0, default: 30.0, choices: &[] },
         mm("pin", "Cross hole", 2.0, 6.0, 4.0),
     ];
+    static SHEET: [ParamDef; 8] = [
+        mm("width", "Length", 80.0, 160.0, 120.0),
+        mm("depth", "Width", 50.0, 90.0, 70.0),
+        mm("height", "Flange height", 20.0, 40.0, 25.0),
+        mm("hem", "Hem length", 7.0, 14.0, 9.0),
+        mm("thick", "Thickness", 1.0, 3.0, 1.5),
+        mm("hole", "Hole radius", 3.0, 8.0, 5.0),
+        deg("fold", "Leg bent down by", 30.0, 120.0, 90.0),
+        ParamDef { key: "view", label: "View", unit: "", min: 0.0, max: 1.0, step: 1.0, default: 0.0, choices: &["Folded", "Flat"] },
+    ];
     static BRACKET: [ParamDef; 9] = [
         mm("width", "Width", 40.0, 120.0, 70.0),
         mm("base", "Base length", 30.0, 100.0, 60.0),
@@ -825,7 +889,7 @@ pub fn catalog() -> &'static [ModelDef] {
         choices: &STRESS_NAMES,
     }];
     static SLIDER_CRANK: [ParamDef; 3] = [mm("crank", "Crank length", 15.0, 80.0, 30.0), mm("rod", "Rod length", 40.0, 160.0, 100.0), deg("angle", "Crank angle", 0.0, 720.0, 30.0)];
-    static MODELS: [ModelDef; 21] = [
+    static MODELS: [ModelDef; 22] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -840,6 +904,14 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A revolved flange with a filleted hub, chamfered edges and a bolt circle. The hub fillet is a true torus.",
             params: &FLANGE,
             build: flange,
+            assembly: None,
+        },
+        ModelDef {
+            id: "sheet",
+            name: "Sheet metal tray",
+            blurb: "A plate made sheet metal, with flanges, rounded hems along their tops, holes, and a tab bent down along a line into a leg. Set View to Flat to lay it out: every bend undone, its strip as long as its neutral line, and checked by volume.",
+            params: &SHEET,
+            build: sheet_tray,
             assembly: None,
         },
         ModelDef {
