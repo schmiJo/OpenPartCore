@@ -855,29 +855,7 @@ fn axis_value(frame: &coreshape::Frame) -> Value {
 
 /// Each vertex as an extrude's end names it: by the keys of the faces it's on, with a place if those fit several vertices.
 fn vertices_value(body: &Body, keys: &[FaceKey]) -> Vec<Value> {
-    let mut on: Vec<Vec<String>> = vec![Vec::new(); body.vertices.len()];
-    for (f, face) in body.faces.iter().enumerate() {
-        for c in face.loops.iter().flatten() {
-            let list = &mut on[body.start_vertex(*c)];
-            let key = keys[f].text();
-            if !list.contains(&key) {
-                list.push(key);
-            }
-        }
-    }
-    for list in &mut on {
-        list.sort();
-    }
-    (0..body.vertices.len())
-        .map(|v| {
-            let mut items = vec![("faces", Value::Arr(on[v].iter().map(Value::str).collect()))];
-            let fits = (0..on.len()).filter(|w| on[*w].iter().all(|k| on[v].contains(k)) && on[v].iter().all(|k| on[*w].contains(k))).count();
-            if fits > 1 {
-                items.push(("near", vec3(body.vertices[v])));
-            }
-            Value::obj(items)
-        })
-        .collect()
+    vertex_picks(body, keys).iter().map(vertex_ref_value).collect()
 }
 
 /// Each corner: where it is, the edges that meet there, and the vertex that picks it.
@@ -968,34 +946,11 @@ fn edges_value(body: &Body, of_edge: &[String]) -> R<Value> {
     let names: Vec<String> = (0..body.edges.len()).map(|e| edge_name(body, e, &uses)).collect();
     let keys = face_keys(body);
     let vertices = vertices_value(body, &keys);
-    let key_pairs: Vec<Vec<String>> = (0..body.edges.len())
-        .map(|e| {
-            let mut pair: Vec<String> = uses[e].iter().map(|u| keys[u.0].text()).collect();
-            pair.sort();
-            pair
-        })
-        .collect();
+    let picks = edge_picks(body, &keys);
     for (e, edge) in body.edges.iter().enumerate() {
-        let faces: Vec<Value> = names[e].split('|').map(Value::str).collect();
         let midpoint = body.edge_midpoint(e);
         let length: f64 = mesh.edge_lines.get(e).map_or(0.0, |l| l.windows(2).map(|w| (w[1] - w[0]).norm()).sum());
-        // A name that fits more than one edge needs the faces' keys, and a place if even those fit several,
-        // since two faces can meet more than once.
-        let shared = names.iter().filter(|n| **n == names[e]).count() > 1;
-        let between = if shared {
-            Value::obj(vec![("between", Value::Arr(key_pairs[e].iter().map(Value::str).collect()))])
-        } else {
-            Value::obj(vec![("between", Value::Arr(faces.clone()))])
-        };
-        // A sheet's boundary edge has one face, so it's picked by where it is.
-        let select = if uses[e].len() < 2 {
-            Value::obj(vec![("near", vec3(midpoint)), ("tolerance", Value::Num(1e-3))])
-        } else if shared && key_pairs.iter().filter(|p| **p == key_pairs[e]).count() > 1 {
-            let near = Value::obj(vec![("near", vec3(midpoint)), ("tolerance", Value::Num(1e-3))]);
-            Value::obj(vec![("both", Value::Arr(vec![between, near]))])
-        } else {
-            between
-        };
+        let select = edge_select_value(&picks[e]);
         let mut items = vec![
             ("name", Value::str(&names[e])),
             ("select", select),

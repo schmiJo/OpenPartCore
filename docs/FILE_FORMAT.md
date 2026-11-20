@@ -271,14 +271,29 @@ A name can cover several faces. A key adds what tells them apart, and each part 
 | `f4:side.1[f2:side.1]` | A shell's inner wall following `f2:side.1` |
 | `f5:wall.0[f2:side.3]` | The wall an extrude swept from the edge of its first face that's against `f2:side.3` |
 | `f5:end[f2:end]` | The far end of the extrude of face `f2:end` |
-| `f4:side.0#1` | Piece 1, counting faces that agree on everything else |
+| `f2:end{f6:side.1}` | The piece of `f2:end` that touches `f6:side.1`, where a cut has left several |
+| `f2:side.0{f4:region.1.side.0,f4:region.2.side.0}` | The piece that touches both, where no one face tells it apart |
+| `f4:side.0~1` | Piece 1 by where it is, where nothing it touches tells it apart |
+| `f4:side.0#1` | Face 1 by where it is, as files written before 2026-11-20 count them. Still read, no longer written |
 
-`face_keys(body)` gives each face a key that picks only that face, and `find_faces(body, key)` goes the other way. `{"on_face": key}` and `{"between": [key, key]}` take keys, so a
+`face_keys(body)` gives each face a key, and `find_faces(body, key)` goes the other way. `{"on_face": key}` and `{"between": [key, key]}` take keys, so a
 fillet can round one copy. `shell` and `draft` still take plain names, and refuse a key.
 
+- **A whole round face is one face.** The kernel keeps a whole cylinder, cone, sphere or turned face as two halves, and a key picks both,
+  as nothing but where the kernel put its seam tells them apart. The same goes for any faces with the same name, on one surface, that meet:
+  they're one piece. So a rim between such a face and another is one edge, `{"between": ["f2:end", "f4:side.0"]}`.
+- **A piece is told apart by what it touches,** not where it is, so that it keeps its key when a dimension moves pieces past each other, or
+  another piece comes or goes. What it touches is named without saying which piece, and faces from earlier features are chosen first, as what
+  a part started as lasts longer than what was done to it later.
+- **A key for one piece that comes to fit several is refused,** saying it can't tell which was meant, rather than being read as all of them.
+  So is a key whose piece has gone.
 - **A key is worked out from the model and isn't stored,** except where a selection uses one. It adds nothing to files that don't.
-- **A copy number stays with the copy,** so `@f5.1` stays the first copy when the pattern's count or spacing changes.
-- **A piece number goes by position,** in the surface's own coordinates. It's the weakest part: it renumbers if pieces are added or removed, or pass each other. Prefer anything else that tells them apart.
+- **A copy number stays with the copy,** so `@f5.1` stays the first copy when the pattern's count or spacing changes, and a key to a copy that
+  a smaller count leaves out is refused.
+- **Position is the last resort,** `~1`, for pieces that touch the same things, such as the two halves of a slot's wall that a bore cuts in
+  two. It counts only the pieces that agree on everything else, by their place in the surface's own coordinates, which move with the part:
+  first coordinate, then second, then third, to 10 nanometres. It goes wrong if a dimension moves them past each other along the coordinate
+  that decides.
 - **A face merged across a mirror plane** keeps the original's key, since it's now both.
 
 ## Sketch regions
@@ -307,13 +322,24 @@ Repeats make copies, each of which counts as its own region:
 | Form | Meaning |
 |---|---|
 | `"all"` | Every edge |
-| `{"between": ["f2:end", "f2:side.0"]}` | Edges between two named faces |
+| `{"between": ["f2:end", "f2:side.0"]}` | Edges between two named faces, or faces two keys pick |
+| `{"between": [a, b], "ends": [c]}` | Where faces `a` and `b` meet more than once: the place whose ends touch `c` |
+| `{"between": [a, b], "nth": 1}` | Where nothing at the ends tells them apart: place 1 by where it is, as for `~1` above |
 | `{"on_face": "f2:end"}` | Edges bounding a named face |
 | `{"near": [x, y, z], "tolerance": d}` | Edges whose midpoint is within `d` (default 0.001) |
 | `{"in_box": [[x, y, z], [x, y, z]]}` | Edges whose midpoint lies in a box |
 | `{"parallel": [x, y, z]}` | Straight edges along a direction |
 | `{"radius": r}` | Circular edges of a radius |
 | `{"any": [...]}`, `{"both": [...]}` | Union and intersection of selections |
+
+A place where two faces meet is a chain of edges on one curve, end to end, such as both halves of a rim, and a selection picks all of it.
+
+**What an app saves for a click** is what `edges_list` gives as each edge's `select`: the two faces' names if they meet nowhere else, their keys
+if the names fit other places, `ends` or `nth` if even the keys do, and `near` only for a sheet's open edge, which has one face.
+
+**A list of picks needs each one.** In `{"any": [...]}`, a pick that names something, `between`, `on_face` or `near`, and picks nothing now
+makes the feature refuse, naming the pick, rather than leaving that edge out without saying so. A query that asks for whatever fits,
+`radius`, `parallel` or `in_box`, may pick nothing. A selection on its own that picks nothing is refused, as before.
 
 ## Bodies
 
@@ -369,7 +395,7 @@ The new faces are named by this feature, as a sketch's are, and their keys say w
 | `f6:end`, `f6:start` | `f6:end[f2:end]` | The far end and the near one, holding the face they came from |
 | `f6:wall.0` | `f6:wall.0[f1:side.3]` | A wall swept from an edge of the faces picked by the first entry in `faces`, holding the face across that edge. `wall.1` is for the second entry, and so on |
 
-A name that picks several faces, such as a patterned boss's top, extrudes them all, and their walls share the entry's `wall.N`. A face two entries pick goes once, named for the first. A whole circle's edge gives two half walls under one key, as a whole circle always gives two half faces, and they're told apart by `#0` and `#1`.
+A name that picks several faces, such as a patterned boss's top, extrudes them all, and their walls share the entry's `wall.N`. A face two entries pick goes once, named for the first. A whole circle's edge gives two half walls, as a whole circle always gives two half faces, and they're one face with one key.
 
 With `"mode": "add"`, a wall that carries straight on from a face of the part, as the walls over a block's top do, becomes part of that face, which keeps its name. So `f6:wall.0` names only the walls that stand out on their own, and with `new_body` or `surface` it names them all.
 

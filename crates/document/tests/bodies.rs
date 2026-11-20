@@ -851,10 +851,17 @@ fn copies_of_a_body_are_bodies_with_names_of_their_own() {
     }
     assert!((vol(&o.bodies[0].body) - 50_000.0).abs() < 1e-9);
     assert!((o.bodies[4].body.aabb().center().x - 70.0).abs() < 1e-3);
-    // Every face of the whole has a key of its own.
-    let keys = face_keys(o.body.as_ref().unwrap());
-    let texts: std::collections::HashSet<String> = keys.iter().map(FaceKey::text).collect();
-    assert_eq!(texts.len(), keys.len());
+    // Every face of the whole has a key of its own, but for a cylinder's two halves, which are one face to look at.
+    let whole = o.body.as_ref().unwrap();
+    let keys = face_keys(whole);
+    let mut by: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (f, k) in keys.iter().enumerate() {
+        by.entry(k.text()).or_default().push(f);
+    }
+    for (k, list) in &by {
+        assert!(list.len() <= 2 && list.iter().all(|&f| whole.faces[f].surface == whole.faces[list[0]].surface), "{k} covers {list:?}");
+    }
+    assert_eq!(by.values().filter(|l| l.len() == 2).count(), 4, "each bolt's side is one face");
     // A mirror is the same.
     doc.with(Op::Mirror { of: vec![bolt], plane: PlaneRef::through(point3(50.0, 0.0, 0.0), point3(1.0, 0.0, 0.0)) });
     let o = ok(&mut doc);

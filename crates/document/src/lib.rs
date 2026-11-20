@@ -37,15 +37,21 @@ pub use coreshape_sketch::json::{self, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[doc(hidden)]
+pub mod follow;
 mod keys;
+mod picks;
 mod planes;
+#[doc(hidden)]
+pub mod trace;
 mod sheet_metal;
 mod up_to;
 pub use sheet_metal::{Alignment, BendPosition, Corner, FlatBend, FlatEdge, FlatPattern, HemKind};
 use keys::Keys;
 pub use planes::{default_x, line_ref_value, plane_ref_value, point_ref_value, read_line_ref, read_plane_ref, read_point_ref, AlongEdge, LineRef, PlaneDef, PlaneRef, PointRef, TangentAt};
 use planes::{Geo, Looker};
-pub use keys::{face_keys, find_faces, FaceKey};
+pub use keys::{face_keys, find_faces, find_one, FaceKey};
+pub use picks::{edge_picks, vertex_picks};
 
 /// The file format's name and the version this code writes.
 pub const FORMAT: &str = "coreshape-document";
@@ -494,6 +500,10 @@ pub enum EdgeSelect {
     OnFaceKey(FaceKey),
     /// Edges between the faces two keys pick.
     BetweenKeys(FaceKey, FaceKey),
+    /// One of the places where two faces meet more than once: a chain of edges between the faces two keys pick, which
+    /// ends at faces `ends` picks, and is the `nth` of those by where it is, if even that doesn't tell. A chain is edges
+    /// between the same two faces on one curve, meeting end to end, as the two halves of a rim do.
+    Chain { between: (FaceKey, FaceKey), ends: Vec<FaceKey>, nth: Option<u32> },
     /// Edges whose midpoint is within a distance of a point.
     Near { point: Point3, tolerance: Expr },
     /// Edges whose midpoint lies in a box.
@@ -529,6 +539,31 @@ impl EdgeSelect {
                 }
                 _ => false,
             },
+            EdgeSelect::Chain { between: (a, b), ends, nth } => {
+                let fits = |e: usize| {
+                    let between = match uses[e].as_slice() {
+                        [x, y] => {
+                            (keys.matches(body, x.0, a) && keys.matches(body, y.0, b)) || (keys.matches(body, x.0, b) && keys.matches(body, y.0, a))
+                        }
+                        _ => false,
+                    };
+                    between && {
+                        let chains = keys.chains(body);
+                        let at = &chains.ends[chains.of[e]];
+                        ends.iter().all(|k| at.iter().any(|&h| Keys::base_matches(body, h, k)))
+                    }
+                };
+                if !fits(e) {
+                    return Ok(false);
+                }
+                match nth {
+                    None => true,
+                    Some(n) => {
+                        let order = keys.chain_order(body, &edge_select_value(self).to_text(), a, fits);
+                        order.get(*n as usize) == Some(&keys.chains(body).of[e])
+                    }
+                }
+            }
             EdgeSelect::Near { point, tolerance } => body.edge_midpoint(e).dist(at(point)?) <= num(tolerance, env)?,
             EdgeSelect::InBox { min, max } => {
                 let (lo, hi, m) = (at(min)?, at(max)?, body.edge_midpoint(e));
@@ -574,11 +609,40 @@ impl EdgeSelect {
                 a.references(out);
                 b.references(out);
             }
+            EdgeSelect::Chain { between: (a, b), ends, .. } => {
+                for k in std::iter::once(a).chain([b]).chain(ends) {
+                    k.references(out);
+                }
+            }
             EdgeSelect::Any(list) | EdgeSelect::Both(list) => {
                 for q in list {
                     q.references(out);
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// Whether this names something in the model, as a click does, rather than asking for whatever fits, as a radius or a
+    /// box does. A list of picks needs each one to still be there.
+    fn is_pick(&self) -> bool {
+        match self {
+            EdgeSelect::Between(..) | EdgeSelect::OnFace(_) | EdgeSelect::OnFaceKey(_) | EdgeSelect::BetweenKeys(..) | EdgeSelect::Chain { .. } | EdgeSelect::Near { .. } => true,
+            EdgeSelect::Both(list) => list.iter().any(EdgeSelect::is_pick),
+            EdgeSelect::All | EdgeSelect::InBox { .. } | EdgeSelect::Parallel(_) | EdgeSelect::Radius(_) | EdgeSelect::Any(_) => false,
+        }
+    }
+
+    /// The face keys in it.
+    fn keys<'a>(&'a self, out: &mut Vec<&'a FaceKey>) {
+        match self {
+            EdgeSelect::OnFaceKey(k) => out.push(k),
+            EdgeSelect::BetweenKeys(a, b) => out.extend([a, b]),
+            EdgeSelect::Chain { between: (a, b), ends, .. } => {
+                out.extend([a, b]);
+                out.extend(ends);
+            }
+            EdgeSelect::Any(list) | EdgeSelect::Both(list) => list.iter().for_each(|q| q.keys(out)),
             _ => {}
         }
     }
@@ -2597,6 +2661,7 @@ impl Document {
                 steps.push(step(StepState::Blocked));
                 continue;
             }
+            trace::feature(feature.id.0);
             let mut own = match Self::signature(&feature.op, &env) {
                 Ok(s) => format!("{s} on {:?}", feature.scope),
                 Err(e) => {
@@ -2887,11 +2952,7 @@ impl Document {
                     let uses = everything.edge_uses();
                     let mut taken = vec![false; everything.faces.len()];
                     for (entry, key) in faces.iter().enumerate() {
-                        let found = find_faces(&everything, key);
-                        if found.is_empty() {
-                            return Err(Error::InvalidInput(format!("the face {} no longer exists in the model", key.text())));
-                        }
-                        for f in found {
+                        for f in keys::find_one(&everything, key)? {
                             // A face two entries pick goes once, named for the first.
                             if std::mem::replace(&mut taken[f], true) {
                                 continue;
@@ -3976,11 +4037,7 @@ fn keyed_faces(body: &Body, keys: &[FaceKey]) -> Result<Vec<usize>> {
     }
     let mut out = Vec::new();
     for key in keys {
-        let found = find_faces(body, key);
-        if found.is_empty() {
-            return Err(Error::InvalidInput(format!("the face {} no longer exists in the model", key.text())));
-        }
-        out.extend(found);
+        out.extend(keys::find_one(body, key)?);
     }
     out.sort_unstable();
     out.dedup();
@@ -3991,12 +4048,52 @@ fn keyed_faces(body: &Body, keys: &[FaceKey]) -> Result<Vec<usize>> {
 pub fn select_edges(query: &EdgeSelect, body: &Body, env: &Env) -> Result<Vec<usize>> {
     let uses = body.edge_uses();
     let keys = Keys::default();
-    let mut list = Vec::new();
-    for e in 0..body.edges.len() {
-        if query.matches(body, e, &uses, env, &keys)? {
-            list.push(e);
-        }
+    // A key made to pick one face that now fits several can't say which it meant.
+    let mut named = Vec::new();
+    query.keys(&mut named);
+    for key in named.into_iter().filter(|k| k.is_narrowed()) {
+        let found: Vec<usize> = (0..body.faces.len()).filter(|&f| keys.matches(body, f, key)).collect();
+        keys.one_piece(body, key, &found)?;
     }
+    // Each of a list's picks on its own, as each was made on its own, so that one that's gone isn't quietly left out.
+    let parts: Vec<&EdgeSelect> = match query {
+        EdgeSelect::Any(list) => list.iter().collect(),
+        one => vec![one],
+    };
+    let mut list = Vec::new();
+    for q in &parts {
+        let mut found = Vec::new();
+        for e in 0..body.edges.len() {
+            if q.matches(body, e, &uses, env, &keys)? {
+                found.push(e);
+            }
+        }
+        trace::record(body, trace::Kind::Edge, || edge_select_value(q).to_text(), &found);
+        if found.is_empty() && parts.len() > 1 && q.is_pick() {
+            return Err(Error::InvalidInput(format!(
+                "one of the {} edges picked, {}, no longer exists in the model, and leaving it out would change what this does without saying: pick it again, or take it off the list",
+                parts.len(),
+                edge_select_value(q).to_text()
+            )));
+        }
+        // Two places where the same faces meet, told apart by where they end, are one place each.
+        if let EdgeSelect::Chain { .. } = q {
+            let chains = keys.chains(body);
+            let mut which: Vec<usize> = found.iter().map(|&e| chains.of[e]).collect();
+            which.sort_unstable();
+            which.dedup();
+            if which.len() > 1 {
+                return Err(Error::InvalidInput(format!(
+                    "{} was one edge, and it now fits {} edges, so which it meant can't be told: pick it again",
+                    edge_select_value(q).to_text(),
+                    which.len()
+                )));
+            }
+        }
+        list.extend(found);
+    }
+    list.sort_unstable();
+    list.dedup();
     if list.is_empty() {
         return Err(Error::InvalidInput("the edges this feature refers to no longer exist in the model".into()));
     }
@@ -4078,17 +4175,22 @@ fn extrude_end_value(end: &ExtrudeEnd) -> Value {
         ExtrudeEnd::UpToPlane(plane) => Value::obj(vec![("type", Value::str("up_to_face")), ("face", plane_ref_value(plane))]),
         ExtrudeEnd::UpToPart(part) => Value::obj(vec![("type", Value::str("up_to_part")), ("part", Value::str(part.text()))]),
         ExtrudeEnd::UpToVertex(vertex) => {
-            let on = match vertex {
-                VertexRef::Point(p) => Value::obj(vec![("point", point3_value(p))]),
-                VertexRef::Faces { faces, near } => {
-                    let mut items = vec![("faces", Value::Arr(faces.iter().map(|k| Value::str(k.text())).collect()))];
-                    if let Some(p) = near {
-                        items.push(("near", point3_value(p)));
-                    }
-                    Value::obj(items)
-                }
-            };
+            let on = vertex_ref_value(vertex);
             Value::obj(vec![("type", Value::str("up_to_vertex")), ("vertex", on)])
+        }
+    }
+}
+
+/// A vertex reference as JSON, as an extrude's up_to_vertex and a projection take it.
+pub fn vertex_ref_value(vertex: &VertexRef) -> Value {
+    match vertex {
+        VertexRef::Point(p) => Value::obj(vec![("point", point3_value(p))]),
+        VertexRef::Faces { faces, near } => {
+            let mut items = vec![("faces", Value::Arr(faces.iter().map(|k| Value::str(k.text())).collect()))];
+            if let Some(p) = near {
+                items.push(("near", point3_value(p)));
+            }
+            Value::obj(items)
         }
     }
 }
@@ -4470,6 +4572,16 @@ pub fn edge_select_value(e: &EdgeSelect) -> Value {
         EdgeSelect::Between(a, b) => Value::obj(vec![("between", Value::Arr(vec![Value::str(a.name()), Value::str(b.name())]))]),
         EdgeSelect::OnFaceKey(k) => Value::obj(vec![("on_face", Value::str(k.text()))]),
         EdgeSelect::BetweenKeys(a, b) => Value::obj(vec![("between", Value::Arr(vec![Value::str(a.text()), Value::str(b.text())]))]),
+        EdgeSelect::Chain { between: (a, b), ends, nth } => {
+            let mut items = vec![("between", Value::Arr(vec![Value::str(a.text()), Value::str(b.text())]))];
+            if !ends.is_empty() {
+                items.push(("ends", Value::Arr(ends.iter().map(|k| Value::str(k.text())).collect())));
+            }
+            if let Some(n) = nth {
+                items.push(("nth", Value::Num(*n as f64)));
+            }
+            Value::obj(items)
+        }
         EdgeSelect::OnFace(f) => Value::obj(vec![("on_face", Value::str(f.name()))]),
         EdgeSelect::Near { point, tolerance } => {
             Value::obj(vec![("near", point3_value(point)), ("tolerance", expr_value(tolerance))])
@@ -4497,13 +4609,25 @@ pub fn read_edge_select(v: &Value) -> Result<EdgeSelect> {
             .collect()
     };
     if let Some(pair) = v.get("between") {
-        known_keys(v, &["between"])?;
+        known_keys(v, &["between", "ends", "nth"])?;
         return match pair.as_array() {
             Some([a, b]) => {
                 let key = |x: &Value| {
                     x.as_str().ok_or_else(|| Error::InvalidInput("\"between\" takes two face names".into())).and_then(FaceKey::parse)
                 };
                 let (a, b) = (key(a)?, key(b)?);
+                if v.get("ends").is_some() || v.get("nth").is_some() {
+                    let names = || Error::InvalidInput("\"ends\" takes a list of face names".into());
+                    let ends = match v.get("ends") {
+                        Some(list) => list.as_array().ok_or_else(names)?.iter().map(|x| x.as_str().ok_or_else(names).and_then(FaceKey::parse)).collect::<Result<Vec<_>>>()?,
+                        None => Vec::new(),
+                    };
+                    let nth = match v.get("nth") {
+                        Some(n) => Some(n.as_f64().filter(|n| *n >= 0.0 && n.fract() == 0.0 && *n < 1e6).ok_or_else(|| Error::InvalidInput("\"nth\" is a whole number from 0".into()))? as u32),
+                        None => None,
+                    };
+                    return Ok(EdgeSelect::Chain { between: (a, b), ends, nth });
+                }
                 Ok(if a.is_plain() && b.is_plain() { EdgeSelect::Between(a.face, b.face) } else { EdgeSelect::BetweenKeys(a, b) })
             }
             _ => Err(Error::InvalidInput("\"between\" takes two face names".into())),

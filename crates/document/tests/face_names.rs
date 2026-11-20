@@ -157,13 +157,17 @@ fn keys(doc: &mut Document) -> Vec<String> {
     let list = face_keys(&body);
     assert_eq!(list.len(), body.faces.len());
     for (i, key) in list.iter().enumerate() {
-        assert_eq!(find_faces(&body, key), vec![i], "{}", key.text());
+        // A key picks its face, and the other half of a round face, which is the same face to look at.
+        let found = find_faces(&body, key);
+        assert!(found.contains(&i) && found.len() <= 2, "{}: {found:?}", key.text());
+        assert!(found.iter().all(|&f| list[f] == *key && body.faces[f].surface == body.faces[i].surface), "{}", key.text());
         // The text is the whole key: it reads back as the same thing.
         let back = FaceKey::parse(&key.text()).unwrap();
         assert_eq!(&back, key, "{}", key.text());
     }
     let mut out: Vec<String> = list.iter().map(|k| k.text()).collect();
     out.sort();
+    out.dedup();
     out
 }
 
@@ -247,30 +251,40 @@ fn a_shells_inner_walls_keep_the_copy_of_the_face_they_follow() {
 }
 
 #[test]
-fn pieces_are_numbered_when_nothing_else_tells_them_apart() {
-    // The two halves of a whole circle.
+fn pieces_are_told_apart_by_what_they_touch() {
+    // The two halves of a whole circle are one face, with one key.
     let (mut doc, _) = block();
     let hole = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(6.0, 6.0, 2.0))]));
     let cut = doc.with(Op::extrude(hole, 0.0, 10.0, Mode::Remove));
     let list = keys(&mut doc);
-    assert!(list.contains(&"f4:side.0#0".to_string()) && list.contains(&"f4:side.0#1".to_string()), "{list:?}");
+    assert!(list.contains(&"f4:side.0".to_string()) && !list.iter().any(|k| k.starts_with("f4:side.0") && k != "f4:side.0"), "{list:?}");
 
-    // A pattern of that cut: two halves in each of three copies.
+    // A pattern of that cut: one key for each copy.
     doc.with(Op::Pattern { of: vec![cut], along: PatternPath::Linear { direction: LineRef::along(point3(1.0, 0.0, 0.0)), count: 3.0.into(), spacing: 10.0.into() } });
     let list = keys(&mut doc);
     for copy in 0..3 {
-        for piece in 0..2 {
-            let key = format!("f4:side.0@f5.{copy}#{piece}");
-            assert!(list.contains(&key), "{key} in {list:?}");
-        }
+        let key = format!("f4:side.0@f5.{copy}");
+        assert!(list.contains(&key), "{key} in {list:?}");
     }
 
-    // A slot cut across: each wall in two pieces.
+    // A slot cut across: each piece of the top by the side of the block it reaches, whichever way the surface's axes run.
     let (mut doc, _) = block();
     let slot = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(18.0, -1.0, 4.0, 32.0))]));
     doc.with(Op::extrude(slot, 0.0, 10.0, Mode::Remove));
     let list = keys(&mut doc);
-    assert!(list.contains(&"f2:end#0".to_string()) && list.contains(&"f2:end#1".to_string()), "{list:?}");
+    assert!(list.contains(&"f2:end{f2:side.1}".to_string()) && list.contains(&"f2:end{f2:side.3}".to_string()), "{list:?}");
+    let body = doc.rebuild(None).body.unwrap();
+    let at = |text: &str| body.face_aabb(find_faces(&body, &FaceKey::parse(text).unwrap())[0]).center();
+    assert!(at("f2:end{f2:side.3}").x < 18.0 && at("f2:end{f2:side.1}").x > 22.0);
+
+    // A disc with a bore across its top: both pieces of the top touch the disc's side and the bore, so only where they
+    // are tells them apart.
+    let mut doc = Document::new();
+    doc.with(Op::solid(Primitive::Cylinder { radius: 10.0.into(), height: 10.0.into() }, Placement::at(point3(0.0, 0.0, 0.0)), Mode::Add));
+    doc.with(Op::solid(Primitive::Cylinder { radius: 3.0.into(), height: 30.0.into() }, Placement::new(point3(0.0, -15.0, 10.0), point3(0.0, 1.0, 0.0), point3(1.0, 0.0, 0.0)), Mode::Remove));
+    let list = keys(&mut doc);
+    let top: Vec<&String> = list.iter().filter(|k| k.starts_with("f1:end")).collect();
+    assert_eq!(top, vec!["f1:end~0", "f1:end~1"], "{list:?}");
 }
 
 #[test]

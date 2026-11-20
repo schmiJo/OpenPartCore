@@ -66,7 +66,7 @@ fn deleting_a_hole_by_name_and_one_of_a_pattern_by_key() {
 
     let mut keyed = doc.clone();
     // The middle hole only: the first copy made by the pattern.
-    let key = FaceKey { face: hole.side(0), between: Vec::new(), copies: vec![coreshape::topo::CopyStep { feature: pattern.0, index: 1 }], piece: None };
+    let key = FaceKey::copy(hole.side(0), vec![coreshape::topo::CopyStep { feature: pattern.0, index: 1 }]);
     keyed.with(Op::DeleteFace { faces: vec![key] });
     let v = volume(&mut keyed);
     assert!((v - (6000.0 - 2.0 * one_hole)).abs() < 1e-9, "{v}");

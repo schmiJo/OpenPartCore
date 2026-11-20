@@ -34,7 +34,7 @@
     {"id": 6, "name": "Small end boss", "type": "extrude", "sketch": 5, "length": "T"},
     {"id": 7, "name": "Holes", "type": "sketch", "plane": {"origin": [0, 0, "-T / 2 - 1"]}, "regions": [{"outer": {"type": "circle", "r": "b1 / 2"}}, {"outer": {"type": "circle", "cx": 0, "cy": "L", "r": "b2 / 2"}}]},
     {"id": 8, "name": "Cut them", "type": "extrude", "sketch": 7, "length": "T + 2", "mode": "remove"},
-    {"id": 9, "name": "Rounds where the web meets the bosses", "type": "fillet", "edges": {"any": [{"between": ["f2:start", "f4:side.0"]}, {"between": ["f2:end", "f4:side.0"]}, {"between": ["f2:start", "f6:side.0"]}, {"between": ["f2:end", "f6:side.0"]}]}, "radius": 2}
+    {"id": 9, "name": "Rounds where the web meets the small end's boss", "note": "The big end's boss is flush with the web's arc, so its wall is part of the web's side and there's no edge to round there. This listed the two at the big end as well until picks that pick nothing were refused (2026-11-20): they never picked anything.", "type": "fillet", "edges": {"any": [{"between": ["f2:start", "f6:side.0"]}, {"between": ["f2:end", "f6:side.0"]}]}, "radius": 2}
   ],
   "always": {"genus": [2], "bounds": [["-R1", "-R1", "-T / 2"], ["R1", "L + R2", "T / 2"]]},
   "changes": [{"set": {"L": 120}}, {"set": {"web": 6}}, {"set": {"R2": 15}}]

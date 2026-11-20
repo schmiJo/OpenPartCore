@@ -244,7 +244,10 @@ Parts held by a fastened mate that's already met move as one and cost next to no
 - **Whether two faces start out facing each other.** A mate brings z axes together, and Onshape's help says the same, with a flip to reverse them. I couldn't find it stated what Onshape picks by default for two faces, so here, nothing is picked for you. Two outward faces end up with one inside the other until flipped.
 - **A sub-assembly's parts in STEP are flattened** into uses under one top product: the positions and parts are right, and its tree isn't kept. Reading a file keeps uses and part names, and also flattens.
 - **A mate connector's centroid on a curved outline** comes from 64 straight pieces per edge. On a 40 mm plate with a 10 mm hole a test holds it within 0.01 mm, which is fine for a place to put something, and it isn't used for anything measured.
-- **A connector found from a key that covers several faces** uses the first. Keys naming a piece (`#0`) avoid this.
+- **A connector found from a key that covers several faces** uses the first, which for a whole round face's two halves is the same
+  surface either way. A key made for one piece that comes to fit several is refused rather than read as the first. An edge connector
+  takes the first edge between its two faces, so on a whole rim, which is two half edges, its middle is the middle of whichever half
+  comes first: use the arc's center there.
 - **A mate in a sub-assembly can't be given a value from above,** or a relation added on it there. It moves when it's dragged, and its relations go on working. Those are for the tab that has it.
 - **One mechanism is on the page,** a slider-crank. It's a model with an assembly step, moved by its sliders, and one step of a drag took 11 to 37 ms on this desktop, in a browser, with other work running. There's no dragging parts or building an assembly on the page: that's the tools', and an app's.
 - **A crank that can't go round stays on its side of the gap.** With the rod shorter than the crank, it can't cross the angles the rod can't reach, so which stop it comes to depends on where it came from, as with the real thing. It says which.
@@ -539,13 +542,34 @@ are no faster than before. 400 holes: 0.44 s at once, 7.9 s one by one, and 19.7
   feature share a name; a whole circle's wall is two faces under one name; and a later cut leaves pieces under one name. Offset
   and draft keep one face per name, and a shell's inner walls are `f3:side.N` after the face they follow. A name disappears when its face does.
   [FILE_FORMAT.md](FILE_FORMAT.md) has the table and `crates/document/tests/face_names.rs` holds it to that.
-- **A face key tells them apart,** such as `f2:end@f5.1` or `f3:side.1[f2:end|f2:side.0]`: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
-- **Where keys stop being reliable.** A piece number, `#1`, goes by position, so it renumbers if pieces are added or removed or pass each other. At an exact coincidence, a cylinder's two halves can
-  also swap for a different pair: a step away from the crossed-cylinders demo's exactly coaxial default turned them 90 degrees. A key whose face is gone is refused and doesn't move to another face, but a piece
-  number can land on a different piece without any error. A face merged across a mirror plane answers only to the original's key.
+- **A face key tells them apart,** such as `f2:end@f5.1`, `f3:side.1[f2:end|f2:side.0]` or `f2:end{f6:side.1}`: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
+- **How well picks follow, measured** on 2026-11-20. Every reference in the 58 real parts was rewritten into what an app saves when each face,
+  edge and corner is clicked, and each dimension, counts aside, moved a quarter either way in steps of 2.5%. Each pick was followed by
+  continuity, as the face or edge nearest where it was, and a step that seemed to lose one was taken again in smaller steps.
+  `cargo run --release -p coreshape-document --example follow_picks -- '' 10 0.25` makes the table, and
+  `crates/mcp/tests/real_parts_picks.rs` holds it to that.
+
+  | | Moved to something else | Left out | Refused, saying why | Continuity couldn't tell |
+  |---|---|---|---|---|
+  | Keys before 2026-11-20 | 34 | 420 | 158 | 760 |
+  | Keys now | 0 | 0 | 1,063 | 306 |
+
+  The moves were a round face's two halves swapping numbers, in the pin-fin sink and the flanged bushing. What was left out was edges whose
+  face had gone, which a fillet or chamfer quietly did without: a sprocket's tooth tips running into one face as its seats moved in, a waffle
+  plate's outer pockets breaking through its sides, a bushing's groove. Those are now the refusals, and say which pick went. The demos'
+  sliders over their whole range moved or left out nothing either way, as their references are mostly names:
+  `cargo run --release -p coreshape-wasm --example follow_demos`.
+- **Where a pick can still go wrong without saying so.** Position is the last resort, `~1` and `"nth"`, for pieces or places nothing they
+  touch tells apart, such as the two halves of a slot's wall that a bore cuts in two, or the two lines where a round rail sits on a plate.
+  It goes wrong if a dimension moves them past each other along the coordinate that decides. A corner shared by the same faces more than
+  once is the one nearest where it was, with no check that it's clearly nearest, so a large change can swap two that are alike. A sheet's
+  open edge is picked by where it is, and refuses once it moves.
+- **What the measurement leaves out.** Counts: a copy keeps its number, so a pick on a copy stays on it and one on a copy a smaller count
+  leaves out is refused, which `picks_follow.rs` tests, as continuity can't follow a count. A plane, a sketch's face and a projection keep
+  the names they're written with, which pick a whole face, and aren't rewritten as clicks. Assemblies weren't measured. And the parts are
+  ones I modelled: other people's will find more.
+- **A face merged across a mirror plane** answers only to the original's key.
 - **`shell` and `draft` take plain names,** so they can't open or tilt the face of only one copy, and refuse a key rather than ignore part of it.
-- **How well keys hold,** on all the demos, comparing every key before and after one step of a random slider: 2,294 of 2,364 stayed on the same kind of face in about the same place. Of the other 70, 40 were
-  a bolt count changing, which moves the bolts, and 30 were the crossed cylinders leaving their exactly coaxial default, where faces vanish or change shape.
 - Coordinates beyond 10 km are refused, because tolerances stop meaning anything there.
 - A sketch can make at most 4000 regions, and a region can have at most 999 holes before names stop
   being unique. Constrained sketches name faces by entity, so they have no such limit.

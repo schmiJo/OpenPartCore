@@ -258,7 +258,7 @@ fn healed(doc: &mut Document, _: usize) {
     // The middle hole, and the fillet.
     doc.with(Op::DeleteFace {
         faces: vec![
-            FaceKey { face: hole.side(0), between: Vec::new(), copies: vec![coreshape::topo::CopyStep { feature: row.0, index: 1 }], piece: None },
+            FaceKey::copy(hole.side(0), vec![coreshape::topo::CopyStep { feature: row.0, index: 1 }]),
             FaceKey::plain(round.side(1)),
         ],
     });

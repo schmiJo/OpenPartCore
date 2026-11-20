@@ -35,7 +35,15 @@ pub(super) fn tools_to(profile: &Profile, frame: &Frame, opposite: bool, end: &E
             way.flat(profile, h, "that vertex")
         }
         ExtrudeEnd::UpToFace(key) => {
-            let surface = reach.all.iter().find_map(|h| find_faces(&h.body, key).first().map(|f| h.body.faces[*f].surface.clone()));
+            let mut surface = None;
+            for h in reach.all {
+                let found = find_faces(&h.body, key);
+                if let Some(f) = found.first() {
+                    crate::keys::Keys::default().one_piece(&h.body, key, &found)?;
+                    surface = Some(h.body.faces[*f].surface.clone());
+                    break;
+                }
+            }
             let surface = surface.ok_or_else(|| Error::InvalidInput(format!("the face {} no longer exists in the model", key.text())))?;
             way.to_surface(profile, &surface, &format!("the face {}", key.text()))
         }
@@ -128,7 +136,9 @@ pub(super) fn vertex_at(vertex: &VertexRef, all: &[Held], env: &Env) -> Result<V
         let body = &held.body;
         let mut common: Option<Vec<usize>> = None;
         for key in faces {
-            let mut here: Vec<usize> = find_faces(body, key).iter().flat_map(|f| body.faces[*f].loops.iter().flatten().map(|c| body.start_vertex(*c))).collect();
+            let found = find_faces(body, key);
+            crate::keys::Keys::default().one_piece(body, key, &found)?;
+            let mut here: Vec<usize> = found.iter().flat_map(|f| body.faces[*f].loops.iter().flatten().map(|c| body.start_vertex(*c))).collect();
             here.sort_unstable();
             here.dedup();
             common = Some(match common {
@@ -139,7 +149,7 @@ pub(super) fn vertex_at(vertex: &VertexRef, all: &[Held], env: &Env) -> Result<V
         found.extend(common.unwrap_or_default().into_iter().map(|v| body.vertices[v]));
     }
     let names: Vec<String> = faces.iter().map(FaceKey::text).collect();
-    match (found.as_slice(), near) {
+    let chosen = match (found.as_slice(), near) {
         ([], _) => Err(Error::InvalidInput(format!("no vertex is on all of {}", names.join(", ")))),
         ([one], _) => Ok(*one),
         (many, Some(near)) => {
@@ -147,7 +157,13 @@ pub(super) fn vertex_at(vertex: &VertexRef, all: &[Held], env: &Env) -> Result<V
             Ok(many.iter().copied().fold(many[0], |best, v| if v.dist(near) < best.dist(near) { v } else { best }))
         }
         (many, None) => Err(Error::InvalidInput(format!("{} vertices are on all of {}: name one more face, or say which with \"near\"", many.len(), names.join(", ")))),
+    };
+    if crate::trace::on() {
+        let everywhere: Vec<Vec<Vec3>> = all.iter().flat_map(|h| h.body.vertices.iter().map(|v| vec![*v])).collect();
+        let picked = chosen.as_ref().ok().and_then(|p| everywhere.iter().position(|v| v[0] == *p)).into_iter().collect();
+        crate::trace::record_among(std::sync::Arc::new(everywhere), crate::trace::Kind::Vertex, crate::vertex_ref_value(vertex).to_text(), picked);
     }
+    chosen
 }
 
 /// A length as it reads best: to six places, without the zeros after them, so 5 and not 5.000000.

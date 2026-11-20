@@ -466,11 +466,7 @@ impl<'a> Looker<'a> {
     fn faces(&self, key: &FaceKey) -> Result<(&Arc<Body>, Vec<usize>)> {
         let gone = || bad(format!("the face {} no longer exists in the model", key.text()));
         let body = self.whole.get_or_init(|| whole_of(self.all)).as_ref().ok_or_else(gone)?;
-        let found = find_faces(body, key);
-        if found.is_empty() {
-            return Err(gone());
-        }
-        Ok((body, found))
+        Ok((body, crate::keys::find_one(body, key)?))
     }
 
     /// The one face a key picks, or the first of several that are all on one surface, as a circle's two halves are.

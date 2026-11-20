@@ -39,7 +39,9 @@ under the root, which is the current folder unless given. A path that leaves it,
 | `interference_check`, `bom`, `assembly_import_step` | What overlaps and by how much, how many of each part, and a STEP assembly as new tabs |
 
 Each face in `faces_list` has a `key` as well as a `name`, since a name can cover several faces, and `highlight_faces` and edge selections take either. An edge's `select` uses keys when names alone
-would fit several edges: see [FILE_FORMAT.md](FILE_FORMAT.md#face-keys).
+would fit several edges, and where even those fit several places, what's at its ends or its place among them: see
+[FILE_FORMAT.md](FILE_FORMAT.md#face-keys) and [edge selections](FILE_FORMAT.md#edge-selections). A whole round face's two
+halves share one key, so picking either picks the face.
 
 ## Several bodies
 

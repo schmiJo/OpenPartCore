@@ -986,7 +986,8 @@ mod tests {
         }
     }
 
-    /// Every face of every demo has a key that picks out only that face, wherever the sliders are.
+    /// Every face of every demo has a key that picks out only that face, and the rest of its surface where the kernel
+    /// keeps it in several faces, as the halves of a round face, wherever the sliders are.
     #[test]
     fn every_face_has_a_key_of_its_own_at_random_slider_positions() {
         use coreshape_document::{face_keys, find_faces, FaceKey};
@@ -1004,9 +1005,12 @@ mod tests {
                 let doc = docs.entry(variant).or_insert_with(|| m.document(variant));
                 m.apply(doc, &values);
                 let Some(body) = doc.rebuild(None).body else { continue };
-                for (i, key) in face_keys(&body).iter().enumerate() {
+                let keys = face_keys(&body);
+                for (i, key) in keys.iter().enumerate() {
                     let back = FaceKey::parse(&key.text()).unwrap();
-                    assert_eq!(find_faces(&body, &back), vec![i], "{} {values:?}: {}", m.id, key.text());
+                    let found = find_faces(&body, &back);
+                    let halves = found.iter().all(|&f| keys[f] == *key && body.faces[f].surface == body.faces[i].surface);
+                    assert!(found.contains(&i) && halves, "{} {values:?}: {} picks {found:?}", m.id, key.text());
                 }
             }
         }
@@ -1056,7 +1060,7 @@ mod tests {
                 let Some(after) = outcome.body else { continue };
                 let (a, b) = (index(&before), index(&after));
                 for (key, (kind, at)) in &a {
-                    if m.id == "screw" && key.piece.is_some() {
+                    if m.id == "screw" && key.nth.is_some() {
                         continue;
                     }
                     compared += 1;

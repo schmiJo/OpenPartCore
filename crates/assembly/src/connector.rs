@@ -6,7 +6,7 @@ use coreshape::math::*;
 use coreshape::topo::Body;
 use coreshape::{Curve, Surface};
 use coreshape_document::json::Value;
-use coreshape_document::{find_faces, FaceKey};
+use coreshape_document::{find_faces, find_one, FaceKey};
 
 /// A place on a face.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -213,6 +213,8 @@ impl Anchor {
             Anchor::Face { key, point } => {
                 let found = find_faces(body, key);
                 let face = found.first().ok_or_else(|| Error::InvalidInput(format!("the face {} isn't on this part", key.text())))?;
+                // A key made for one piece that now fits several can't say which, so it isn't read as the first.
+                find_one(body, key)?;
                 face_frame(body, *face, *point)
             }
             Anchor::Edge { faces, point } => {
