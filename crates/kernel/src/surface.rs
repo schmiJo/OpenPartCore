@@ -576,6 +576,105 @@ pub fn refine_on_two(a: &Surface, b: &Surface, p: Vec3) -> Option<Vec3> {
     ok.then_some(p)
 }
 
+/// Where on a free-form surface to start looking for the foot of points near `seed`, which is on it: its parameters there.
+fn hint_at(s: &Surface, seed: Vec3) -> Option<(f64, f64)> {
+    match s {
+        Surface::Free { frame, patch } => {
+            let foot = patch.foot(frame.to_local(seed));
+            Some((foot.u, foot.v))
+        }
+        _ => None,
+    }
+}
+
+/// A surface's signed distance and normal at a point near it, for a free-form one by Newton's method from `hint`, which it
+/// moves along, and how far the point is from a point on the surface, which the true distance can't be more than. Nothing
+/// if that doesn't settle.
+fn near_side(s: &Surface, p: Vec3, hint: &mut Option<(f64, f64)>) -> Option<(f64, Vec3, f64)> {
+    match s {
+        Surface::Free { frame, patch } => {
+            let (u, v) = (*hint)?;
+            let foot = patch.foot_from(frame.to_local(p), u, v)?;
+            *hint = Some((foot.u, foot.v));
+            let normal = frame.dir_to_world(foot.normal);
+            let height = (frame.to_local(p) - foot.at).dot(foot.normal);
+            let distance = if foot.boundary { height } else if height < 0.0 { -foot.distance } else { foot.distance };
+            Some((distance, normal, foot.distance))
+        }
+        _ => {
+            let d = s.sdf(p);
+            Some((d, s.normal(p), d.abs()))
+        }
+    }
+}
+
+/// Where on two surfaces to start looking for the feet of a point: for each free-form one, the parameters of a foot of a
+/// point close by.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hints(Option<(f64, f64)>, Option<(f64, f64)>);
+
+impl Hints {
+    /// From `seed`, a point on or close to both surfaces.
+    pub fn at(a: &Surface, b: &Surface, seed: Vec3) -> Hints {
+        Hints(hint_at(a, seed), hint_at(b, seed))
+    }
+}
+
+/// `refine_on_two` from a point near where the surfaces cross, with `seed` a point close by that's on both. On a
+/// free-form surface, each step goes by Newton's method from where the last one was on it, in place of a search over the
+/// whole surface, which is most of the cost of a point off it. What it ends at has to pass the same test as
+/// `refine_on_two`'s, and if anything's amiss, that does the work instead, so the answer can only come sooner.
+pub fn refine_on_two_from(a: &Surface, b: &Surface, p: Vec3, seed: Vec3) -> Option<Vec3> {
+    if !matches!(a, Surface::Free { .. }) && !matches!(b, Surface::Free { .. }) {
+        return refine_on_two(a, b, p);
+    }
+    refine_on_two_hinted(a, b, p, &mut Hints::at(a, b, seed))
+}
+
+/// `refine_on_two_from`, starting from `hints`, which it leaves at the answer, for the next point along.
+pub fn refine_on_two_hinted(a: &Surface, b: &Surface, p: Vec3, hints: &mut Hints) -> Option<Vec3> {
+    let found = refine_hinted(a, b, p, hints);
+    if found.is_none() {
+        // Wherever the full search goes, the next point along starts from there.
+        let full = refine_on_two(a, b, p);
+        if let Some(q) = full {
+            *hints = Hints::at(a, b, q);
+        }
+        return full;
+    }
+    found
+}
+
+fn refine_hinted(a: &Surface, b: &Surface, p: Vec3, hints: &mut Hints) -> Option<Vec3> {
+    let (ha, hb) = (&mut hints.0, &mut hints.1);
+    let free = |s: &Surface, h: &Option<(f64, f64)>| !matches!(s, Surface::Free { .. }) || h.is_some();
+    if !free(a, ha) || !free(b, hb) {
+        return None;
+    }
+    let mut p = p;
+    for _ in 0..8 {
+        let (Some((da, na, _)), Some((db, nb, _))) = (near_side(a, p, ha), near_side(b, p, hb)) else {
+            return None;
+        };
+        if da.abs() < 1e-13 && db.abs() < 1e-13 {
+            break;
+        }
+        let g = na.dot(nb);
+        let det = 1.0 - g * g;
+        if det < 1e-14 {
+            return None;
+        }
+        let ca = (da - db * g) / det;
+        let cb = (db - da * g) / det;
+        p -= na * ca + nb * cb;
+    }
+    // Close to a point on each surface, it's closer still to the surface, which is `refine_on_two`'s test.
+    match (near_side(a, p, ha), near_side(b, p, hb)) {
+        (Some((_, _, ra)), Some((_, _, rb))) if ra < TOL * 0.1 && rb < TOL * 0.1 => Some(p),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

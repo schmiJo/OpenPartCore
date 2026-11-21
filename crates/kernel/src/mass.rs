@@ -120,6 +120,15 @@ fn traced_nodes(body: &Body, edge: usize, e: &crate::topo::Edge, rule: &[(f64, f
     if let Some(found) = TRACED.with(|t| t.borrow().get(&key).cloned()) {
         return found;
     }
+    let nodes = traced_nodes_of(e, rule);
+    TRACED.with(|t| {
+        t.borrow_mut().insert(key, nodes.clone());
+    });
+    nodes
+}
+
+/// The nodes of a traced edge, for a rule, worked out afresh.
+fn traced_nodes_of(e: &crate::topo::Edge, rule: &[(f64, f64)]) -> TracedNodes {
     let mut nodes = Vec::new();
     if ROUGHLY.with(|r| r.get()) {
         let (a, b) = (e.t0, e.t1);
@@ -131,11 +140,7 @@ fn traced_nodes(body: &Body, edge: usize, e: &crate::topo::Edge, rule: &[(f64, f
                 nodes.push((e.curve.eval(t), e.curve.derivative(t) * (weight * half)));
             }
         }
-        let nodes = std::sync::Arc::new(nodes);
-        TRACED.with(|t| {
-            t.borrow_mut().insert(key, nodes.clone());
-        });
-        return nodes;
+        return std::sync::Arc::new(nodes);
     }
     // Between its samples and the knot lines it crosses, a traced curve's pieces are short and smooth, so a third
     // of the points does it, and on a free-form surface each point costs enough to be worth saving. The comparison
@@ -150,11 +155,7 @@ fn traced_nodes(body: &Body, edge: usize, e: &crate::topo::Edge, rule: &[(f64, f
             nodes.push((e.curve.eval(t), e.curve.derivative(t) * (weight * half)));
         }
     }
-    let nodes = std::sync::Arc::new(nodes);
-    TRACED.with(|t| {
-        t.borrow_mut().insert(key, nodes.clone());
-    });
-    nodes
+    std::sync::Arc::new(nodes)
 }
 
 /// Where to break a traced edge for quadrature: at its samples, and wherever it crosses a knot line of a free-form
@@ -167,30 +168,60 @@ fn traced_breaks(e: &crate::topo::Edge) -> Vec<f64> {
     };
     for surface in [&c.surfaces.0, &c.surfaces.1] {
         let Surface::Free { frame, patch } = surface else { continue };
-        let at = |t: f64| {
-            let foot = patch.foot(frame.to_local(e.curve.eval(t)));
+        // Where a point of the edge is on the surface. It's on it, so Newton from where a point close by was is the foot,
+        // and a full search is only for when that doesn't settle.
+        let at = |t: f64, near: &mut Option<(f64, f64)>| -> [f64; 2] {
+            let p = frame.to_local(e.curve.eval(t));
+            if let Some(f) = near.and_then(|(u, v)| patch.foot_from(p, u, v)).filter(|f| f.distance < TOL) {
+                *near = Some((f.u, f.v));
+                return [f.u, f.v];
+            }
+            let foot = patch.foot(p);
+            *near = Some((foot.u, foot.v));
             [foot.u, foot.v]
         };
         let knots = patch.interior_knots();
         let mut crossings = Vec::new();
+        let mut near = None;
         for w in breaks.windows(2) {
-            let (a, b) = (at(w[0]), at(w[1]));
+            let (a, b) = (at(w[0], &mut near), at(w[1], &mut near));
             for (direction, list) in knots.iter().enumerate() {
                 for &k in list.iter() {
                     if (a[direction] - k) * (b[direction] - k) >= 0.0 {
                         continue;
                     }
-                    let (mut lo, mut hi, mut below) = (w[0], w[1], a[direction] < k);
-                    for _ in 0..40 {
-                        let m = (lo + hi) / 2.0;
-                        if (at(m)[direction] < k) == below {
-                            lo = m;
-                            below = at(m)[direction] < k;
+                    // False position, halving the end that stays put (the Illinois rule), which closes in on a crossing
+                    // in a few steps where halving the interval took forty.
+                    let mut from = near;
+                    let mut g = |t: f64| at(t, &mut from)[direction] - k;
+                    let (mut lo, mut glo, mut hi, mut ghi) = (w[0], a[direction] - k, w[1], b[direction] - k);
+                    let mut kept = 0i8;
+                    let mut found = None;
+                    for _ in 0..60 {
+                        let mut m = (lo * ghi - hi * glo) / (ghi - glo);
+                        if !(m > lo && m < hi) {
+                            m = (lo + hi) / 2.0;
+                        }
+                        let gm = g(m);
+                        if gm.abs() <= 1e-14 * (1.0 + k.abs()) || hi - lo <= 1e-13 * (w[1] - w[0]) {
+                            found = Some(m);
+                            break;
+                        }
+                        if (gm < 0.0) == (ghi < 0.0) {
+                            (hi, ghi) = (m, gm);
+                            if kept == -1 {
+                                glo /= 2.0;
+                            }
+                            kept = -1;
                         } else {
-                            hi = m;
+                            (lo, glo) = (m, gm);
+                            if kept == 1 {
+                                ghi /= 2.0;
+                            }
+                            kept = 1;
                         }
                     }
-                    crossings.push((lo + hi) / 2.0);
+                    crossings.push(found.unwrap_or((lo + hi) / 2.0));
                 }
             }
         }
@@ -359,6 +390,49 @@ fn face_integrals_with(body: &Body, face: &Face, reference: Vec3, along_edges: &
             }
             (flux / 3.0, area * sign)
         }
+        Surface::Free { patch, .. } if !patch.has_poles() && along_y_is_shorter(body, face, patch) => {
+            // The same as below, with the inner integral up the chart in place of across it, for a face that crosses
+            // fewer knot lines that way: each point of the boundary pays for every knot its integral crosses, and a
+            // long face across many of them is most of the work. By Green's theorem the integral of f over the region
+            // is minus the integral of H dx round its boundary, where H is the integral of f up from a fixed height.
+            let (lo, hi) = body_chart_range_y(body, face);
+            let y_ref = (lo + hi) / 2.0;
+            let knots = patch.chart_breaks_y();
+            let rule = gauss_legendre(patch.quadrature_points());
+            let inner = |at: Vec2| -> (f64, f64) {
+                let (from, to) = (y_ref.min(at.y), y_ref.max(at.y));
+                let sense = if at.y >= y_ref { 1.0 } else { -1.0 };
+                let mut stops = vec![from];
+                stops.extend(knots.iter().copied().filter(|k| *k > from && *k < to));
+                stops.push(to);
+                let (mut h_flux, mut h_area) = (0.0, 0.0);
+                for w in stops.windows(2) {
+                    let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
+                    for &(y, weight) in &rule {
+                        let (q, sx, sy) = surface.chart_derivs(chart, v2(at.x, mid + half * y));
+                        let n = sx.cross(sy);
+                        h_flux += weight * half * (q - reference).dot(n);
+                        h_area += weight * half * n.norm();
+                    }
+                }
+                (sense * h_flux, sense * h_area)
+            };
+            let (mut flux, mut area) = (0.0, 0.0);
+            for lp in &face.loops {
+                for &c in lp {
+                    for_each_boundary_node(body, c, along_edges, |p, dp| {
+                        let (uv, duv) = chart_velocity(surface, chart, p, dp);
+                        if duv.x == 0.0 {
+                            return;
+                        }
+                        let (h_flux, h_area) = inner(uv);
+                        flux -= h_flux * duv.x;
+                        area -= h_area * duv.x;
+                    });
+                }
+            }
+            (flux / 3.0, area * sign)
+        }
         Surface::Free { patch, .. } => {
             // The same as the general case below, with the inner integral stopping at the knots, where the
             // surface is less smooth than a Gauss rule expects.
@@ -475,6 +549,30 @@ fn chart_velocity(surface: &Surface, chart: &crate::surface::Chart, p: Vec3, dp:
     let (r1, r2) = (dp.dot(sx), dp.dot(sy));
     let det = e * g - f * f;
     (uv, v2((r1 * g - r2 * f) / det, (e * r2 - f * r1) / det))
+}
+
+/// Whether a free-form face crosses fewer of its surface's knot lines going up its chart than across it.
+fn along_y_is_shorter(body: &Body, face: &Face, patch: &crate::patch::Patch) -> bool {
+    let (x0, x1) = body_chart_range(body, face);
+    let (y0, y1) = body_chart_range_y(body, face);
+    let across = patch.chart_breaks_x().iter().filter(|k| **k > x0 && **k < x1).count();
+    let up = patch.chart_breaks_y().iter().filter(|k| **k > y0 && **k < y1).count();
+    up < across
+}
+
+/// How far a face goes up its chart.
+fn body_chart_range_y(body: &Body, face: &Face) -> (f64, f64) {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for lp in &face.loops {
+        for &c in lp {
+            for i in 0..=8 {
+                let uv = face.surface.to_chart(&face.chart, body.coedge_point(c, i as f64 / 8.0));
+                lo = lo.min(uv.y);
+                hi = hi.max(uv.y);
+            }
+        }
+    }
+    (lo, hi)
 }
 
 fn body_chart_range(body: &Body, face: &Face) -> (f64, f64) {

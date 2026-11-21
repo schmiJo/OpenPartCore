@@ -297,33 +297,58 @@ pub fn tessellate(body: &Body, params: &TessParams) -> Result<Mesh> {
     }
     let min_gap = min_sample_gap(bounds.diagonal());
     let mut last_error = None;
+    let line = |i: usize, density: &[usize], graded: &[bool]| edge_polyline(&body.edges[i], &body.vertices, params, density[i], graded[i], min_gap);
+    let mut polylines: Vec<Vec<Vec3>> = (0..body.edges.len()).map(|i| line(i, &density, &graded)).collect();
+    // Each face's own triangles, so that another try only does again the faces whose edges it changed. A face depends on
+    // nothing but its own edges, so the rest would come out the same, and with hundreds of parts one face that needs
+    // more samples would otherwise mean meshing them all again.
+    let mut pieces: Vec<Option<Mesh>> = vec![None; body.faces.len()];
+    let mut faces_of: Vec<Vec<usize>> = vec![Vec::new(); body.edges.len()];
+    for (f, face) in body.faces.iter().enumerate() {
+        for c in face.loops.iter().flatten() {
+            faces_of[c.edge].push(f);
+        }
+    }
     for _attempt in 0..8 {
-        let mut polylines: Vec<Vec<Vec3>> = body
-            .edges
-            .iter()
-            .enumerate()
-            .map(|(i, e)| edge_polyline(e, &body.vertices, params, density[i], graded[i], min_gap))
-            .collect();
-        let mut mesh = Mesh::default();
         // Every face that fails gets its more samples at once, or a part with many thin faces runs out of tries.
         let mut crossed = false;
         for f in 0..body.faces.len() {
-            if let Err(e) = tessellate_face(body, f, &mut polylines, params, &mut mesh) {
-                crossed = true;
-                last_error = Some(e);
-                for c in body.faces[f].loops.iter().flatten() {
-                    graded[c.edge] = true;
-                    needs_more[c.edge] = true;
+            if pieces[f].is_some() {
+                continue;
+            }
+            let mut piece = Mesh::default();
+            match tessellate_face(body, f, &mut polylines, params, &mut piece) {
+                Ok(()) => pieces[f] = Some(piece),
+                Err(e) => {
+                    crossed = true;
+                    last_error = Some(e);
+                    for c in body.faces[f].loops.iter().flatten() {
+                        graded[c.edge] = true;
+                        needs_more[c.edge] = true;
+                    }
                 }
             }
         }
         if !crossed {
+            let mut mesh = Mesh::default();
+            for piece in pieces.into_iter().flatten() {
+                let base = mesh.positions.len() as u32;
+                mesh.positions.extend(piece.positions);
+                mesh.normals.extend(piece.normals);
+                mesh.triangles.extend(piece.triangles.iter().map(|t| t.map(|v| v + base)));
+                mesh.face_of_triangle.extend(piece.face_of_triangle);
+            }
             mesh.edge_lines = polylines;
             return Ok(mesh);
         }
-        for (e, more) in needs_more.iter_mut().enumerate() {
-            if std::mem::take(more) {
+        for e in 0..body.edges.len() {
+            if std::mem::take(&mut needs_more[e]) {
                 density[e] *= 2;
+                polylines[e] = line(e, &density, &graded);
+                // The faces on both sides of it have to agree with it.
+                for &f in &faces_of[e] {
+                    pieces[f] = None;
+                }
             }
         }
     }
@@ -510,7 +535,7 @@ fn build_face(
     }
     let extent = (hi.x - lo.x).max(hi.y - lo.y).max(1e-9);
     let even = (GRID - 2) as f64 / extent;
-    let scale = if matches!(surface, Surface::Free { .. }) && hi.x > lo.x && hi.y > lo.y {
+    let scale = if !matches!(surface, Surface::Plane(_)) && hi.x > lo.x && hi.y > lo.y {
         // Per step along each way, as evenly as the grid will allow, and neither axis squeezed too far.
         let (nx, ny) = steps_needed(surface, chart, lo, hi, params);
         let (mut sx, mut sy) = (nx / (hi.x - lo.x), ny / (hi.y - lo.y));

@@ -7,6 +7,7 @@
 
 use crate::curve::Curve;
 use crate::error::{Error, Result};
+use crate::hash::HashMap;
 use crate::math::*;
 use crate::surface::{Chart, Surface};
 
@@ -404,6 +405,72 @@ impl Body {
         }
         out.shells = self.shells.clone();
         out
+    }
+
+    /// Separates pinches: a vertex where two fans of faces meet at a point, and nothing else joins them, becomes a vertex for
+    /// each fan, all at the same place, as a Boolean leaves them. Gives where each was. A file can have a hole's rim
+    /// touching a face's outline at a point, say, sharing a vertex that this kernel needs as two.
+    pub fn split_pinches(&mut self) -> Vec<Vec3> {
+        // Node 2e is edge e's v0 end, and 2e + 1 its v1 end. Each pair of coedges meeting at a corner of a loop joins the
+        // ends they meet at, and an edge's end is the same node for both faces using it, so the fans come out as the groups.
+        fn find(p: &mut [usize], x: usize) -> usize {
+            let mut r = x;
+            while p[r] != r {
+                p[r] = p[p[r]];
+                r = p[r];
+            }
+            r
+        }
+        let mut parent: Vec<usize> = (0..self.edges.len() * 2).collect();
+        for f in &self.faces {
+            for lp in &f.loops {
+                for k in 0..lp.len() {
+                    let (a, b) = (lp[k], lp[(k + 1) % lp.len()]);
+                    // Where a ends and b starts.
+                    let n1 = a.edge * 2 + usize::from(!a.reversed);
+                    let n2 = b.edge * 2 + usize::from(b.reversed);
+                    let (r1, r2) = (find(&mut parent, n1), find(&mut parent, n2));
+                    if r1 != r2 {
+                        parent[r1] = r2;
+                    }
+                }
+            }
+        }
+        // The first fan found at a vertex keeps it, and each further one gets a vertex of its own.
+        let mut owner: HashMap<usize, usize> = HashMap::default();
+        let mut fan_vertex: HashMap<usize, usize> = HashMap::default();
+        let mut split = Vec::new();
+        for e in 0..self.edges.len() {
+            for end in 0..2 {
+                let root = find(&mut parent, e * 2 + end);
+                let v = if end == 0 { self.edges[e].v0 } else { self.edges[e].v1 };
+                let now = match fan_vertex.get(&root) {
+                    Some(&w) => w,
+                    None => {
+                        let w = match owner.get(&v) {
+                            None => {
+                                owner.insert(v, root);
+                                v
+                            }
+                            Some(_) => {
+                                if !split.iter().any(|p: &Vec3| *p == self.vertices[v]) {
+                                    split.push(self.vertices[v]);
+                                }
+                                self.add_vertex(self.vertices[v])
+                            }
+                        };
+                        fan_vertex.insert(root, w);
+                        w
+                    }
+                };
+                if end == 0 {
+                    self.edges[e].v0 = now;
+                } else {
+                    self.edges[e].v1 = now;
+                }
+            }
+        }
+        split
     }
 
     /// Records that every face here is copy `index` made by `feature`.

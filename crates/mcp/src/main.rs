@@ -27,6 +27,11 @@ fn main() {
         }
     }
     let mut server = Server::new(root);
+    // How far a long call has got, as it goes, between the answers.
+    server.set_notifier(|line| {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}").and_then(|_| out.flush());
+    });
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     for line in stdin.lock().lines() {

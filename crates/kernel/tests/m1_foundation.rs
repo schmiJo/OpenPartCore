@@ -226,3 +226,32 @@ fn stl_output_has_the_right_size() {
     let text = coreshape::export::stl::write_ascii(&mesh, "cyl");
     assert_eq!(text.matches("facet normal").count(), mesh.triangles.len());
 }
+
+#[test]
+fn a_thin_ring_meshes_in_long_triangles_and_stays_within_its_tolerances() {
+    // A fillet's shape: a torus whose tube is fifty times thinner than the ring. Its triangles have to be short across the
+    // tube for the angle there, and needn't be along the ring. A grid as fine both ways as the tube needs took 155,846.
+    let (major, minor) = (5.0, 0.1);
+    let b = torus(&off_world(), major, minor, 1).unwrap();
+    let params = TessParams { chord: 0.5, angle: 11f64.to_radians() };
+    let mesh = tessellate(&b, &params).unwrap();
+    assert_eq!(mesh.open_edge_count(), 0);
+    assert!(mesh.triangles.len() < 10_000, "{} triangles", mesh.triangles.len());
+    // Every vertex on the surface, every triangle's middle within the chord of it, and neighbouring normals within the angle.
+    let frame = off_world();
+    let tube = |p: Vec3| {
+        let l = frame.to_local(p);
+        (l.x.hypot(l.y) - major).hypot(l.z) - minor
+    };
+    for p in &mesh.positions {
+        assert!(tube(*p).abs() < 1e-9);
+    }
+    for t in &mesh.triangles {
+        let [a, c, d] = t.map(|i| mesh.positions[i as usize]);
+        assert!(tube((a + c + d) / 3.0).abs() <= params.chord);
+        let [na, nc] = [t[0], t[1]].map(|i| mesh.normals[i as usize]);
+        assert!(na.dot(nc).clamp(-1.0, 1.0).acos() <= 2.0 * params.angle, "normals {na:?} {nc:?}");
+    }
+    let exact = 2.0 * PI * PI * major * minor * minor;
+    assert!((mesh.volume() - exact).abs() / exact < 3e-2, "{} against {exact}", mesh.volume());
+}

@@ -16,11 +16,11 @@ under the root, which is the current folder unless given. A path that leaves it,
 | Tool | What it does |
 |---|---|
 | `format_guide` | The fields of every feature, constraint and edge selection |
-| `document_new`, `document_open`, `document_save`, `document_show` | The whole document |
+| `document_new`, `document_open`, `document_save`, `document_show` | The whole document. `document_show` with `omit_texts_over` gives a large text, such as an imported STEP file's, by its size and SHA-256, and `document_open` takes the text back in `blobs`: see [FILE_FORMAT.md](FILE_FORMAT.md#features) |
 | `parameter_set`, `parameter_remove` | Named values and expressions |
 | `feature_add`, `feature_edit`, `feature_rename`, `feature_suppress`, `feature_delete`, `feature_move`, `features_list` | The history. Each change rebuilds and reports what happened. |
-| `rebuild` | Each feature's state, and the solid's volume, area, size and validity. `upto` shows an earlier state. |
-| `bodies_list` | With several bodies: each one's name, what made it, volume, area, faces and size |
+| `rebuild` | Each feature's state, and the solid's volume, area, size and validity. `upto` shows an earlier state. A feature that built but has something to say, such as the parts of a STEP file it left out and why, has `notes`, and they're in the summary's `notes` too |
+| `bodies_list` | With several bodies: each one's id, its `name` where it has one, such as a STEP part's, what made it, volume, area, faces and size |
 | `faces_list` | Stable names, surface type, area, center, normal, radius, and a round face's axis. With several bodies, whose each is, and `body` keeps to one |
 | `edges_list` | Stable names, curve type, length and ends, a selection ready to use in a fillet or chamfer, and each end named as `up_to_vertex` takes it. `body` keeps to one |
 | `export` | STEP, STL or the native format. Every body, or the one `body` names |
@@ -43,6 +43,27 @@ would fit several edges, and where even those fit several places, what's at its 
 [FILE_FORMAT.md](FILE_FORMAT.md#face-keys) and [edge selections](FILE_FORMAT.md#edge-selections). A whole round face's two
 halves share one key, so picking either picks the face.
 
+## Progress
+
+A long call, such as `feature_add` with a large STEP file, says how far it's got if its request asks, with a
+`progressToken` in `params._meta` as MCP has it. Each `notifications/progress` has `progress` counting up and a `message`
+such as `f3: solids 120 of 711`. The stages are `parsing`, counted in bytes, `solids`, `rebuild`, counted in features, and
+`measuring`, the bodies the summary measures. Each is told at most once per whole percent, so there are a few hundred
+messages however large the file. A call that doesn't ask hears nothing.
+
+An app that uses `Session` directly, as SchmiShape's engine does, sets the kernel's hook on the thread that calls the
+tools, and gets the same as JSON:
+
+```rust
+coreshape::progress::set_hook(|p| {
+    let json = p.json(); // {"feature":3,"stage":"solids","done":120,"total":711}
+    unsafe { sx_progress(json.as_ptr(), json.len()) }; // an import the browser provides
+});
+```
+
+The kernel has no clock, as WebAssembly in a browser can't read one, so it doesn't throttle by time: whole percents keep it
+to about a hundred calls a stage. `coreshape::progress::clear()` stops it.
+
 ## Several bodies
 
 A body is a part, as in Onshape: one connected solid. A feature acts on all of them unless it lists `"bodies": ["f3.2"]`, and leaves alone any it doesn't reach. `"mode": "new_body"` makes parts that stay separate, and `import_step` with that mode makes one for each solid in the file. `transform`, `delete_bodies` and `boolean` are features too. `bodies_list` gives the names, and `render` tints each body differently unless told otherwise with `colors`, and takes `body` to show just one. `app_set` keeps data for an app with a feature or the document, without touching the model. See the format guide for the details.
@@ -57,6 +78,7 @@ An app that uses `Session` directly gets what to draw as flat arrays, in the sam
 
 - `Session::part_mesh(part, tab, draft)` gives one part's `FlatMesh`, in its own coordinates. Face and edge numbers are the ones `faces_list` and `edges_list` give with that `body`.
 - `Session::instance_meshes(draft)` gives the selected assembly, solved, with an `InstanceMesh` for each instance: its path, name, part, `at`, `matrix` by columns for WebGL, and `mesh`.
+- In a Part Studio, a body that's a rigid copy of another says so in its `NamedBody::copy_of`: that body, and `at`, where it's moved to. Every use of a part in an imported STEP file is one, and so is each of several parts that are the same in the file. Meshing the body it copies once and drawing it at each `at` saves meshing it for every copy: a 711-part assembly has 2,218 bodies and 270 different shapes. A body's `name` is its part's name from the file.
 
 Every instance of a part shares one mesh, and a mesh is only worked out again when its part changes, so a drag costs a solve and no meshing. `FlatMesh::placed(&at)` gives a copy in the assembly's coordinates, for an app that would rather have it all in one space.
 

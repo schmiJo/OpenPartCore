@@ -137,7 +137,7 @@ impl Scan<'_> {
                         if self.text.get(self.at) == Some(&b'\'') {
                             self.at += 1;
                         } else {
-                            return Ok(Val::Str(String::from_utf8_lossy(&s).into_owned()));
+                            return Ok(Val::Str(decoded(&s)));
                         }
                     }
                     s.push(c);
@@ -167,6 +167,58 @@ impl Scan<'_> {
     }
 }
 
+/// A string as the file writes it, with its escapes for what isn't plain ASCII: `\X\E4` for one character of Latin-1,
+/// `\X2\00E4\X0\` for any of UCS-2 and `\X4\` for UCS-4, `\S\d` for one above 127, and `\\` for a backslash. A writer
+/// that puts UTF-8 in as it is gets that.
+fn decoded(raw: &[u8]) -> String {
+    if !raw.contains(&b'\\') {
+        return String::from_utf8_lossy(raw).into_owned();
+    }
+    let hex = |b: &[u8]| std::str::from_utf8(b).ok().and_then(|t| u32::from_str_radix(t, 16).ok());
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+    let push = |out: &mut Vec<u8>, c: Option<char>| {
+        let mut buf = [0u8; 4];
+        out.extend_from_slice(c.unwrap_or('\u{FFFD}').encode_utf8(&mut buf).as_bytes());
+    };
+    let mut i = 0;
+    while i < raw.len() {
+        let rest = &raw[i..];
+        if rest.starts_with(b"\\\\") {
+            out.push(b'\\');
+            i += 2;
+        } else if rest.starts_with(b"\\X\\") && rest.len() >= 5 {
+            push(&mut out, hex(&rest[3..5]).and_then(char::from_u32));
+            i += 5;
+        } else if rest.starts_with(b"\\X2\\") || rest.starts_with(b"\\X4\\") {
+            let width = if rest[2] == b'2' { 4 } else { 8 };
+            let end = rest[4..].windows(4).position(|w| w == b"\\X0\\").map_or(rest.len(), |k| k + 4);
+            let digits = &rest[4..end];
+            let units: Vec<u32> = digits.chunks(width).filter_map(hex).collect();
+            if width == 4 {
+                let utf16: Vec<u16> = units.iter().map(|&u| u as u16).collect();
+                for c in char::decode_utf16(utf16) {
+                    push(&mut out, c.ok());
+                }
+            } else {
+                for u in units {
+                    push(&mut out, char::from_u32(u));
+                }
+            }
+            i += (end + 4).min(rest.len());
+        } else if rest.starts_with(b"\\S\\") && rest.len() >= 4 {
+            push(&mut out, char::from_u32(rest[3] as u32 + 128));
+            i += 4;
+        } else if rest.len() >= 4 && rest[0] == b'\\' && rest[1] == b'P' && rest[3] == b'\\' {
+            // Which part of ISO 8859 the \S\ escapes after it are in. Only part 1, Latin-1, is read.
+            i += 4;
+        } else {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn parse(text: &str) -> Result<BTreeMap<usize, Instance>> {
     let data = text.find("DATA;").ok_or_else(|| bad("it has no DATA section"))?;
     let mut scan = Scan { text: text.as_bytes(), at: data + 5 };
@@ -194,6 +246,7 @@ fn parse(text: &str) -> Result<BTreeMap<usize, Instance>> {
                 }
                 scan.eat(b';')?;
                 out.insert(id, parts);
+                crate::progress::report("parsing", scan.at, scan.text.len());
             }
             Some(_) => {
                 // ENDSEC, or anything after it.
@@ -1153,12 +1206,37 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
             }
         }
     }
+    let sign = if face.flipped { -1.0 } else { 1.0 };
+    let sector_at = |p: Vec3| usize::from((phase(surface, family, p) - walls[0]).rem_euclid(TAU) >= PI);
+    let sector_of = |b: &Builder, c: &Coedge| sector_at(b.point_on(*c));
+    // An edge of the face can lie along a wall, as a file can have where an edge meets the line of the face's seam. The face
+    // is on one side of it only, so it needs no cut there, and it goes with the half on its left.
+    let lies_on = |b: &Builder, e: usize| -> Option<usize> {
+        let edge = &b.edges[e];
+        let on = |w: f64| [0.0, 0.5, 1.0].iter().all(|f| wrap_pi(phase(surface, family, edge.curve.eval(edge.t0 + (edge.t1 - edge.t0) * f)) - w).abs() < 1e-6);
+        if seam_edges.contains(&e) {
+            None
+        } else {
+            walls.iter().position(|&w| on(w))
+        }
+    };
+    // Each such edge, with the wall it's on and the half it goes with.
+    let mut along: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    for c in face.loops.iter().flatten() {
+        let Some(w) = lies_on(b, c.edge) else { continue };
+        let e = &b.edges[c.edge];
+        let mid = (e.t0 + e.t1) / 2.0;
+        let at = e.curve.eval(mid);
+        let travel = e.curve.derivative(mid) * if c.reversed { -1.0 } else { 1.0 };
+        let left = (surface.normal(at) * sign).cross(travel).normalized();
+        let step = 1e-4 * (1.0 + at.norm());
+        along.insert(c.edge, (w, sector_at(surface.project(at + left * step))));
+    }
     for c in face.loops.iter().flatten() {
         if seam_edges.contains(&c.edge) {
             continue;
         }
-        let a = phase(surface, family, b.point_on(*c));
-        let sector = usize::from((a - walls[0]).rem_euclid(TAU) >= PI);
+        let sector = along.get(&c.edge).map_or_else(|| sector_of(b, c), |a| a.1);
         half[sector].push(*c);
     }
     for (w, &wall) in walls.iter().enumerate() {
@@ -1166,14 +1244,29 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
             .ok_or_else(|| Error::Unsupported(format!("cutting a {} into pieces of half a turn isn't available", surface.name())))?;
         // Stops along the wall: a parameter, a vertex, and whether going up the wall from there enters the face
         // (or `None` if the face is on both sides of it, as at a seam of the other family).
-        let mut stops: Vec<(f64, usize, Option<bool>)> = Vec::new();
-        let sign = if face.flipped { -1.0 } else { 1.0 };
+        let mut stops: Vec<(f64, usize, Mark)> = Vec::new();
+        // Along a wall with an edge of the face on it, each side of the wall is followed on its own: the face is there or
+        // not, and that changes wherever an edge from that side meets the wall. It's cut where the face is on both.
+        let edged = along.values().any(|a| a.0 == w);
+        let mut sides: BTreeMap<usize, (f64, [bool; 2])> = BTreeMap::new();
         for c in face.loops.iter().flatten() {
-            if seam_edges.contains(&c.edge) {
+            if seam_edges.contains(&c.edge) || along.contains_key(&c.edge) {
                 continue;
             }
             for end in [false, true] {
                 let v = if end == c.reversed { b.edges[c.edge].v0 } else { b.edges[c.edge].v1 };
+                if edged {
+                    let p = b.vertices[v];
+                    if wrap_pi(phase(surface, family, p) - wall).abs() <= 1e-6 {
+                        let (t, off) = curve.closest(p, lo, hi);
+                        if off <= 0.2 {
+                            let entry = sides.entry(v).or_insert((t, [false; 2]));
+                            let k = sector_of(b, c);
+                            entry.1[k] = !entry.1[k];
+                        }
+                    }
+                    continue;
+                }
                 let p = b.vertices[v];
                 if wrap_pi(phase(surface, family, p) - wall).abs() > 1e-6 {
                     continue;
@@ -1194,12 +1287,19 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
                 let enters = n.cross(travel).dot(up) > 0.0;
                 match stops.iter_mut().find(|s| s.1 == v) {
                     Some(stop) => {
-                        if stop.2 != Some(enters) {
-                            stop.2 = None;
+                        if stop.2 != Mark::Enters(enters) {
+                            stop.2 = Mark::Both;
                         }
                     }
-                    None => stops.push((t, v, Some(enters))),
+                    None => stops.push((t, v, Mark::Enters(enters))),
                 }
+            }
+        }
+        // Where each side ends, as well as where the face is on both, needs a vertex of the wall's own along it.
+        let mut along_wall: Vec<usize> = Vec::new();
+        for (&e, &(on, _)) in &along {
+            if on == w {
+                along_wall.extend([b.edges[e].v0, b.edges[e].v1]);
             }
         }
         stops.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -1214,7 +1314,41 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
             poles.push(v);
             v
         };
-        if stops.is_empty() {
+        if edged {
+            // Only a wall with no end in the face, as on a cylinder: then both sides start out with no face.
+            if closes_on_itself || lo > -1e8 || hi < 1e8 {
+                return Err(Error::NearDegenerate(format!("an edge of this {} lies along a line it has to be cut on", surface.name())));
+            }
+            let mut list: Vec<(f64, usize, [bool; 2])> = sides.iter().map(|(&v, &(t, flip))| (t, v, flip)).collect();
+            for &v in &along_wall {
+                if !sides.contains_key(&v) {
+                    list.push((curve.closest(b.vertices[v], lo, hi).0, v, [false; 2]));
+                }
+            }
+            list.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let mut there = [false; 2];
+            let mut from: Option<(f64, usize)> = None;
+            for (t, v, flip) in list {
+                let was = there[0] && there[1];
+                there = [there[0] != flip[0], there[1] != flip[1]];
+                let now = there[0] && there[1];
+                match (was, now) {
+                    (false, true) => from = Some((t, v)),
+                    (true, false) => intervals.push((from.map_or(t, |f| f.0), from.map_or(v, |f| f.1), t, v)),
+                    // A corner of the face on the wall where it's on both sides, which the wall has to go through.
+                    (true, true) => {
+                        if let Some(f) = from {
+                            intervals.push((f.0, f.1, t, v));
+                        }
+                        from = Some((t, v));
+                    }
+                    (false, false) => {}
+                }
+            }
+            if there[0] || there[1] {
+                return Err(Error::NearDegenerate(format!("an edge of this {} lies along a line it has to be cut on, and its sides don't close", surface.name())));
+            }
+        } else if stops.is_empty() {
             // Nothing crosses it, so it's a pole-to-pole wall on a face wrapped all the way round, or it misses. The piece
             // of boundary nearest to it says which, as the face is on that boundary's left.
             let middle = curve.eval((lo + hi) / 2.0);
@@ -1227,10 +1361,10 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
         } else if closes_on_itself {
             // Round a closed wall, what's inside after the last stop is what's inside before the first.
             let n = stops.len();
-            let mut inside = stops.iter().rev().find_map(|s| s.2).unwrap_or(true);
+            let mut inside = stops.iter().rev().find_map(|s| s.2.enters()).unwrap_or(true);
             for i in 0..n {
                 let (t, v, change) = stops[i];
-                if let Some(enters) = change {
+                if let Mark::Enters(enters) = change {
                     inside = enters;
                 }
                 if inside {
@@ -1243,7 +1377,7 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
             }
         } else {
             // Up an open wall, the first stop says whether it started inside, which means from a pole or apex.
-            let mut inside = stops.first().and_then(|s| s.2) == Some(false);
+            let mut inside = stops.first().map(|s| s.2) == Some(Mark::Enters(false));
             let mut from = if inside {
                 let v = end_at(b, lo);
                 (lo, v)
@@ -1252,19 +1386,19 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
             };
             for &(t, v, change) in &stops {
                 match (inside, change) {
-                    (false, Some(true)) => {
+                    (false, Mark::Enters(true)) => {
                         inside = true;
                         from = (t, v);
                     }
-                    (true, Some(false)) => {
+                    (true, Mark::Enters(false)) => {
                         intervals.push((from.0, from.1, t, v));
                         inside = false;
                     }
-                    (true, None) => {
+                    (true, Mark::Both) => {
                         intervals.push((from.0, from.1, t, v));
                         from = (t, v);
                     }
-                    (false, None) => from = (t, v),
+                    (false, Mark::Both) => from = (t, v),
                     _ => {
                         return Err(Error::NearDegenerate(format!(
                             "this {}'s boundary doesn't alternate in and out along a line cut through it near ({:.4}, {:.4}, {:.4})",
@@ -1329,6 +1463,24 @@ fn split_face(b: &mut Builder, face: &RawFace, family: Family, walls: [f64; 2]) 
         return Err(Error::NearDegenerate(format!("a {} couldn't be cut into pieces of half a turn", surface.name())));
     }
     Ok(new_faces)
+}
+
+/// What happens to the face at a stop along a wall cut through it, going up the wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mark {
+    /// Going up from here enters the face, or leaves it.
+    Enters(bool),
+    /// The face is on both sides of here, as at a seam of the other family.
+    Both,
+}
+
+impl Mark {
+    fn enters(self) -> Option<bool> {
+        match self {
+            Mark::Enters(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 /// A swept face whose curve is too long for one face: cut along rulings where the curve has to be cut, and put each
@@ -2037,6 +2189,11 @@ fn nearest_to_all(surfaces: &[Surface], start: Vec3, limit: f64) -> Vec3 {
 /// edges then get rebuilt between their vertices, and B-spline edges go onto both surfaces where those cross. Where
 /// they're tangent, as around a fillet, nothing can bring them together, so the file's curve stays. Whatever gap is
 /// left over is measured, and the body is held to that.
+/// How many points a file's spline edge is taken at in each of its knot spans, to put it onto both its surfaces. A span is
+/// one cubic or so, and the curve made from them takes more points where it bends, so a few do. Everything done with the
+/// edge afterwards goes point by point, so more would cost every measurement and cut of the part.
+const SAMPLES_PER_SPAN: usize = 4;
+
 fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
     let mut around: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut beside: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -2105,7 +2262,8 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
                 let (sa, sb) = (&faces[list[0]].surface, &faces[list[1]].surface);
                 // An exact spline stays one. Anything else lies only near its surfaces, and goes onto both if they cross.
                 let samples: Vec<Vec3> = (0..=32).map(|i| s.eval(t0 + (t1 - t0) * i as f64 / 32.0)).collect();
-                if samples.iter().all(|&p| sa.sdf(p).abs() <= TOL && sb.sdf(p).abs() <= TOL) {
+                let ok = samples.iter().all(|&p| sa.sdf(p).abs() <= TOL && sb.sdf(p).abs() <= TOL);
+                if ok {
                     continue;
                 }
                 let mut breaks = vec![t0];
@@ -2113,17 +2271,19 @@ fn settle(b: &mut Builder, faces: &[RawFace]) -> Result<()> {
                 breaks.push(t1);
                 let mut points: Vec<Vec3> = Vec::new();
                 let mut crossing = true;
+                // Each point is found from the one before it, on both surfaces, starting from the vertex.
+                let mut hints = crate::surface::Hints::at(sa, sb, a);
                 'walk: for w in breaks.windows(2) {
                     // A knot a hair from an end is no stretch of curve, and samples on top of each other are no use.
                     if w[1] - w[0] <= 1e-9 * (t1 - t0) {
                         continue;
                     }
-                    for i in 0..12 {
-                        let on_curve = s.eval(w[0] + (w[1] - w[0]) * i as f64 / 12.0);
+                    for i in 0..SAMPLES_PER_SPAN {
+                        let on_curve = s.eval(w[0] + (w[1] - w[0]) * i as f64 / SAMPLES_PER_SPAN as f64);
                         // Where the surfaces are close to tangent the place they cross can be a long way along from
                         // the curve, for a gap that's far smaller, and following it would only put a kink in the edge.
                         let off = sa.sdf(on_curve).abs().max(sb.sdf(on_curve).abs());
-                        match crate::surface::refine_on_two(sa, sb, on_curve) {
+                        match crate::surface::refine_on_two_hinted(sa, sb, on_curve, &mut hints) {
                             Some(p) if p.dist(on_curve) <= (8.0 * off).max(1e-5) => points.push(p),
                             _ => {
                                 crossing = false;
@@ -2214,6 +2374,7 @@ fn orient_shell(b: &Builder, faces: &mut [RawFace]) {
         }
     }
     let mut turned: Vec<Option<bool>> = vec![None; loops.len()];
+    let mut face_areas: Vec<Option<Option<Vec<f64>>>> = vec![None; faces.len()];
     for start in 0..loops.len() {
         if turned[start].is_some() {
             continue;
@@ -2242,27 +2403,31 @@ fn orient_shell(b: &Builder, faces: &mut [RawFace]) {
         for &i in &component {
             let (f, l) = loops[i];
             let face = &faces[f];
-            if !seams_of(face).is_empty() {
-                continue;
-            }
-            let everything = b.boundary_points(face);
-            if !within_half_turn(&face.surface, &everything) || matches!(face.surface, Surface::Sphere { .. }) {
-                continue;
-            }
-            // A closed curve's extrusion can go all the way round, and its chart can't show that as a loop.
-            if let Surface::Extruded { curve, .. } = &face.surface {
-                let (u0, u1) = curve.spline.domain();
-                if curve.spline.eval(u0).dist(curve.spline.eval(u1)) <= 2.0 * TOL {
-                    continue;
+            // Each loop's area in the face's chart, worked out once for the face, as a face with many holes has as many loops.
+            let areas = face_areas[f].get_or_insert_with(|| {
+                if !seams_of(face).is_empty() {
+                    return None;
                 }
-            }
-            let chart = face.surface.fit_chart(&everything);
-            let area_of = |lp: &Vec<Coedge>| area_in_chart(b, &face.surface, &chart, lp);
-            let area = area_of(&face.loops[l]);
+                let everything = b.boundary_points(face);
+                if !within_half_turn(&face.surface, &everything) || matches!(face.surface, Surface::Sphere { .. }) {
+                    return None;
+                }
+                // A closed curve's extrusion can go all the way round, and its chart can't show that as a loop.
+                if let Surface::Extruded { curve, .. } = &face.surface {
+                    let (u0, u1) = curve.spline.domain();
+                    if curve.spline.eval(u0).dist(curve.spline.eval(u1)) <= 2.0 * TOL {
+                        return None;
+                    }
+                }
+                let chart = face.surface.fit_chart(&everything);
+                Some(face.loops.iter().map(|lp| area_in_chart(b, &face.surface, &chart, lp)).collect())
+            });
+            let Some(areas) = areas else { continue };
+            let area = areas[l];
             if area == 0.0 {
                 continue;
             }
-            let is_outer = face.loops.iter().all(|other| area_of(other).abs() <= area.abs() * (1.0 + 1e-9));
+            let is_outer = areas.iter().all(|other| other.abs() <= area.abs() * (1.0 + 1e-9));
             // With its own turning applied, the outer loop of an unflipped face runs counter-clockwise, and of a
             // flipped one clockwise, and a hole the other way from that.
             let runs_ccw = (area > 0.0) != turned[i].unwrap_or(false);
@@ -2288,16 +2453,22 @@ fn orient_shell(b: &Builder, faces: &mut [RawFace]) {
 
 /// One solid: its outer shell, and any voids.
 fn solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)]) -> Result<Body> {
-    built_shell(file, feature, outer, voids, false)
+    built_shell(file, feature, outer, voids, false, &mut Vec::new())
+}
+
+/// One solid, with what had to be put right in it said in `fixes`.
+fn repaired_solid(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)], fixes: &mut Vec<String>) -> Result<Body> {
+    built_shell(file, feature, outer, voids, false, fixes)
 }
 
 /// A shell as a sheet, whether the file has it open or closed. A sheet's faces only have to agree with each other, and which
 /// way the whole faces is the file's to say.
 fn sheet(file: &File, feature: u32, shell: usize) -> Result<Body> {
-    built_shell(file, feature, shell, &[], true)
+    built_shell(file, feature, shell, &[], true, &mut Vec::new())
 }
 
-fn built_shell(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)], open: bool) -> Result<Body> {
+/// A shell as a body. What had to be put right in it goes in `fixes`.
+fn built_shell(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)], open: bool, fixes: &mut Vec<String>) -> Result<Body> {
     if !open && std::iter::once(outer).chain(voids.iter().map(|v| v.0)).any(|s| file.has(s, "OPEN_SHELL")) {
         return Err(Error::Unsupported("a solid in this file is bounded by an open shell, which has gaps in it".into()));
     }
@@ -2385,7 +2556,6 @@ fn built_shell(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)],
         }
     }
     b.cut(&mut faces, &cuts);
-
     settle(&mut b, &faces)?;
 
     // A face's outer loop comes first here, and a file can list a hole first. It's the largest one in the face's chart.
@@ -2422,6 +2592,12 @@ fn built_shell(file: &File, feature: u32, outer: usize, voids: &[(usize, bool)],
         body.add_face(face.surface.clone(), face.flipped, loops, face.tag);
     }
     body.compute_shells();
+    // Two fans of faces meeting at a point share a vertex in a file, and need one each here.
+    if !open {
+        for p in body.split_pinches() {
+            fixes.push(format!("the corner at ({:.4}, {:.4}, {:.4}), where faces meet only at a point, is two corners in the same place", p.x, p.y, p.z));
+        }
+    }
     validate(&body).map_err(|defects| Error::NearDegenerate(format!("the imported solid isn't valid: {}", defects.join("; "))))?;
     if open {
         return Ok(body);
@@ -2753,7 +2929,7 @@ impl Placements {
 
 /// Reads every solid in a STEP file, each as its own body, with faces named by `feature` and their position
 /// in the file. An assembly's parts come out where it puts them, one body for each time each is used. A file holding
-/// anything this can't represent exactly is refused, naming what it found.
+/// anything this can't represent exactly is refused, naming what it found. `read_step_each` brings in what it can.
 pub fn read_step(text: &str, feature: u32) -> Result<Vec<Body>> {
     let (file, solids, surfaces) = contents_of(text)?;
     if solids.is_empty() {
@@ -2847,7 +3023,7 @@ pub struct StepStructure {
 
 /// Which distinct solids a file has, in the order `read_step_parts` gives them, and where it uses each. Nothing gets built.
 pub fn read_step_structure(text: &str) -> Result<StepStructure> {
-    let (file, solids, surfaces) = contents_of(text)?;
+    let (file, solids, surfaces, _) = loose_contents(text)?;
     let placements = Placements::of(&file)?;
     if solids.is_empty() {
         let ids: BTreeSet<usize> = surfaces.keys().copied().collect();
@@ -2858,27 +3034,304 @@ pub fn read_step_structure(text: &str) -> Result<StepStructure> {
 }
 
 /// Each distinct solid in a STEP file once, as a body in its own coordinates. `read_step_structure` says where it's used.
+/// One that can't be brought in refuses them all, saying which it is: `read_step_each` brings in the others.
 pub fn read_step_parts(text: &str, feature: u32) -> Result<Vec<Body>> {
     let (file, solids, surfaces) = contents_of(text)?;
-    let placements = Placements::of(&file)?;
-    let only_sheets = solids.is_empty();
-    let ids: BTreeSet<usize> = if only_sheets { surfaces.keys().copied().collect() } else { solids.keys().copied().collect() };
-    let count = |id: usize| if only_sheets { surfaces[&id].len() } else { 1 };
-    let (_, order) = structure_of(&file, &placements, &ids, &count);
-    let mut out = Vec::with_capacity(order.len());
-    for (k, (id, shell)) in order.iter().enumerate() {
-        let mut body = if only_sheets {
-            sheet(&file, feature, surfaces[id][*shell])?
-        } else {
-            let (outer, voids) = &solids[id];
-            solid(&file, feature, *outer, voids)?
-        };
+    let read = each_of(&file, &solids, &surfaces, OtherSolids::new(), feature)?;
+    if let Some(k) = read.parts.iter().position(|p| p.is_err()) {
+        return Err(read.refusal(k));
+    }
+    Ok((0..read.parts.len()).filter_map(|k| read.part(k, feature)).collect())
+}
+
+/// A file's distinct solids, each built on its own, so that one that can't be brought in doesn't keep out the rest, and
+/// what became of each. In a file with nothing but surfaces, each shell is a part, as a sheet.
+#[derive(Clone, Debug)]
+pub struct StepRead {
+    /// What each part is called, and each use of it.
+    pub structure: StepStructure,
+    /// Each part in its own coordinates, in the order of `structure.names`, with no copy marks: or why it couldn't be
+    /// brought in. Parts that are the same in the file, entity for entity, share one body.
+    pub parts: Vec<Result<Arc<Body>>>,
+    /// The file's entity number for each part: its solid, or a surface model's shell.
+    pub entities: Vec<usize>,
+    /// Solids of kinds this can't read, and how many of each. They're in the file, and in none of the parts.
+    pub other_solids: Vec<(String, usize)>,
+    /// Whether the parts are sheets, the file having no solids.
+    pub sheets: bool,
+    /// What the pinched corners repaired in each part were, if any.
+    pub repaired: Vec<Vec<String>>,
+}
+
+impl StepRead {
+    /// Part `k`, named as `read_step_parts` names it: each after the first marked as a copy, the way a pattern's are.
+    pub fn part(&self, k: usize, feature: u32) -> Option<Body> {
+        let mut body = Body::clone(self.parts.get(k)?.as_ref().ok()?);
         if k > 0 {
             body.mark_copy(feature, k as u32);
         }
-        out.push(body);
+        Some(body)
     }
-    Ok(out)
+
+    /// Each use of each part that came in, where the file puts it, named as `read_step` names it, with its place among
+    /// all the uses. A part left out leaves gaps in the numbering, so the others keep their names when it's put right.
+    pub fn placed(&self, feature: u32) -> Vec<(usize, Body)> {
+        self.uses().into_iter().map(|(k, part, at)| {
+            let mut body = part.transformed(&at);
+            if k > 0 {
+                body.mark_copy(feature, k as u32);
+            }
+            (k, body)
+        }).collect()
+    }
+
+    /// Each use of each part that came in: its place among all the uses, the part, and where the file puts it.
+    pub fn uses(&self) -> Vec<(usize, Arc<Body>, Frame)> {
+        let mut out = Vec::new();
+        for (k, (part, at)) in self.structure.instances.iter().enumerate() {
+            if let Some(Ok(body)) = self.parts.get(*part) {
+                out.push((k, body.clone(), *at));
+            }
+        }
+        out
+    }
+
+    /// How many times part `k` is used.
+    pub fn times_used(&self, k: usize) -> usize {
+        self.structure.instances.iter().filter(|(p, _)| *p == k).count()
+    }
+
+    /// Who part `k` is: its place among the parts, its name, and its entity in the file, such as
+    /// `solid 37 of 711, "Wheel hub" (#1234)`.
+    pub fn who(&self, k: usize) -> String {
+        let what = if self.sheets { "shell" } else { "solid" };
+        let name = self.structure.names.get(k).map_or(String::new(), |n| format!(", \"{n}\""));
+        format!("{what} {} of {}{name} (#{})", k + 1, self.parts.len(), self.entities.get(k).copied().unwrap_or(0))
+    }
+
+    /// Why part `k` was left out, naming it, as an error of the same kind.
+    pub fn refusal(&self, k: usize) -> Error {
+        let who = self.who(k);
+        match &self.parts[k] {
+            Err(Error::Unsupported(w)) => Error::Unsupported(format!("{who}: {w}")),
+            Err(Error::InvalidInput(w)) => Error::InvalidInput(format!("{who}: {w}")),
+            Err(Error::NearDegenerate(w)) => Error::NearDegenerate(format!("{who}: {w}")),
+            Err(e) => Error::InvalidInput(format!("{who}: {e}")),
+            Ok(_) => Error::InvalidInput(format!("{who} came in")),
+        }
+    }
+
+    /// A line for each part left out and each kind of solid that can't be read, saying what and why, and one for each part
+    /// that came in repaired.
+    pub fn notes(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for k in 0..self.parts.len() {
+            if let Err(e) = &self.parts[k] {
+                let uses = self.times_used(k);
+                let used = if uses > 1 { format!(", used {uses} times,") } else { String::new() };
+                out.push(format!("left out {}{used}: {e}", self.who(k)));
+            }
+        }
+        for (kind, n) in &self.other_solids {
+            out.push(format!("left out {n} {kind}: solids of that kind can't be imported yet. Boundary representations can"));
+        }
+        for k in 0..self.repaired.len() {
+            if !self.repaired[k].is_empty() {
+                out.push(format!("repaired {}: {}", self.who(k), self.repaired[k].join("; ")));
+            }
+        }
+        out
+    }
+}
+
+/// Every distinct solid in a file, each built on its own: see `StepRead`. Only a file that can't be read at all, or has
+/// nothing to bring in, is refused.
+pub fn read_step_each(text: &str, feature: u32) -> Result<StepRead> {
+    let (file, solids, surfaces, others) = loose_contents(text)?;
+    each_of(&file, &solids, &surfaces, others, feature)
+}
+
+fn each_of(file: &File, solids: &BTreeMap<usize, SolidShells>, surfaces: &BTreeMap<usize, Vec<usize>>, others: OtherSolids, feature: u32) -> Result<StepRead> {
+    let placements = Placements::of(file)?;
+    let sheets = solids.is_empty();
+    let ids: BTreeSet<usize> = if sheets { surfaces.keys().copied().collect() } else { solids.keys().copied().collect() };
+    let count = |id: usize| if sheets { surfaces[&id].len() } else { 1 };
+    let (structure, order) = structure_of(file, &placements, &ids, &count);
+    let total = order.len();
+    let mut parts: Vec<Result<Arc<Body>>> = Vec::with_capacity(total);
+    let mut entities = Vec::with_capacity(total);
+    let mut repaired: Vec<Vec<String>> = Vec::with_capacity(total);
+    // A file often has one part many times over, each a copy of the others in entities of its own. Built once, it does for
+    // all of them, as the same entities can only make the same body.
+    let mut seen: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (k, (id, shell)) in order.iter().enumerate() {
+        crate::progress::report("solids", k, total);
+        let shells: Vec<usize> = if sheets { vec![surfaces[id][*shell]] } else { std::iter::once(solids[id].0).chain(solids[id].1.iter().map(|v| v.0)).collect() };
+        let key = content_key(file, &shells) ^ u64::from(sheets);
+        entities.push(if sheets { shells[0] } else { *id });
+        let others = seen.entry(key).or_default();
+        let twin = others.iter().copied().find(|&j| {
+            let theirs: Vec<usize> = if sheets { vec![entities[j]] } else { std::iter::once(solids[&entities[j]].0).chain(solids[&entities[j]].1.iter().map(|v| v.0)).collect() };
+            // Voids have a way round as well as entities.
+            (sheets || solids[id].1.iter().map(|v| v.1).eq(solids[&entities[j]].1.iter().map(|v| v.1))) && same_content(file, &shells, &theirs)
+        });
+        others.push(k);
+        if let Some(j) = twin {
+            parts.push(parts[j].clone());
+            repaired.push(repaired[j].clone());
+            continue;
+        }
+        let mut fixes = Vec::new();
+        let built = if sheets {
+            sheet(file, feature, shells[0])
+        } else {
+            let (outer, voids) = &solids[id];
+            repaired_solid(file, feature, *outer, voids, &mut fixes)
+        };
+        parts.push(built.map(Arc::new));
+        repaired.push(fixes);
+    }
+    crate::progress::report("solids", total, total);
+    let other_solids = others.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
+    Ok(StepRead { structure, parts, entities, other_solids, sheets, repaired })
+}
+
+/// A hash of everything the entities from `roots` are made of, with each reference standing for where it was first met, so
+/// that copies of a part in entities of their own hash the same.
+fn content_key(file: &File, roots: &[usize]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = crate::hash::FixedHasher::default();
+    let mut number: crate::hash::HashMap<usize, u64> = crate::hash::HashMap::default();
+    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for &r in roots {
+        if !number.contains_key(&r) {
+            number.insert(r, number.len() as u64);
+            queue.push_back(r);
+        }
+    }
+    fn walk(v: &Val, h: &mut crate::hash::FixedHasher, number: &mut crate::hash::HashMap<usize, u64>, queue: &mut std::collections::VecDeque<usize>) {
+        match v {
+            Val::Ref(r) => {
+                let next = number.len() as u64;
+                let n = *number.entry(*r).or_insert_with(|| {
+                    queue.push_back(*r);
+                    next
+                });
+                h.write_u8(1);
+                h.write_u64(n);
+            }
+            Val::Num(x) => {
+                h.write_u8(2);
+                h.write_u64(x.to_bits());
+            }
+            Val::Str(t) => {
+                h.write_u8(3);
+                h.write(t.as_bytes());
+                h.write_u64(t.len() as u64);
+            }
+            Val::Enum(t) => {
+                h.write_u8(4);
+                h.write(t.as_bytes());
+                h.write_u64(t.len() as u64);
+            }
+            Val::List(l) => {
+                h.write_u8(5);
+                h.write_u64(l.len() as u64);
+                for x in l {
+                    walk(x, h, number, queue);
+                }
+            }
+            Val::Empty => h.write_u8(6),
+            Val::Typed(name, l) => {
+                h.write_u8(7);
+                h.write(name.as_bytes());
+                h.write_u64(l.len() as u64);
+                for x in l {
+                    walk(x, h, number, queue);
+                }
+            }
+        }
+    }
+    while let Some(id) = queue.pop_front() {
+        let Some(instance) = file.items.get(&id) else {
+            h.write_u8(0);
+            continue;
+        };
+        h.write_u64(instance.len() as u64);
+        for (name, args) in instance {
+            h.write(name.as_bytes());
+            h.write_u64(args.len() as u64);
+            for a in args {
+                walk(a, &mut h, &mut number, &mut queue);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Whether the entities from `a` and from `b` are the same in everything but their numbers, matching one to one.
+fn same_content(file: &File, a: &[usize], b: &[usize]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut ab: crate::hash::HashMap<usize, usize> = crate::hash::HashMap::default();
+    let mut ba: crate::hash::HashMap<usize, usize> = crate::hash::HashMap::default();
+    let mut queue: Vec<(usize, usize)> = Vec::new();
+    let mut pair = |x: usize, y: usize, queue: &mut Vec<(usize, usize)>| -> bool {
+        match (ab.get(&x), ba.get(&y)) {
+            (Some(&y2), Some(&x2)) => y2 == y && x2 == x,
+            (None, None) => {
+                ab.insert(x, y);
+                ba.insert(y, x);
+                queue.push((x, y));
+                true
+            }
+            _ => false,
+        }
+    };
+    for (&x, &y) in a.iter().zip(b) {
+        if !pair(x, y, &mut queue) {
+            return false;
+        }
+    }
+    fn same(u: &Val, v: &Val, pairs: &mut Vec<(usize, usize)>) -> bool {
+        match (u, v) {
+            (Val::Ref(x), Val::Ref(y)) => {
+                pairs.push((*x, *y));
+                true
+            }
+            (Val::Num(x), Val::Num(y)) => x.to_bits() == y.to_bits(),
+            (Val::List(x), Val::List(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q, pairs)),
+            (Val::Typed(n, x), Val::Typed(m, y)) => n == m && x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q, pairs)),
+            (Val::Empty, Val::Empty) => true,
+            (Val::Str(x), Val::Str(y)) | (Val::Enum(x), Val::Enum(y)) => x == y,
+            _ => false,
+        }
+    }
+    let mut refs = Vec::new();
+    while let Some((x, y)) = queue.pop() {
+        let (Some(i), Some(j)) = (file.items.get(&x), file.items.get(&y)) else {
+            if file.items.contains_key(&x) != file.items.contains_key(&y) {
+                return false;
+            }
+            continue;
+        };
+        if i.len() != j.len() {
+            return false;
+        }
+        for ((n, p), (m, q)) in i.iter().zip(j) {
+            refs.clear();
+            if n != m || p.len() != q.len() || !p.iter().zip(q).all(|(u, v)| same(u, v, &mut refs)) {
+                return false;
+            }
+            for &(rx, ry) in &refs {
+                if !pair(rx, ry, &mut queue) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// The structure of a file, and its distinct solids in order.
@@ -2900,6 +3353,34 @@ fn structure_of(file: &File, placements: &Placements, ids: &BTreeSet<usize>, she
 
 /// Reads a file as far as its solids and its surface models' shells, refusing what can't be brought in.
 fn contents_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>, BTreeMap<usize, Vec<usize>>)> {
+    let (file, solids, surfaces, others) = loose_contents(text)?;
+    if !others.is_empty() {
+        let list: Vec<String> = others.iter().map(|(n, c)| format!("{c} {n}")).collect();
+        return Err(Error::Unsupported(format!("this file has solids of kinds that can't be imported yet: {}. Boundary representations can", list.join(", "))));
+    }
+    // Refuse everything at once, naming it all, before doing any work.
+    let mut shells: Vec<usize> = solids.values().flat_map(|(o, v)| std::iter::once(*o).chain(v.iter().map(|x| x.0))).collect();
+    // With solids in the file, its other surfaces aren't brought in unless they're asked for.
+    if solids.is_empty() {
+        shells.extend(surfaces.values().flatten().copied());
+    }
+    let missing = unsupported_surfaces(&file, &shells);
+    if !missing.is_empty() {
+        let list: Vec<String> = missing.iter().map(|(n, c)| format!("{c} on {n}")).collect();
+        return Err(Error::Unsupported(format!(
+            "this file has faces on surfaces that can't be imported yet: {}. Planes, cylinders, cones, spheres, tori and curves swept along a line or around an axis can",
+            list.join(", ")
+        )));
+    }
+    Ok((file, solids, surfaces))
+}
+
+/// Solids of kinds that aren't read here, by kind, with how many of each.
+type OtherSolids = BTreeMap<&'static str, usize>;
+
+/// Reads a file as far as its solids and its surface models' shells, and how many solids of other kinds it has. Only a
+/// file with nothing in it at all is refused.
+fn loose_contents(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>, BTreeMap<usize, Vec<usize>>, OtherSolids)> {
     let items = parse(text)?;
     let (length, angle) = units(&items)?;
     let file = File { items, length, angle };
@@ -2908,7 +3389,7 @@ fn contents_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>, BTreeM
         "CSG_SOLID", "BOOLEAN_RESULT", "EXTRUDED_AREA_SOLID", "REVOLVED_AREA_SOLID", "EXTRUDED_FACE_SOLID", "REVOLVED_FACE_SOLID", "SOLID_REPLICA", "FACETED_BREP_WITH_VOIDS",
         "BLOCK", "RIGHT_ANGULAR_WEDGE", "RIGHT_CIRCULAR_CONE", "RIGHT_CIRCULAR_CYLINDER", "SWEPT_DISK_SOLID",
     ];
-    let mut others: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut others: OtherSolids = BTreeMap::new();
     // The solids, in file order.
     let mut solids: BTreeMap<usize, SolidShells> = BTreeMap::new();
     let mut surfaces: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -2955,11 +3436,11 @@ fn contents_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>, BTreeM
             }
         }
     }
-    if !others.is_empty() {
-        let list: Vec<String> = others.iter().map(|(n, c)| format!("{c} {n}")).collect();
-        return Err(Error::Unsupported(format!("this file has solids of kinds that can't be imported yet: {}. Boundary representations can", list.join(", "))));
-    }
     if solids.is_empty() && surfaces.is_empty() {
+        if !others.is_empty() {
+            let list: Vec<String> = others.iter().map(|(n, c)| format!("{c} {n}")).collect();
+            return Err(Error::Unsupported(format!("this file has solids of kinds that can't be imported yet: {}. Boundary representations can", list.join(", "))));
+        }
         let surface_model = file.items.values().any(|i| i.iter().any(|(n, _)| n == "GEOMETRIC_CURVE_SET" || n == "CURVE_BOUNDED_SURFACE"));
         return Err(if surface_model {
             Error::Unsupported("this file holds surfaces or curves, not closed solids".into())
@@ -2967,19 +3448,39 @@ fn contents_of(text: &str) -> Result<(File, BTreeMap<usize, SolidShells>, BTreeM
             bad("it has no solids in it")
         });
     }
-    // Refuse everything at once, naming it all, before doing any work.
-    let mut shells: Vec<usize> = solids.values().flat_map(|(o, v)| std::iter::once(*o).chain(v.iter().map(|x| x.0))).collect();
-    // With solids in the file, its other surfaces aren't brought in unless they're asked for.
-    if solids.is_empty() {
-        shells.extend(surfaces.values().flatten().copied());
+    Ok((file, solids, surfaces, others))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{content_key, decoded, parse, same_content, File};
+
+    #[test]
+    fn copies_are_the_same_entity_for_entity_and_nothing_else_is() {
+        let text = "DATA;\n\
+            #1=CARTESIAN_POINT('',(0.,0.,0.));#2=CARTESIAN_POINT('',(1.,2.,3.));#3=POLY_LOOP('',(#1,#2));\n\
+            #4=CARTESIAN_POINT('',(0.,0.,0.));#5=CARTESIAN_POINT('',(1.,2.,3.));#6=POLY_LOOP('',(#4,#5));\n\
+            #7=CARTESIAN_POINT('',(0.,0.,0.));#8=CARTESIAN_POINT('',(1.,2.,3.0000001));#9=POLY_LOOP('',(#7,#8));\n\
+            #10=POLY_LOOP('',(#4,#4));#11=POLY_LOOP('',(#1,#2,#1));#12=CARTESIAN_POINT('x',(0.,0.,0.));#13=POLY_LOOP('',(#12,#2));\n\
+            ENDSEC;";
+        let file = File { items: parse(text).unwrap(), length: 1.0, angle: 1.0 };
+        assert!(same_content(&file, &[3], &[6]));
+        assert_eq!(content_key(&file, &[3]), content_key(&file, &[6]));
+        // A number a hair off, one point used twice, a longer list, and a different name aren't the same.
+        for other in [9, 10, 11, 13] {
+            assert!(!same_content(&file, &[3], &[other]), "#{other}");
+        }
+        assert_ne!(content_key(&file, &[3]), content_key(&file, &[9]));
     }
-    let missing = unsupported_surfaces(&file, &shells);
-    if !missing.is_empty() {
-        let list: Vec<String> = missing.iter().map(|(n, c)| format!("{c} on {n}")).collect();
-        return Err(Error::Unsupported(format!(
-            "this file has faces on surfaces that can't be imported yet: {}. Planes, cylinders, cones, spheres, tori and curves swept along a line or around an axis can",
-            list.join(", ")
-        )));
+
+    #[test]
+    fn strings_have_their_escapes_read() {
+        assert_eq!(decoded(br"Skizzen Zahnr\X\E4der"), "Skizzen Zahnr\u{e4}der");
+        assert_eq!(decoded(br"\X2\00C400D6\X0\ und \X2\03A9\X0\."), "\u{c4}\u{d6} und \u{3a9}.");
+        assert_eq!(decoded(br"\X4\0001F600\X0\!"), "\u{1f600}!");
+        assert_eq!(decoded(br"a\\b \S\d \PA\c"), "a\\b \u{e4} c");
+        assert_eq!(decoded("plain \u{e4}".as_bytes()), "plain \u{e4}");
+        // One that never ends takes what there is.
+        assert_eq!(decoded(br"x\X2\00E4"), "x\u{e4}");
     }
-    Ok((file, solids, surfaces))
 }

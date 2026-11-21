@@ -1461,6 +1461,8 @@ pub struct Step {
     pub name: String,
     pub kind: &'static str,
     pub state: StepState,
+    /// What the feature had to say about what it did, though it built: such as the parts of a file it left out, and why.
+    pub notes: Vec<String>,
 }
 
 /// The outcome of a rebuild.
@@ -1486,10 +1488,22 @@ pub struct PlaneAt {
     pub frame: Frame,
 }
 
+/// What a body is a rigid copy of: that body, moved by `at`. Every copy of a part in a STEP file is one of the same body,
+/// so what's worked out of the part, such as its volume or a mesh, can be worked out once for them all and moved.
+#[derive(Clone, Debug)]
+pub struct CopyOf {
+    pub body: Arc<Body>,
+    pub at: Frame,
+}
+
 /// One of a document's bodies, as a rebuild left it.
 #[derive(Clone, Debug)]
 pub struct NamedBody {
     pub id: BodyId,
+    /// What the body is called where it came from: a part's name in a STEP file.
+    pub name: Option<String>,
+    /// The body it's a copy of, moved, when that's known: its faces have names of their own, and nothing else differs.
+    pub copy_of: Option<CopyOf>,
     pub body: Arc<Body>,
     /// Where its faces start in the outcome's `body`.
     pub first_face: usize,
@@ -1532,6 +1546,9 @@ impl Outcome {
 #[derive(Clone)]
 struct Cached {
     key: u64,
+    notes: Vec<String>,
+    names: Vec<Option<String>>,
+    copies: Vec<Option<CopyOf>>,
     /// What became of the bodies it acted on: what each is now, or nothing if it's gone.
     changed: Vec<(BodyId, Option<Arc<Body>>)>,
     /// The bodies it made of their own.
@@ -1545,12 +1562,19 @@ struct Cached {
 }
 
 /// What running one feature produced.
+#[derive(Default)]
 struct RunResult {
     changed: Vec<(BodyId, Option<Arc<Body>>)>,
     added: Vec<Arc<Body>>,
     sketch: Option<SketchOutput>,
     tools: Option<(Arc<Vec<Body>>, Mode)>,
     plane: Option<Frame>,
+    /// What it has to say about what it did, such as what it left out of a file.
+    notes: Vec<String>,
+    /// Names for the bodies it added, from a file, by their place in `added`.
+    names: Vec<Option<String>>,
+    /// For each body it added, by its place in `added`, the body it's a copy of and where that's moved to, if it is one.
+    copies: Vec<Option<CopyOf>>,
 }
 
 /// A body during a rebuild. Its key covers everything it depends on, so a change to one body doesn't rebuild another.
@@ -1558,14 +1582,18 @@ struct Held {
     id: BodyId,
     body: Arc<Body>,
     key: u64,
+    name: Option<String>,
+    copy_of: Option<CopyOf>,
 }
 
 /// A feature's results, applied to the bodies so far. A body keeps its place in the list however it changes.
-fn take_result(held: &mut Vec<Held>, feature: FeatureId, key: u64, changed: &[(BodyId, Option<Arc<Body>>)], added: &[Arc<Body>]) {
+fn take_result(held: &mut Vec<Held>, feature: FeatureId, key: u64, changed: &[(BodyId, Option<Arc<Body>>)], added: &[Arc<Body>], names: &[Option<String>], copies: &[Option<CopyOf>]) {
     for (id, now) in changed {
         let Some(at) = held.iter().position(|h| h.id == *id) else { continue };
         match now {
             Some(body) => {
+                // Changed, it's no copy of anything any more.
+                held[at].copy_of = None;
                 held[at].body = body.clone();
                 held[at].key = hash_text(key, &id.text());
             }
@@ -1575,7 +1603,13 @@ fn take_result(held: &mut Vec<Held>, feature: FeatureId, key: u64, changed: &[(B
         }
     }
     for (k, body) in added.iter().enumerate() {
-        held.push(Held { id: BodyId { feature, index: k as u32 }, body: body.clone(), key: hash_text(key, &format!("+{k}")) });
+        held.push(Held {
+            id: BodyId { feature, index: k as u32 },
+            body: body.clone(),
+            key: hash_text(key, &format!("+{k}")),
+            name: names.get(k).cloned().flatten(),
+            copy_of: copies.get(k).cloned().flatten(),
+        });
     }
 }
 
@@ -1789,7 +1823,7 @@ impl Changes {
     }
 
     fn done(self, tools: Option<(Arc<Vec<Body>>, Mode)>) -> RunResult {
-        RunResult { changed: self.changed, added: self.added, sketch: None, tools, plane: None }
+        RunResult { changed: self.changed, added: self.added, tools, ..RunResult::default() }
     }
 }
 
@@ -1997,7 +2031,7 @@ fn finished(steps: Vec<Step>, held: &[Held], failed: Option<usize>, planes: Vec<
     let bodies: Vec<NamedBody> = held
         .iter()
         .map(|h| {
-            let named = NamedBody { id: h.id, body: h.body.clone(), first_face, first_edge };
+            let named = NamedBody { id: h.id, name: h.name.clone(), copy_of: h.copy_of.clone(), body: h.body.clone(), first_face, first_edge };
             first_face += h.body.faces.len();
             first_edge += h.body.edges.len();
             named
@@ -2042,13 +2076,27 @@ impl SketchOutput {
 }
 
 /// New sheets as what a feature made: a body for each connected piece of each, which a pattern can copy.
+/// Why nothing at all came in from a file: what was wrong with each part, as far as a few go.
+fn nothing_came_in(read: &coreshape::import::step::StepRead) -> Error {
+    let notes = read.notes();
+    let shown: Vec<&str> = notes.iter().take(5).map(String::as_str).collect();
+    let more = if notes.len() > shown.len() { format!("; and {} more", notes.len() - shown.len()) } else { String::new() };
+    let first = read.parts.iter().find_map(|p| p.as_ref().err().cloned());
+    let why = format!("nothing in this file could be brought in: {}{more}", shown.join("; "));
+    match first {
+        Some(Error::Unsupported(_)) => Error::Unsupported(why),
+        Some(Error::NearDegenerate(_)) => Error::NearDegenerate(why),
+        _ => Error::InvalidInput(why),
+    }
+}
+
 fn sheets(made: Vec<Body>) -> Result<RunResult> {
     if made.is_empty() {
         return Err(Error::InvalidInput("the sketch has no closed regions, and no open curves".into()));
     }
     let pieces: Vec<Body> = made.iter().flat_map(Body::solids).collect();
     let added = pieces.iter().map(|b| Arc::new(b.clone())).collect();
-    Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(pieces), Mode::NewBody)), plane: None })
+    Ok(RunResult { added, tools: Some((Arc::new(pieces), Mode::NewBody)), ..RunResult::default() })
 }
 
 /// What regions and open curves made, each kept apart by its place in the sketch, as regions' faces are when they're not named
@@ -2255,7 +2303,7 @@ impl Document {
             Vec::new()
         } else {
             let o = self.rebuild(Some(position - 1));
-            o.bodies.iter().map(|b| Held { id: b.id, body: b.body.clone(), key: 0 }).collect()
+            o.bodies.iter().map(|b| Held { id: b.id, body: b.body.clone(), key: 0, name: b.name.clone(), copy_of: b.copy_of.clone() }).collect()
         };
         let frame = Looker::new(self, &env, &held).placement(plane)?;
         placed_sketch(sketch, &frame, &held, &env)
@@ -2633,7 +2681,7 @@ impl Document {
             Err(e) => {
                 let why = e.to_string();
                 for f in &self.features {
-                    steps.push(Step { id: f.id, name: f.name.clone(), kind: f.op.kind(), state: StepState::Blocked });
+                    steps.push(Step { id: f.id, name: f.name.clone(), kind: f.op.kind(), state: StepState::Blocked, notes: Vec::new() });
                 }
                 if let Some(first) = steps.first_mut() {
                     first.state = StepState::Failed(why);
@@ -2648,7 +2696,7 @@ impl Document {
         for i in 0..n {
             let feature = self.features[i].clone();
             let kind = feature.op.kind();
-            let step = |state: StepState| Step { id: feature.id, name: feature.name.clone(), kind, state };
+            let step = |state: StepState| Step { id: feature.id, name: feature.name.clone(), kind, state, notes: Vec::new() };
             if i >= last {
                 steps.push(step(StepState::RolledBack));
                 continue;
@@ -2778,25 +2826,43 @@ impl Document {
             if let Some(c) = cached {
                 keys.insert(feature.id, key);
                 if !feature.op.is_sketch() {
-                    take_result(&mut held, feature.id, key, &c.changed, &c.added);
+                    take_result(&mut held, feature.id, key, &c.changed, &c.added, &c.names, &c.copies);
                 }
                 if let Some(frame) = c.plane {
                     planes.push(PlaneAt { id: feature.id, frame });
                 }
-                steps.push(step(StepState::Reused));
+                steps.push(Step { notes: c.notes.clone(), ..step(StepState::Reused) });
                 continue;
             }
-            match self.run(&feature, &env, &scope, &held) {
+            coreshape::progress::feature(Some(feature.id.0));
+            coreshape::progress::report("rebuild", i, last);
+            let ran = self.run(&feature, &env, &scope, &held);
+            coreshape::progress::feature(None);
+            match ran {
                 Ok(result) => {
                     keys.insert(feature.id, key);
                     if result.sketch.is_none() {
-                        take_result(&mut held, feature.id, key, &result.changed, &result.added);
+                        take_result(&mut held, feature.id, key, &result.changed, &result.added, &result.names, &result.copies);
                     }
                     if let Some(frame) = result.plane {
                         planes.push(PlaneAt { id: feature.id, frame });
                     }
-                    self.cache.insert(feature.id, Cached { key, changed: result.changed, added: result.added, sketch: result.sketch, tools: result.tools, plane: result.plane });
-                    steps.push(step(StepState::Rebuilt));
+                    let notes = result.notes.clone();
+                    self.cache.insert(
+                        feature.id,
+                        Cached {
+                            key,
+                            notes: result.notes,
+                            names: result.names,
+                            copies: result.copies,
+                            changed: result.changed,
+                            added: result.added,
+                            sketch: result.sketch,
+                            tools: result.tools,
+                            plane: result.plane,
+                        },
+                    );
+                    steps.push(Step { notes, ..step(StepState::Rebuilt) });
                 }
                 // The previous result stays cached under its own key, so going back to the
                 // earlier inputs reuses it.
@@ -2806,6 +2872,7 @@ impl Document {
                 }
             }
         }
+        coreshape::progress::report("rebuild", last, last);
         finished(steps, &held, failed, planes)
     }
 
@@ -2822,7 +2889,7 @@ impl Document {
 
     fn run(&self, feature: &Feature, env: &Env, scope: &[(BodyId, Arc<Body>)], all: &[Held]) -> Result<RunResult> {
         let tag = feature.id.0;
-        let sketched = |output: SketchOutput| RunResult { changed: Vec::new(), added: Vec::new(), sketch: Some(output), tools: None, plane: None };
+        let sketched = |output: SketchOutput| RunResult { sketch: Some(output), ..RunResult::default() };
         let applied = |tools: Vec<Body>, mode: Mode| -> Result<RunResult> {
             if mode == Mode::Surface {
                 if matches!(feature.op, Op::Solid { .. } | Op::Thicken { .. }) {
@@ -3153,30 +3220,54 @@ impl Document {
             }
             Op::ImportStep { text, mode: Mode::Surface } => sheets(coreshape::import::step::read_step_sheets(text, tag)?),
             Op::ImportStep { text, mode } => {
-                let solids = coreshape::import::step::read_step(text, tag)?;
+                // Whatever can come in does, and the feature says what didn't and why, as one bad part in an assembly of
+                // hundreds mustn't keep out the rest.
+                let read = coreshape::import::step::read_step_each(text, tag)?;
+                let notes = read.notes();
+                let uses = read.uses();
+                if uses.is_empty() {
+                    return Err(nothing_came_in(&read));
+                }
+                let names: Vec<Option<String>> = uses.iter().map(|(k, ..)| read.structure.names.get(read.structure.instances[*k].0).cloned()).collect();
+                let copies: Vec<Option<CopyOf>> = uses.iter().map(|(_, part, at)| Some(CopyOf { body: part.clone(), at: *at })).collect();
+                let solids: Vec<Body> = read.placed(tag).into_iter().map(|(_, b)| b).collect();
                 // A file holding nothing but surfaces brings them in as they are, as there's nothing to merge them into.
                 if solids.iter().all(|b| b.sheet) {
-                    return sheets(solids);
+                        // A sheet in pieces is several bodies, and then the names don't go one to one.
+                    return sheets(solids).map(|r| {
+                        let (names, copies) = if r.added.len() == names.len() { (names, copies) } else { (Vec::new(), Vec::new()) };
+                        RunResult { notes, names, copies, ..r }
+                    });
                 }
                 // A file's solids are parts, and each of them can be a body. Merging is only for when that's asked for.
                 if *mode == Mode::NewBody {
                     let added = solids.iter().map(|b| Arc::new(b.clone())).collect();
-                    return Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), *mode)), plane: None });
+                    return Ok(RunResult { added, tools: Some((Arc::new(solids), *mode)), notes, names, copies, ..RunResult::default() });
                 }
                 let count = solids.len();
-                applied(solids, *mode).map_err(|e| {
-                    if count > 1 {
-                        Error::InvalidInput(format!("this file has {count} solids, and merging them into one body failed: {e}. With the mode new_body each stays a body of its own"))
-                    } else {
-                        e
-                    }
-                })
+                applied(solids, *mode)
+                    .map(|r| RunResult { notes, ..r })
+                    .map_err(|e| {
+                        if count > 1 {
+                            Error::InvalidInput(format!("this file has {count} solids, and merging them into one body failed: {e}. With the mode new_body each stays a body of its own"))
+                        } else {
+                            e
+                        }
+                    })
             }
             Op::ImportStepParts { text } => {
-                let solids = coreshape::import::step::read_step_parts(text, tag)?;
+                let read = coreshape::import::step::read_step_each(text, tag)?;
+                let kept: Vec<usize> = (0..read.parts.len()).filter(|&k| read.parts[k].is_ok()).collect();
+                if kept.is_empty() {
+                    return Err(nothing_came_in(&read));
+                }
                 // Each is one part, whether it's a solid or a sheet.
+                let solids: Vec<Body> = kept.iter().filter_map(|&k| read.part(k, tag)).collect();
+                let names = kept.iter().map(|&k| read.structure.names.get(k).cloned()).collect();
+                // Parts that are the same in the file are one body there, each a copy of it where it is.
+                let copies = kept.iter().map(|&k| read.parts[k].as_ref().ok().map(|b| CopyOf { body: b.clone(), at: Frame::WORLD })).collect();
                 let added = solids.iter().map(|b| Arc::new(b.clone())).collect();
-                Ok(RunResult { changed: Vec::new(), added, sketch: None, tools: Some((Arc::new(solids), Mode::NewBody)), plane: None })
+                Ok(RunResult { added, tools: Some((Arc::new(solids), Mode::NewBody)), notes: read.notes(), names, copies, ..RunResult::default() })
             }
             Op::Solid { primitive, at, mode } => {
                 let frame = look.placement(at)?;
@@ -3383,7 +3474,7 @@ impl Document {
                 }
                 Ok(out.done(None))
             }
-            Op::Plane { def, flip } => Ok(RunResult { changed: Vec::new(), added: Vec::new(), sketch: None, tools: None, plane: Some(look.def(def, *flip)?) }),
+            Op::Plane { def, flip } => Ok(RunResult { plane: Some(look.def(def, *flip)?), ..RunResult::default() }),
             Op::SheetMetal { sketch, depth, flip, .. } => {
                 let out = sketch_output(sketch)?;
                 let Sheet { t, r, .. } = sheet_settings(&feature.op, feature.id, env)?;

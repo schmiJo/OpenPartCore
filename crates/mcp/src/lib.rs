@@ -5,6 +5,7 @@
 //!
 //! Files are read and written only under one root folder, given when the server starts.
 
+mod sha256;
 mod tools;
 
 use coreshape_document::json::{self, Value};
@@ -29,11 +30,21 @@ fn reply(id: Value, key: &str, value: Value) -> Value {
 /// Holds a session and answers messages.
 pub struct Server {
     session: Session,
+    notify: Option<Notify>,
 }
+
+/// Where a message the server sends of its own accord goes, as one line of JSON.
+type Notify = std::rc::Rc<std::cell::RefCell<Box<dyn FnMut(String)>>>;
 
 impl Server {
     pub fn new(root: PathBuf) -> Server {
-        Server { session: Session::new(root) }
+        Server { session: Session::new(root), notify: None }
+    }
+
+    /// Where to send messages of the server's own, such as how far a long tool call has got, when the call asks for
+    /// that with a `progressToken`. Without this, no such message is sent.
+    pub fn set_notifier(&mut self, send: impl FnMut(String) + 'static) {
+        self.notify = Some(std::rc::Rc::new(std::cell::RefCell::new(Box::new(send))));
     }
 
     /// Answers one line of input. `None` means nothing goes back: it was a notification.
@@ -76,7 +87,34 @@ impl Server {
                     return Some(reply(id, "error", error_object(-32602, &format!("there is no tool named \"{name}\""))));
                 }
                 let arguments = params.get("arguments").cloned().unwrap_or(Value::Obj(Vec::new()));
-                reply(id, "result", self.session.call_safely(name, &arguments))
+                // A call that asks how it's going hears it as notifications/progress, numbered on as they come, with
+                // what's being done and how much of it in words.
+                let token = params.get("_meta").and_then(|m| m.get("progressToken")).cloned();
+                if let (Some(token), Some(notify)) = (token, self.notify.clone()) {
+                    let mut count = 0.0;
+                    coreshape::progress::set_hook(move |p| {
+                        count += 1.0;
+                        let feature = p.feature.map_or(String::new(), |f| format!("f{f}: "));
+                        let message = Value::obj(vec![
+                            ("jsonrpc", Value::str("2.0")),
+                            ("method", Value::str("notifications/progress")),
+                            (
+                                "params",
+                                Value::obj(vec![
+                                    ("progressToken", token.clone()),
+                                    ("progress", Value::Num(count)),
+                                    ("message", Value::str(format!("{feature}{} {} of {}", p.stage, p.done, p.total))),
+                                ]),
+                            ),
+                        ]);
+                        if let Ok(mut send) = notify.try_borrow_mut() {
+                            send(message.to_text());
+                        }
+                    });
+                }
+                let answer = self.session.call_safely(name, &arguments);
+                coreshape::progress::clear();
+                reply(id, "result", answer)
             }
             other => reply(id, "error", error_object(-32601, &format!("method \"{other}\" isn't supported"))),
         })

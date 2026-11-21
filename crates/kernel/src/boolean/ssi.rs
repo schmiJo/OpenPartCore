@@ -15,7 +15,7 @@ use crate::curve::{Curve, SampledCurve};
 use crate::error::{Error, Result};
 use crate::math::*;
 use crate::spline::PlaneCurve;
-use crate::surface::{refine_on_two, Chart, Surface};
+use crate::surface::{refine_on_two, refine_on_two_hinted, Chart, Hints, Surface};
 use crate::hash::HashMap;
 use std::sync::Arc;
 
@@ -1035,6 +1035,8 @@ pub fn sampled_from_points(points: Vec<Vec3>, a: &Surface, b: &Surface) -> Resul
         let tangents = curve_tangents(&points, a, b)?;
         let mut denser = Vec::with_capacity(points.len());
         let mut changed = false;
+        // Each midpoint is looked for from where the last one was found, which is close by.
+        let mut hints = Hints::at(a, b, points[0]);
         for i in 0..points.len() - 1 {
             denser.push(points[i]);
             let (p, q) = (points[i], points[i + 1]);
@@ -1042,7 +1044,7 @@ pub fn sampled_from_points(points: Vec<Vec3>, a: &Surface, b: &Surface) -> Resul
             if tangents[i].dot(tangents[i + 1]) < limit && chord > 1e-5 {
                 // Cubic Hermite midpoint, snapped back onto both surfaces.
                 let mid = (p + q) * 0.5 + (tangents[i] - tangents[i + 1]) * (chord / 8.0);
-                if let Some(m) = refine_on_two(a, b, mid) {
+                if let Some(m) = refine_on_two_hinted(a, b, mid, &mut hints) {
                     if m.dist(p) > 1e-6 && m.dist(q) > 1e-6 {
                         denser.push(m);
                         changed = true;
@@ -1057,5 +1059,5 @@ pub fn sampled_from_points(points: Vec<Vec3>, a: &Surface, b: &Surface) -> Resul
         }
     }
     let tangents = curve_tangents(&points, a, b)?;
-    Ok(Curve::Sampled(Arc::new(SampledCurve { points, tangents, surfaces: (a.clone(), b.clone()) })))
+    Ok(Curve::Sampled(Arc::new(SampledCurve::new(points, tangents, (a.clone(), b.clone())))))
 }

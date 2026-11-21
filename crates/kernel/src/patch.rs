@@ -1528,6 +1528,62 @@ impl Patch {
         self.signed_distance(p).abs()
     }
 
+    /// The foot of a point near the surface by Newton's method from the parameters `(u, v)`, which should be a foot of a
+    /// point close by: with no search over the patch, and so no proof that it's the nearest. For walking a point onto
+    /// the surface from somewhere close, where what it ends at gets checked. Gives nothing where Newton doesn't settle
+    /// inside the domain, on a moved surface, or near a pole, for a search to do instead.
+    pub fn foot_from(&self, p: Vec3, u: f64, v: f64) -> Option<PatchFoot> {
+        if self.offset != 0.0 {
+            return None;
+        }
+        let ((u0, u1), (v0, v1)) = self.domain();
+        let (mut u, mut v) = (u.clamp(u0, u1), v.clamp(v0, v1));
+        for _ in 0..24 {
+            let (cell, s, t) = self.cell_at(u, v);
+            let q = cell.local(s, t);
+            let r = q.p - p;
+            let (g1, g2) = (r.dot(q.ds), r.dot(q.dt));
+            let (a, b, d) = (q.ds.dot(q.ds) + r.dot(q.dss), q.ds.dot(q.dt) + r.dot(q.dst), q.dt.dot(q.dt) + r.dot(q.dtt));
+            let det = a * d - b * b;
+            if det <= 0.0 || !det.is_finite() || a <= 0.0 {
+                return None;
+            }
+            let (du, dv) = (cell.u.1 - cell.u.0, cell.v.1 - cell.v.0);
+            let (dx, dy) = ((d * g1 - b * g2) / det, (a * g2 - b * g1) / det);
+            let (mut nu, mut nv) = (u - dx * du, v - dy * dv);
+            // Held to a side of the domain, it goes on along that side only. Where the nearest point is on the boundary, a
+            // point off to one side is measured by its height over the tangent plane there, as `search` does.
+            let (held_u, held_v) = (nu < u0 || nu > u1, nv < v0 || nv > v1);
+            if held_u && !held_v {
+                nu = nu.clamp(u0, u1);
+                nv = (v - g2 / d * dv).clamp(v0, v1);
+            } else if held_v && !held_u {
+                nv = nv.clamp(v0, v1);
+                nu = (u - g1 / a * du).clamp(u0, u1);
+            } else if held_u && held_v {
+                (nu, nv) = (nu.clamp(u0, u1), nv.clamp(v0, v1));
+            }
+            let moved = (nu - u).abs() / (u1 - u0) + (nv - v).abs() / (v1 - v0);
+            (u, v) = (nu, nv);
+            if moved < 1e-12 {
+                let at = self.base_point(u, v);
+                if self.base_at_pole(at) {
+                    return None;
+                }
+                let normal = self.normal_at(u, v);
+                let r = p - at;
+                // A foot has the point straight off the surface, or else it's at a side, off to one side of it.
+                let boundary = (r - normal * r.dot(normal)).norm() > 1e-9 * (1.0 + r.norm());
+                let at_side = u == u0 || u == u1 || v == v0 || v == v1;
+                if boundary && !at_side {
+                    return None;
+                }
+                return Some(PatchFoot { u, v, at, normal, distance: r.norm(), boundary });
+            }
+        }
+        None
+    }
+
     /// The normal at a chart position in the domain.
     pub fn normal_at_chart(&self, uv: Vec2) -> Vec3 {
         if self.offset != 0.0 {
@@ -1743,6 +1799,11 @@ impl Patch {
 
     pub fn chart_breaks_y(&self) -> Vec<f64> {
         self.breaks.1.iter().map(|v| v * self.scale.1).collect()
+    }
+
+    /// Whether a whole side of the surface is one point.
+    pub fn has_poles(&self) -> bool {
+        !self.poles.is_empty()
     }
 }
 

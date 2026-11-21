@@ -18,13 +18,63 @@ const GUIDE: &str = include_str!("../../../docs/FILE_FORMAT.md");
 
 type R<T> = Result<T, String>;
 
+/// Puts each text that a file gives as `{"bytes": n, "sha256": "..."}` back, from `blobs`, checking it's the one named.
+fn with_blobs(contents: &str, blobs: &[(String, Value)]) -> R<String> {
+    fn fill(v: &mut Value, blobs: &[(String, Value)]) -> R<()> {
+        match v {
+            Value::Obj(items) => {
+                for (k, item) in items.iter_mut() {
+                    let named = match &*item {
+                        Value::Obj(_) if k == "text" => item.get("sha256").and_then(Value::as_str).map(str::to_string),
+                        _ => None,
+                    };
+                    if let Some(hash) = named {
+                        let found = blobs.iter().find(|(h, _)| *h == hash).ok_or_else(|| format!("the text with SHA-256 {hash} isn't among the blobs"))?;
+                        let t = found.1.as_str().ok_or_else(|| format!("the blob {hash} must be text"))?;
+                        if crate::sha256::hex(t.as_bytes()) != hash {
+                            return Err(format!("the blob given as {hash} has a different SHA-256, so it isn't the text the file names"));
+                        }
+                        *item = Value::str(t);
+                    } else {
+                        fill(item, blobs)?;
+                    }
+                }
+                Ok(())
+            }
+            Value::Arr(list) => list.iter_mut().try_for_each(|x| fill(x, blobs)),
+            _ => Ok(()),
+        }
+    }
+    let mut v = json::parse(contents)?;
+    fill(&mut v, blobs)?;
+    Ok(v.to_text())
+}
+
+/// Gives each text longer than `limit` bytes as `{"bytes": n, "sha256": "..."}`.
+fn omit_texts(v: &mut Value, limit: usize) {
+    match v {
+        Value::Obj(items) => {
+            for (k, item) in items.iter_mut() {
+                match &*item {
+                    Value::Str(t) if k == "text" && t.len() > limit => {
+                        *item = Value::obj(vec![("bytes", Value::Num(t.len() as f64)), ("sha256", Value::str(crate::sha256::hex(t.as_bytes())))]);
+                    }
+                    _ => omit_texts(item, limit),
+                }
+            }
+        }
+        Value::Arr(list) => list.iter_mut().for_each(|x| omit_texts(x, limit)),
+        _ => {}
+    }
+}
+
 /// Every tool: name, description, and its arguments as a JSON Schema's properties.
 const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("format_guide", "The fields of every feature, constraint and edge selection. Read this once before adding features.", "{}", "[]"),
     ("document_new", "Starts an empty document, replacing the one open now.", "{}", "[]"),
-    ("document_open", "Opens a .coreshape file under the server's root folder, or from text.", r#"{"path": {"type": "string"}, "text": {"type": "string", "description": "The file's contents, in place of a path."}}"#, "[]"),
+    ("document_open", "Opens a .coreshape file under the server's root folder, or from text. A feature's text left out by document_show comes back through blobs.", r#"{"path": {"type": "string"}, "text": {"type": "string", "description": "The file's contents, in place of a path."}, "blobs": {"type": "object", "description": "Texts the file gives as {\"bytes\": n, \"sha256\": \"...\"}, each under its SHA-256 in hex."}}"#, "[]"),
     ("document_save", "Saves the document as a .coreshape file under the server's root folder.", r#"{"path": {"type": "string"}}"#, r#"["path"]"#),
-    ("document_show", "The whole document as JSON, in the file format.", "{}", "[]"),
+    ("document_show", "The whole document as JSON, in the file format. With omit_texts_over, a feature's text longer than that many bytes, such as an imported STEP file's, is given as {\"bytes\": n, \"sha256\": \"...\"}, for document_open to take back through blobs.", r#"{"omit_texts_over": {"type": "integer", "description": "Bytes."}}"#, "[]"),
     ("parameter_set", "Creates or changes a named parameter, then rebuilds. The value is a number or an expression over other parameters.", r#"{"name": {"type": "string"}, "value": {"type": ["number", "string"]}}"#, r#"["name", "value"]"#),
     ("parameter_remove", "Removes a parameter nothing uses.", r#"{"name": {"type": "string"}}"#, r#"["name"]"#),
     ("feature_add", "Adds a feature, then rebuilds. Gives its permanent id and what the rebuild did. See format_guide for the fields. With several bodies it acts on all of them unless the feature lists \"bodies\", like [\"f3.2\"], and it leaves alone any it doesn't reach. The mode new_body makes bodies of their own, so that parts can touch or overlap.", r#"{"feature": {"type": "object", "description": "A feature, without id: {\"type\": \"extrude\", \"sketch\": 1, \"length\": 10}."}, "name": {"type": "string"}, "position": {"type": "integer", "description": "Where in the history. The end, if left out."}}"#, r#"["feature"]"#),
@@ -198,13 +248,27 @@ pub struct Session {
     active: TabId,
     /// Meshes worked out already, by body and whether they're draft.
     meshes: Vec<(Arc<Body>, bool, Arc<FlatMesh>)>,
+    /// What a summary says of each body, by where the body is in memory, holding the body so that place stays its own.
+    /// A body that hasn't changed is the same one, so with hundreds of parts only those that changed get measured again.
+    facts: std::cell::RefCell<std::collections::HashMap<usize, (Arc<Body>, Arc<Facts>)>>,
+    /// Each body's bounds, the same way. A copy's are its part's mesh moved, which is worth doing once.
+    bounds: std::cell::RefCell<std::collections::HashMap<usize, (Arc<Body>, coreshape::Aabb)>>,
+}
+
+/// What a summary says of one body.
+struct Facts {
+    props: coreshape::MassProps,
+    check: Result<coreshape::Report, Vec<String>>,
+    /// The points of its mesh, for its bounds wherever a copy of it is: the B-rep's box is a safe overestimate around
+    /// curves. Its box's corners if it doesn't mesh.
+    points: Vec<coreshape::Vec3>,
 }
 
 impl Session {
     pub fn new(root: PathBuf) -> Session {
         let project = Project::new();
         let studio = project.tabs[0].id;
-        Session { doc: Document::new(), outcome: None, root, project, studio, active: studio, meshes: Vec::new() }
+        Session { doc: Document::new(), outcome: None, root, project, studio, active: studio, meshes: Vec::new(), facts: Default::default(), bounds: Default::default() }
     }
 
     /// The document being worked on.
@@ -256,6 +320,11 @@ impl Session {
                     (None, Some(t)) => t.as_str().ok_or("\"text\" must be text")?.to_string(),
                     (None, None) => return Err("give a path or text".to_string()),
                 };
+                let contents = match args.get("blobs") {
+                    None | Some(Value::Null) => contents,
+                    Some(Value::Obj(blobs)) => with_blobs(&contents, blobs)?,
+                    Some(_) => return Err("\"blobs\" must be an object of texts by their SHA-256".to_string()),
+                };
                 self.replace_project(Project::load_text(&contents).map_err(e)?);
                 self.rebuilt(None)
             }
@@ -265,7 +334,15 @@ impl Session {
                 std::fs::write(&path, &contents).map_err(|why| format!("can't write {}: {why}", path.display()))?;
                 Ok(vec![text(format!("Saved {} bytes to {}.", contents.len(), path.display()))])
             }
-            "document_show" => Ok(vec![text(self.doc.save_text())]),
+            "document_show" => match args.get("omit_texts_over") {
+                None | Some(Value::Null) => Ok(vec![text(self.doc.save_text())]),
+                Some(Value::Num(n)) if *n >= 0.0 => {
+                    let mut v = self.doc.to_json();
+                    omit_texts(&mut v, *n as usize);
+                    Ok(vec![text(v.to_pretty())])
+                }
+                Some(_) => Err("\"omit_texts_over\" must be a number of bytes".to_string()),
+            },
             "parameter_set" => {
                 let value = match args.get("value") {
                     Some(Value::Num(n)) => Expr::number(*n),
@@ -507,24 +584,77 @@ impl Session {
     }
 
     /// Each body: its name, what made it, and how big it is.
+    /// A body's volume and check, worked out once for as long as it stays the same body.
+    fn facts_of(&self, body: &Arc<Body>) -> Arc<Facts> {
+        let key = Arc::as_ptr(body) as usize;
+        if let Some((_, f)) = self.facts.borrow().get(&key) {
+            return f.clone();
+        }
+        let props = mass_properties(body);
+        let points = match tessellate(body, &TessParams::for_size(body.aabb().diagonal())) {
+            Ok(m) => m.positions,
+            Err(_) => {
+                let b = body.aabb();
+                (0..8).map(|k| coreshape::v3([b.min.x, b.max.x][k & 1], [b.min.y, b.max.y][(k >> 1) & 1], [b.min.z, b.max.z][k >> 2])).collect()
+            }
+        };
+        let facts = Arc::new(Facts { props, check: validate(body), points });
+        self.facts.borrow_mut().insert(key, (body.clone(), facts.clone()));
+        facts
+    }
+
+    /// One of the bodies' facts and bounds. A copy of another body is measured as that one, once for all its copies, and
+    /// its bounds are that one's moved.
+    fn measured(&self, b: &NamedBody) -> (Arc<Facts>, coreshape::Aabb) {
+        let (facts, at) = match &b.copy_of {
+            Some(c) => (self.facts_of(&c.body), Some(c.at)),
+            None => (self.facts_of(&b.body), None),
+        };
+        let key = Arc::as_ptr(&b.body) as usize;
+        if let Some((_, bounds)) = self.bounds.borrow().get(&key) {
+            return (facts, *bounds);
+        }
+        let (mut lo, mut hi) = (coreshape::Vec3::splat(f64::INFINITY), coreshape::Vec3::splat(f64::NEG_INFINITY));
+        for &p in &facts.points {
+            let q = at.map_or(p, |f| f.to_world(p));
+            lo = lo.min(q);
+            hi = hi.max(q);
+        }
+        let bounds = coreshape::Aabb { min: lo, max: hi };
+        self.bounds.borrow_mut().insert(key, (b.body.clone(), bounds));
+        (facts, bounds)
+    }
+
+    /// Forgets what isn't among these bodies any more.
+    fn keep_facts_of(&self, bodies: &[NamedBody]) {
+        let live: std::collections::HashSet<usize> = bodies.iter().map(|b| Arc::as_ptr(b.copy_of.as_ref().map_or(&b.body, |c| &c.body)) as usize).collect();
+        self.facts.borrow_mut().retain(|k, _| live.contains(k));
+        let shown: std::collections::HashSet<usize> = bodies.iter().map(|b| Arc::as_ptr(&b.body) as usize).collect();
+        self.bounds.borrow_mut().retain(|k, _| shown.contains(k));
+    }
+
     fn bodies_value(&self) -> Value {
         let Some(o) = &self.outcome else { return Value::Arr(Vec::new()) };
         Value::Arr(
             o.bodies
                 .iter()
                 .map(|b| {
-                    let props = mass_properties(&b.body);
-                    let bounds = b.body.aabb();
+                    // The same bounds the summary gives, by the mesh, kept for as long as the body stays the same.
+                    let (facts, bounds) = self.measured(b);
+                    let props = facts.props;
                     let maker = self.doc.feature(b.id.feature).map_or(String::new(), |f| f.name.clone());
-                    let mut items = vec![
-                        ("body", Value::str(b.id.text())),
+                    let mut items = vec![("body", Value::str(b.id.text()))];
+                    if let Some(name) = &b.name {
+                        items.push(("name", Value::str(name)));
+                    }
+                    items.extend([
                         ("made_by", Value::str(maker)),
                         ("volume", num(props.volume)),
                         ("area", num(props.area)),
                         ("faces", Value::Num(b.body.faces.len() as f64)),
                         ("box_min", vec3(bounds.min)),
                         ("box_max", vec3(bounds.max)),
-                    ];
+                    ]);
                     if b.body.sheet {
                         items.push(("sheet", Value::Bool(true)));
                         items.push(("boundary_edges", Value::Num(b.body.boundary_edges().len() as f64)));
@@ -555,6 +685,9 @@ impl Session {
                     if let StepState::Failed(why) = &s.state {
                         items.push(("error", Value::str(why)));
                     }
+                    if !s.notes.is_empty() {
+                        items.push(("notes", Value::Arr(s.notes.iter().map(Value::str).collect())));
+                    }
                     Value::obj(items)
                 })
                 .collect(),
@@ -578,6 +711,12 @@ impl Session {
                 // A cut in the wrong place changes nothing and isn't an error, which is easy to
                 // miss without looking. A feature that left no faces is worth pointing out.
                 let mut notes = Vec::new();
+                // What features said about what they did, such as the parts of a file they left out.
+                for s in o.steps.iter().filter(|s| matches!(s.state, StepState::Rebuilt | StepState::Reused)) {
+                    for n in &s.notes {
+                        notes.push(Value::str(format!("f{} ({}): {n}", s.id.0, s.name)));
+                    }
+                }
                 for s in &o.steps {
                     let built = matches!(s.state, StepState::Rebuilt | StepState::Reused);
                     // Copies keep the names of what they copied, so these have no faces of their own, and sketches and planes
@@ -602,27 +741,59 @@ impl Session {
                 if !notes.is_empty() {
                     items.push(("notes", Value::Arr(notes)));
                 }
-                let props = mass_properties(body);
-                // The mesh's bounds, since the B-rep's box is a safe overestimate around curves.
-                let bounds = tessellate(body, &TessParams::for_size(body.aabb().diagonal())).map_or_else(|_| body.aabb(), |m| m.bounds());
+                // Body by body, as the outcome's body is them all side by side, and one that hasn't changed needn't be
+                // measured again. One body is the whole.
+                // Hundreds of parts can take a while the first time, so it says how far it's got.
+                let n = o.bodies.len();
+                let measured: Vec<(Arc<Facts>, coreshape::Aabb)> = o
+                    .bodies
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        coreshape::progress::report("measuring", i, n);
+                        self.measured(b)
+                    })
+                    .collect();
+                coreshape::progress::report("measuring", n, n);
+                self.keep_facts_of(&o.bodies);
+                let (mut volume, mut area) = (0.0, 0.0);
+                let mut bounds: Option<coreshape::Aabb> = None;
+                for (f, b) in &measured {
+                    volume += f.props.volume;
+                    area += f.props.area;
+                    bounds = Some(match bounds {
+                        None => *b,
+                        Some(a) => coreshape::Aabb { min: a.min.min(b.min), max: a.max.max(b.max) },
+                    });
+                }
+                let facts: Vec<Arc<Facts>> = measured.into_iter().map(|m| m.0).collect();
+                let bounds = bounds.unwrap_or_else(|| body.aabb());
                 let mut solid = vec![
-                    ("volume", num(props.volume)),
-                    ("area", num(props.area)),
+                    ("volume", num(volume)),
+                    ("area", num(area)),
                     ("bounds_min", vec3(bounds.min)),
                     ("bounds_max", vec3(bounds.max)),
                     ("faces", Value::Num(body.faces.len() as f64)),
                     ("edges", Value::Num(body.edges.len() as f64)),
                 ];
-                match validate(body) {
-                    Ok(report) => {
-                        solid.push(("valid", Value::Bool(true)));
-                        solid.push(("shells", Value::Num(report.shells as f64)));
-                        solid.push(("holes_through", Value::Arr(report.genus.iter().map(|g| Value::Num(*g as f64)).collect())));
-                    }
-                    Err(defects) => {
-                        solid.push(("valid", Value::Bool(false)));
-                        solid.push(("defects", Value::Arr(defects.iter().map(Value::str).collect())));
-                    }
+                let defects: Vec<Value> = if o.bodies.len() == 1 {
+                    facts[0].check.as_ref().err().map_or(Vec::new(), |d| d.iter().map(Value::str).collect())
+                } else {
+                    o.bodies
+                        .iter()
+                        .zip(&facts)
+                        .flat_map(|(b, f)| f.check.as_ref().err().map_or(Vec::new(), |d| d.iter().map(|x| Value::str(format!("body {}: {x}", b.id.text()))).collect()))
+                        .collect()
+                };
+                if defects.is_empty() {
+                    solid.push(("valid", Value::Bool(true)));
+                    let shells: usize = facts.iter().filter_map(|f| f.check.as_ref().ok()).map(|r| r.shells).sum();
+                    let genus: Vec<Value> = facts.iter().filter_map(|f| f.check.as_ref().ok()).flat_map(|r| r.genus.iter().map(|g| Value::Num(*g as f64))).collect();
+                    solid.push(("shells", Value::Num(shells as f64)));
+                    solid.push(("holes_through", Value::Arr(genus)));
+                } else {
+                    solid.push(("valid", Value::Bool(false)));
+                    solid.push(("defects", Value::Arr(defects)));
                 }
                 let touching = body.contact_vertices();
                 if touching > 0 {

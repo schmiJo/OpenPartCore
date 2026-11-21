@@ -26,6 +26,7 @@ pub mod math;
 pub mod multi;
 pub mod patch;
 pub mod profile;
+pub mod progress;
 pub mod radii;
 pub mod rolling;
 pub mod sheet;

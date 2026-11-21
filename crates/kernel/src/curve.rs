@@ -4,7 +4,7 @@
 
 use crate::math::*;
 use crate::spline::Spline;
-use crate::surface::{refine_on_two, Surface};
+use crate::surface::{refine_on_two, refine_on_two_hinted, Hints, Surface};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -28,9 +28,16 @@ pub struct SampledCurve {
     /// Unit tangents in the direction of increasing `t`.
     pub tangents: Vec<Vec3>,
     pub surfaces: (Surface, Surface),
+    /// Where each sample is on each free-form surface, worked out when first wanted: a point between two samples starts
+    /// looking from there, in place of searching the whole surface.
+    hints: std::sync::OnceLock<Vec<Hints>>,
 }
 
 impl SampledCurve {
+    pub fn new(points: Vec<Vec3>, tangents: Vec<Vec3>, surfaces: (Surface, Surface)) -> SampledCurve {
+        SampledCurve { points, tangents, surfaces, hints: std::sync::OnceLock::new() }
+    }
+
     pub fn touches_free_form(&self) -> bool {
         matches!(self.surfaces.0, Surface::Free { .. }) || matches!(self.surfaces.1, Surface::Free { .. })
     }
@@ -54,7 +61,14 @@ impl SampledCurve {
 
     fn snapped(&self, i: usize, s: f64) -> Vec3 {
         let p = self.hermite_local(i, s);
-        refine_on_two(&self.surfaces.0, &self.surfaces.1, p).unwrap_or(p)
+        let (a, b) = (&self.surfaces.0, &self.surfaces.1);
+        if !self.touches_free_form() {
+            return refine_on_two(a, b, p).unwrap_or(p);
+        }
+        // The nearer sample is on both surfaces, and says where on them to look.
+        let hints = self.hints.get_or_init(|| self.points.iter().map(|q| Hints::at(a, b, *q)).collect());
+        let mut near = hints[if s < 0.5 { i } else { i + 1 }];
+        refine_on_two_hinted(a, b, p, &mut near).unwrap_or(p)
     }
 
     pub fn eval(&self, t: f64) -> Vec3 {
@@ -254,11 +268,11 @@ impl Curve {
             Curve::Line { origin, dir } => Curve::Line { origin: m.of_point(*origin), dir: m.of_dir(*dir) },
             Curve::Circle { frame, radius } => Curve::Circle { frame: m.of_curve_frame(frame), radius: *radius },
             Curve::Ellipse { frame, major, minor } => Curve::Ellipse { frame: m.of_curve_frame(frame), major: *major, minor: *minor },
-            Curve::Sampled(c) => Curve::Sampled(Arc::new(SampledCurve {
-                points: c.points.iter().map(|p| m.of_point(*p)).collect(),
-                tangents: c.tangents.iter().map(|d| m.of_dir(*d)).collect(),
-                surfaces: (c.surfaces.0.mirrored(m), c.surfaces.1.mirrored(m)),
-            })),
+            Curve::Sampled(c) => Curve::Sampled(Arc::new(SampledCurve::new(
+                c.points.iter().map(|p| m.of_point(*p)).collect(),
+                c.tangents.iter().map(|d| m.of_dir(*d)).collect(),
+                (c.surfaces.0.mirrored(m), c.surfaces.1.mirrored(m)),
+            ))),
             Curve::Spline(s) => Curve::Spline(Arc::new(s.mapped(|p| m.of_point(p)))),
         }
     }
@@ -270,11 +284,11 @@ impl Curve {
             Curve::Ellipse { frame, major, minor } => {
                 Curve::Ellipse { frame: t.compose(frame), major: *major, minor: *minor }
             }
-            Curve::Sampled(c) => Curve::Sampled(Arc::new(SampledCurve {
-                points: c.points.iter().map(|p| t.to_world(*p)).collect(),
-                tangents: c.tangents.iter().map(|d| t.dir_to_world(*d)).collect(),
-                surfaces: (c.surfaces.0.transformed(t), c.surfaces.1.transformed(t)),
-            })),
+            Curve::Sampled(c) => Curve::Sampled(Arc::new(SampledCurve::new(
+                c.points.iter().map(|p| t.to_world(*p)).collect(),
+                c.tangents.iter().map(|d| t.dir_to_world(*d)).collect(),
+                (c.surfaces.0.transformed(t), c.surfaces.1.transformed(t)),
+            ))),
             Curve::Spline(s) => Curve::Spline(Arc::new(s.mapped(|p| t.to_world(p)))),
         }
     }
