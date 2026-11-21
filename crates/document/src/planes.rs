@@ -48,7 +48,8 @@ pub enum LineRef {
     Given { point: Point3, direction: Point3 },
     /// A straight edge, which the selection has to pick alone. It runs from its start to its end, as edges_list gives them.
     Edge(EdgeSelect),
-    /// A line of a constrained sketch, from its start to its end.
+    /// A line of a constrained sketch, from its start to its end, or the axis of one of its circles, arcs or ellipses:
+    /// through the center, along the sketch's normal.
     Sketch { sketch: FeatureId, line: EntityId },
     /// The axis of a cylinder, cone, torus or turned face, pointing the way faces_list gives it.
     AxisOfFace(FaceKey),
@@ -336,6 +337,7 @@ pub(crate) enum Geo<'a> {
     Place(&'a Placement),
     Plane(&'a PlaneRef),
     Line(&'a LineRef),
+    Point(&'a PointRef),
     Def(&'a PlaneDef, bool),
 }
 
@@ -352,6 +354,7 @@ impl<'a> Geo<'a> {
             }
             Geo::Plane(p) => p.references(out),
             Geo::Line(l) => l.references(out),
+            Geo::Point(p) => p.references(out),
             Geo::Def(d, _) => d.references(out),
         }
     }
@@ -361,13 +364,14 @@ impl<'a> Geo<'a> {
             Geo::Place(p) => p.on_plane.iter().for_each(|r| r.planes(out)),
             Geo::Plane(p) => p.planes(out),
             Geo::Def(d, _) => d.planes(out),
-            Geo::Line(_) => {}
+            Geo::Line(_) | Geo::Point(_) => {}
         }
     }
 
     pub(crate) fn sketches(&self, out: &mut Vec<FeatureId>) {
         match self {
             Geo::Line(l) => l.sketches(out),
+            Geo::Point(p) => p.sketches(out),
             Geo::Def(d, _) => d.sketches(out),
             Geo::Place(_) | Geo::Plane(_) => {}
         }
@@ -383,6 +387,7 @@ impl<'a> Geo<'a> {
             }
             Geo::Plane(p) => p.exprs(out),
             Geo::Line(l) => l.exprs(out),
+            Geo::Point(p) => p.exprs(out),
             Geo::Def(d, _) => d.exprs(out),
         }
     }
@@ -486,6 +491,12 @@ impl<'a> Looker<'a> {
         Ok((body, found[0]))
     }
 
+    /// The surface of the face a key picks, or of the first of several that are all on one surface.
+    pub(crate) fn face_surface(&self, key: &FaceKey) -> Result<Surface> {
+        let (body, f) = self.one_surface(key)?;
+        Ok(body.faces[f].surface.clone())
+    }
+
     /// The one edge a selection picks.
     fn one_edge(&self, query: &EdgeSelect, what: &str) -> Result<(&Arc<Body>, usize)> {
         let body = self.whole(what)?;
@@ -570,7 +581,10 @@ impl<'a> Looker<'a> {
                         }
                         Ok((a, (b - a).normalized()))
                     }
-                    Some(other) => Err(bad(format!("entity {} of sketch f{} is a {}, not a line", line.0, sketch.0, other.kind()))),
+                    Some(Geometry::Circle { center, .. } | Geometry::Arc { center, .. } | Geometry::Ellipse { center, .. } | Geometry::EllipticalArc { center, .. }) => {
+                        Ok((frame.point(center[0], center[1], 0.0), frame.z))
+                    }
+                    Some(other) => Err(bad(format!("entity {} of sketch f{} is a {}, which is neither a line nor round, so it gives no line", line.0, sketch.0, other.kind()))),
                     None => Err(bad(format!("sketch f{} has no entity {}", sketch.0, line.0))),
                 }
             }

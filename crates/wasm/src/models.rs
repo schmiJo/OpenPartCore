@@ -207,8 +207,7 @@ fn spring(doc: &mut Document, _: usize) {
     let wire = doc.with(Op::sketch(upright(), vec![Region::new(Shape::circle("coil", 0.0, "wire"))]));
     doc.with(Op::Helix {
         sketch: wire,
-        point: point3(0.0, 0.0, 0.0),
-        axis: point3(0.0, 0.0, 1.0),
+        axis: LineRef::along(point3(0.0, 0.0, 1.0)),
         pitch: "pitch".into(),
         turns: "turns".into(),
         left_handed: false,
@@ -226,8 +225,7 @@ fn screw(doc: &mut Document, _: usize) {
     ));
     doc.with(Op::Helix {
         sketch: groove,
-        point: point3(0.0, 0.0, 0.0),
-        axis: point3(0.0, 0.0, 1.0),
+        axis: LineRef::along(point3(0.0, 0.0, 1.0)),
         pitch: "pitch".into(),
         turns: "length / pitch + 2".into(),
         left_handed: false,
@@ -407,6 +405,36 @@ fn sheet_tray(doc: &mut Document, _: usize) {
         vec![Region::new(Shape::OpenPath { start: point("width + 5", -10.0), moves: vec![Move::Line { to: point("width + 5", "depth + 10") }] })],
     ));
     doc.with(Op::Bend { sketch: line, degrees: Some("fold".into()), bend_radius: None, position: BendPosition::Start, flip: true, right: true });
+}
+
+/// A tray: walls a thin extrude round a rounded outline, a floor, and ribs sketched part way up and run down to the floor
+/// and out to the walls.
+fn ribbed_tray(doc: &mut Document, _: usize) {
+    let outline = || Region::new(Shape::RoundedRect { cx: 0.0.into(), cy: 0.0.into(), w: "length".into(), h: "width".into(), r: "corner".into() });
+    let walls = doc.with(Op::sketch(xy(), vec![outline()]));
+    doc.with(Op::Extrude {
+        sketch: Some(walls),
+        start: 0.0.into(),
+        length: "height".into(),
+        mode: Mode::Add,
+        regions: Vec::new(),
+        faces: Vec::new(),
+        end: ExtrudeEnd::Blind,
+        opposite: false,
+        thin: Some(Thin { thickness: "wall".into(), side: ThinSide::Inside }),
+    });
+    let floor = doc.with(Op::sketch(xy(), vec![outline()]));
+    doc.with(Op::extrude(floor, 0.0, "wall", Mode::Add));
+    let line = |a: (&str, &str), b: (&str, &str)| Region::new(Shape::OpenPath { start: point(a.0, a.1), moves: vec![Move::Line { to: point(b.0, b.1) }] });
+    let ribs = doc.with(Op::sketch(
+        Placement::xy("height * rib_share / 100"),
+        vec![
+            line(("-length / 4", "0"), ("length / 4", "0")),
+            line(("-length / 4", "-width / 4"), ("-length / 4", "width / 4")),
+            line(("length / 4", "-width / 4"), ("length / 4", "width / 4")),
+        ],
+    ));
+    doc.with(Op::Rib { sketch: ribs, thickness: "rib".into(), direction: RibDirection::Normal, flip: true, extend: true });
 }
 
 fn rounded_block(doc: &mut Document, _: usize) {
@@ -807,6 +835,15 @@ pub fn catalog() -> &'static [ModelDef] {
         ParamDef { key: "tilt", label: "Window angle", unit: "deg", min: 0.0, max: 180.0, step: 1.0, default: 30.0, choices: &[] },
         mm("pin", "Cross hole", 2.0, 6.0, 4.0),
     ];
+    static TRAY: [ParamDef; 7] = [
+        mm("length", "Length", 60.0, 160.0, 110.0),
+        mm("width", "Width", 40.0, 110.0, 70.0),
+        mm("height", "Height", 15.0, 50.0, 28.0),
+        mm("wall", "Wall", 1.5, 4.0, 2.5),
+        mm("corner", "Corner radius", 5.0, 20.0, 12.0),
+        mm("rib", "Rib thickness", 1.0, 4.0, 2.0),
+        ParamDef { key: "rib_share", label: "Rib height", unit: "%", min: 30.0, max: 100.0, step: 1.0, default: 70.0, choices: &[] },
+    ];
     static SHEET: [ParamDef; 8] = [
         mm("width", "Length", 80.0, 160.0, 120.0),
         mm("depth", "Width", 50.0, 90.0, 70.0),
@@ -889,7 +926,7 @@ pub fn catalog() -> &'static [ModelDef] {
         choices: &STRESS_NAMES,
     }];
     static SLIDER_CRANK: [ParamDef; 3] = [mm("crank", "Crank length", 15.0, 80.0, 30.0), mm("rod", "Rod length", 40.0, 160.0, 100.0), deg("angle", "Crank angle", 0.0, 720.0, 30.0)];
-    static MODELS: [ModelDef; 22] = [
+    static MODELS: [ModelDef; 23] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -912,6 +949,14 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "A plate made sheet metal, with flanges, rounded hems along their tops, holes, and a tab bent down along a line into a leg. Set View to Flat to lay it out: every bend undone, its strip as long as its neutral line, and checked by volume.",
             params: &SHEET,
             build: sheet_tray,
+            assembly: None,
+        },
+        ModelDef {
+            id: "tray",
+            name: "Ribbed tray",
+            blurb: "Walls a thin extrude round a rounded outline, inside it, and ribs sketched part way up that run down to the floor and out to the walls on their own. Every corner of the walls is sharp or round as the outline is.",
+            params: &TRAY,
+            build: ribbed_tray,
             assembly: None,
         },
         ModelDef {

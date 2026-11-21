@@ -20,7 +20,7 @@ These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
 - **Engineering drawings.** No sheets of projected views, hidden lines, section views, dimensions or title blocks, and no PDF or DXF. Sketching is built, and that's a different thing.
 - **The rest of Onshape's assemblies.** Tangent and Width mates, Replicate, assembly patterns, exploded views and named positions. What is built: see [below](#assemblies).
-- **Scaling a part.** Onshape's Transform can scale, and this can't, as nothing in the kernel scales a body. Nor does a Boolean offset, or does a split feature exist.
+- **Scaling a part other than the same in every direction.** A transform scales uniformly about a point; stretching one way would turn circles into ellipses and cylinders into elliptic ones, and isn't built. See [Small features](#small-features).
 
 ## Fuzz results
 
@@ -478,10 +478,19 @@ All eight of Onshape's plane types are built, with `flip`, and sketches sit on t
 
 - A curve-point plane takes a part's edge, not a sketch's curve.
 - A tangent plane touches a cylinder, cone or sphere: not a torus or a free-form face. On a sphere it takes a point, since an angle round a sphere means nothing without an axis.
-- A line from a sketch is one of its lines: a sketch arc's or circle's axis isn't one yet, though a part's round edge's is (`{"axis_of": selection}`).
+- A line from a sketch is one of its lines, or a circle's, arc's or ellipse's axis through its center along the sketch's normal.
 - An edge's direction, and an axis's, are the kernel's own, as `edges_list` and `faces_list` give them, and a change elsewhere in the model can turn one round: `flip`, a negative angle or a negative distance turns a plane made from one back.
 - A plane on a face whose name covers several faces, such as a pattern's copies, needs them all in one plane, and otherwise one face's key.
-- Mirror, trim, draft, an extrude's `up_to_face`, patterns and a transform's frames take planes and lines. A helix's axis and a transform's rotation still take numbers, as does a revolve's axis, which is drawn in its sketch.
+- Mirror, trim, split, draft, an extrude's `up_to_face`, patterns, a transform's frames and rotation, a helix's axis and a revolve's axis take planes and lines. A revolve's line has to lie in its sketch's plane.
+
+## Small features
+
+Split, scale, rib, thin extrude and axes from lines (2026-11-22). Each volume in their tests is worked out by hand.
+
+- **Split** cuts along a plane, along the whole of a flat, cylindrical, conical, spherical or ring-shaped face's surface, or by a solid part. Not along a sheet, or along an extruded, turned or free-form face's surface: those are refused, saying which. Splitting a shaft along its own stem's cylinder works, the coincident faces and all.
+- **Scale** is the same in every direction, about a point, from 1e-6 to 1e6. A scaled face keeps its kind of surface, and its name. One that would shrink an edge below 1e-6 mm, or take the part past 10 km, is refused.
+- **Thin extrude** follows lines and arcs. A spline or an ellipse is refused, as one moved sideways isn't one, and so are walls thicker than an arc is round, corners so sharp the wall's outside would reach out more than 50 thicknesses, and segments too short for the wall between two corners. Revolve, sweep and loft have no thin option yet.
+- **Rib** runs across from straight lines in its sketch's plane, or along the sketch's normal from lines and arcs. It has no draft, and an arc across its plane is refused. A rib whose slab runs past the parts without meeting them is refused rather than left sticking out, so a rib sketched well above a part, whose carried-on ends pass over the walls, is refused too: sketch it on the rim, as Onshape's examples do, or leave `extend` off.
 
 ## Sheet metal
 

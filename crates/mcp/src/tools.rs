@@ -720,8 +720,8 @@ impl Session {
                 for s in &o.steps {
                     let built = matches!(s.state, StepState::Rebuilt | StepState::Reused);
                     // Copies keep the names of what they copied, so these have no faces of their own, and sketches and planes
-                    // make none by design.
-                    let names_none = matches!(s.kind, "transform" | "delete_bodies" | "boolean" | "sketch" | "constrained_sketch" | "plane" | "pattern" | "mirror" | "offset" | "draft" | "delete_face");
+                    // make none by design. A split by a part leaves that part's faces.
+                    let names_none = matches!(s.kind, "transform" | "delete_bodies" | "boolean" | "sketch" | "constrained_sketch" | "plane" | "pattern" | "mirror" | "offset" | "draft" | "delete_face" | "split");
                     if built && !names_none && !body.faces.iter().any(|f| f.tag.feature == s.id.0) {
                         notes.push(Value::str(format!("f{} ({}) left no faces on the solid, so it may not have touched it", s.id.0, s.name)));
                     }

@@ -18,8 +18,7 @@ fn spring(doc: &mut Document) -> FeatureId {
     let wire = doc.with(Op::sketch(upright(0.0), vec![Region::new(Shape::circle("coil", 0.0, "wire"))]));
     doc.with(Op::Helix {
         sketch: wire,
-        point: point3(0.0, 0.0, 0.0),
-        axis: point3(0.0, 0.0, 1.0),
+        axis: LineRef::along(point3(0.0, 0.0, 1.0)),
         pitch: "pitch".into(),
         turns: "turns".into(),
         left_handed: false,

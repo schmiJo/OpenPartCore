@@ -536,6 +536,23 @@ impl Surface {
         }
     }
 
+    /// The image under a scaling by `k` about `c`, with `k` above 0. It's the same kind of surface, and a chart's angles
+    /// still mean the same.
+    pub fn scaled(&self, c: Vec3, k: f64) -> crate::error::Result<Surface> {
+        let frame = |f: &Frame| Frame { origin: c + (f.origin - c) * k, ..*f };
+        let curve = |p: &PlaneCurve| Arc::new(PlaneCurve::new(p.spline.mapped(|q| q * k)));
+        Ok(match self {
+            Surface::Plane(f) => Surface::Plane(frame(f)),
+            Surface::Cylinder { frame: f, radius } => Surface::Cylinder { frame: frame(f), radius: radius * k },
+            Surface::Cone { frame: f, radius, half_angle } => Surface::Cone { frame: frame(f), radius: radius * k, half_angle: *half_angle },
+            Surface::Sphere { frame: f, radius } => Surface::Sphere { frame: frame(f), radius: radius * k },
+            Surface::Torus { frame: f, major, minor } => Surface::Torus { frame: frame(f), major: major * k, minor: minor * k },
+            Surface::Extruded { frame: f, curve: p } => Surface::Extruded { frame: frame(f), curve: curve(p) },
+            Surface::Revolved { frame: f, curve: p } => Surface::Revolved { frame: frame(f), curve: curve(p) },
+            Surface::Free { frame: f, patch } => Surface::Free { frame: frame(f), patch: Arc::new(patch.scaled(k)?) },
+        })
+    }
+
     pub fn transformed(&self, t: &Frame) -> Surface {
         match *self {
             Surface::Plane(f) => Surface::Plane(t.compose(&f)),

@@ -274,13 +274,17 @@ fn a_plane_turned_about_a_line() {
     // A point and a line: square to the line.
     let corner = feature(&mut doc, &format!(r#"{{"type": "plane", "plane_type": "point_normal", "point": [3, 4, 5], "line": {line}}}"#));
     is(&mut doc, corner, [3.0, 4.0, 5.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-    // A line has to be a line.
+    // A circle gives its axis, through its center along the sketch's normal.
     let mut s = Sketch::new();
-    s.circle([0.0, 0.0], 2.0);
-    let round = doc.add(Op::ConstrainedSketch { plane: Placement::xy(0.0), sketch: s }).unwrap();
-    feature(&mut doc, &format!(r#"{{"type": "plane", "plane_type": "point_normal", "point": "origin", "line": {{"sketch": {}, "line": 1}}}}"#, round.0));
+    s.circle([1.0, 2.0], 2.0);
+    s.point(5.0, 5.0);
+    let round = doc.add(Op::ConstrainedSketch { plane: Placement::xy(3.0), sketch: s }).unwrap();
+    let axis = feature(&mut doc, &format!(r#"{{"type": "plane", "plane_type": "line_angle", "line": {{"sketch": {}, "line": 1}}, "degrees": 0, "reference": "front"}}"#, round.0));
+    is(&mut doc, axis, [1.0, 2.0, 3.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]);
+    // A point isn't a line.
+    feature(&mut doc, &format!(r#"{{"type": "plane", "plane_type": "point_normal", "point": "origin", "line": {{"sketch": {}, "line": 2}}}}"#, round.0));
     let why = failure(&mut doc);
-    assert!(why.contains("is a circle, not a line"), "{why}");
+    assert!(why.contains("is a point, which is neither a line nor round"), "{why}");
 }
 
 #[test]

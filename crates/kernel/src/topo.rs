@@ -480,6 +480,44 @@ impl Body {
         }
     }
 
+    /// The body scaled by `k` about `c`, the same in every direction, so that each face keeps its kind of surface and each
+    /// edge its kind of curve. Refused for a `k` that isn't above 0, that takes the body beyond the coordinates this kernel
+    /// works within, or that shrinks an edge to nearly nothing.
+    pub fn scaled(&self, c: Vec3, k: f64) -> Result<Body> {
+        if !(k > 0.0 && k <= 1e6 && k >= 1e-6) {
+            return Err(Error::InvalidInput(format!("a scale has to be a number above 0, from 1e-6 to 1e6, and {k} isn't")));
+        }
+        let mut out = self.clone();
+        for p in &mut out.vertices {
+            *p = c + (*p - c) * k;
+            if !(p.x.abs().max(p.y.abs()).max(p.z.abs()) <= MAX_COORD) {
+                return Err(Error::InvalidInput(format!("scaled by {k}, the body reaches beyond the {MAX_COORD} mm this kernel works within")));
+            }
+        }
+        for (e, edge) in out.edges.iter_mut().enumerate() {
+            // Far enough from nothing that tolerances still tell its ends apart.
+            let (a, m, b) = (self.edges[e].curve.eval(edge.t0), self.edges[e].eval_mid(), self.edges[e].curve.eval(edge.t1));
+            let size = (a.dist(m) + m.dist(b)) * k;
+            if size < MIN_FEATURE {
+                return Err(Error::InvalidInput(format!(
+                    "scaled by {k}, the edge through ({:.6}, {:.6}, {:.6}) would be {size:.3e} long, too small for this kernel's tolerance of {TOL}",
+                    m.x, m.y, m.z
+                )));
+            }
+            if matches!(edge.curve, Curve::Line { .. }) {
+                edge.t0 *= k;
+                edge.t1 *= k;
+            }
+            edge.curve = edge.curve.scaled(c, k)?;
+        }
+        for f in &mut out.faces {
+            f.surface = f.surface.scaled(c, k)?;
+            f.chart.frame.origin = c + (f.chart.frame.origin - c) * k;
+        }
+        out.tolerance *= k;
+        Ok(out)
+    }
+
     /// Rigidly transforms the body.
     pub fn transformed(&self, t: &Frame) -> Body {
         let mut out = self.clone();

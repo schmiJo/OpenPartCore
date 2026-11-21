@@ -44,6 +44,7 @@ are named by the feature that made them:
 | `f2:hole.1.side.0` | Swept from segment 0 of hole 1 |
 | `f2:region.2.side.0` | Swept from segment 0 of the outer wire of region 2 |
 | `f2:wall.0` | The walls an extrude swept from the edges of the first face in its `faces`: see [below](#extruding-faces) |
+| `f2:inner.side.3`, `f2:start_of.side.0`, `f2:end_of.side.4` | A thin wall's side to the left of segment 3, and the ends of a wall along an open curve: see [Thin walls](#thin-walls) |
 
 Segments number from 0 in drawing order. A rectangle runs bottom, right, top, left. Both halves of a
 circle are segment 0. Primitives are built by the same sweeps, so `f2:end` is the top of a box.
@@ -78,11 +79,11 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `hem` | `edges`, `kind` (`straight`, `rounded`, `teardrop` or `rolled`), `length` (not for `rolled`), `gap` (`straight` only, default the part's minimal gap), `bend_radius` (not for `straight`, default the part's), `degrees` (`teardrop`, default 225, and `rolled`, default 270), `alignment`, `flip`. See [Sheet metal](#sheet-metal) |
 | `tab` | `sketch`, whose regions are drawn on the plane of a sheet metal wall. See [Sheet metal](#sheet-metal) |
 | `bend` | `sketch`, holding one line on the plane of a sheet metal wall, `degrees` (default 90), `bend_radius` (default the part's), `position` (`center`, the default, or `start`), `moves` (`left`, the default, or `right`), `flip`. See [Sheet metal](#sheet-metal) |
-| `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end` and `opposite`: see [below](#extrude-regions-and-ends) |
+| `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end`, `opposite` and `thin`: see [below](#extrude-regions-and-ends) and [Thin walls](#thin-walls) |
 | `loft` | `sections`, in order, each a sketch id, for a sketch holding one outline, or a region `{"sketch": 2, "region": "r..."}`, so that one sketch with several outlines can feed it, and `mode`. Straight between two, and a smooth cubic through three or more. A region that has gone fails the feature, saying what's there |
-| `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. Optionally `regions`, as an extrude has them: see [below](#extrude-regions-and-ends) |
+| `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction, or any [line](#planes) lying in the sketch's plane, which the revolve then follows: `{"sketch": 3, "line": 7}` for a line of its sketch, or a straight edge. One out of the plane is refused, saying how far off it is. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. Optionally `regions`, as an extrude has them: see [below](#extrude-regions-and-ends) |
 | `sweep` | `sketch`, `path`, `mode`. `path` is a list of steps, `{"sketch": 5}` or `{"edges": selection}`: see below |
-| `helix` | `sketch`, `pitch` (how far along the axis one turn goes), `turns`, `point` (default origin) and `axis` (default +z) for the axis, `left_handed` (default false), `mode`. The sketch can hold the axis, for a spring or a thread, or lie across it, for a twisted bar |
+| `helix` | `sketch`, `pitch` (how far along the axis one turn goes), `turns`, `point` (default origin) and `axis` (default +z) for the axis, or `axis` alone naming any [line](#planes), which it then follows, `left_handed` (default false), `mode`. The sketch can hold the axis, for a spring or a thread, or lie across it, for a twisted bar |
 | `solid` | `shape`, its dimensions, `at` (default XY), `mode` |
 | `pattern` | `of` (feature ids, which can be other patterns and mirrors; leave out for the whole body), and `direction`, `count`, `spacing`, or `center` (default origin), `axis` (default +z), `count`, `degrees` (default 360). `count` includes the original. `direction` is `[x, y, z]` or any [line](#planes), whose direction it takes, and `axis` is `[x, y, z]` through `center`, or a line, which gives the center too, so there's no `center` with one: `{"axis": {"axis_of": "f4:side.0"}, "count": 6}` goes round a boss. A circular pattern turns right-handed about the axis's direction |
 | `mirror` | `of` (as above), and `plane`, any [plane](#planes), or `point` (default origin) and `normal` |
@@ -91,7 +92,7 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `fillet_radii` | `sets`: a list of `{"edges": ..., "radius": r}`, or `{"edges": ..., "along": [{"at": 0, "radius": 2}, {"at": 1, "radius": 5}], "start": [x, y, z]}` for a radius going in straight lines between places along the chain of edges, from 0 to 1, measured from the end nearest `start`, or without one from the end with the lowest x, then y, then z. Different radii can meet at a corner: see [KNOWN_LIMITS.md](KNOWN_LIMITS.md#fillets-and-chamfers) |
 | `import_step` | `text`: a whole STEP file, kept in the document, and `mode`. Its faces are named by their place in the file: `f3:side.0` is the first. A wide face cut into pieces on the way in keeps one name for them all. An assembly's parts are placed where it puts them. With `mode` `new_body`, which is what an assembly wants, each solid is a part of its own. With `add`, those that touch are merged by Boolean, which can fail where they meet, and says to use `new_body`. Each solid is built on its own, and one that can't come in is left out: the feature still builds, with a note for each saying which it is and why, `left out solid 75 of 711, "Zahnrad Servo" (#61327): ...`, by its place among the file's solids, its part's name, and its entity number. Only a file with nothing that can come in fails the feature. A solid whose faces meet at a single point, which this kernel can't have as one corner, is given a corner for each side, in the same place, with a note `repaired solid ...`. Each body is named after its part, and a solid that's in the file more than once, entity for entity, is built once. |
 | `import_step_parts` | `text`: a whole STEP file, kept in the document. Each distinct solid in it comes in once as a new body, in its own coordinates, for an assembly to use, however many times the file uses it. Its faces are named as for `import_step`, and one that can't come in is left out with a note in the same way |
-| `transform` | `motion`, the `bodies` to move, and `copy` (default false), which leaves them and adds moved copies as new parts. `motion` is `{"type": "translate", "by": [x, y, z]}`, `{"type": "rotate", "point": [x, y, z], "axis": [x, y, z], "degrees": d}` or `{"type": "frames", "from": placement, "to": placement}` |
+| `transform` | `motion`, the `bodies` to move, and `copy` (default false), which leaves them and adds moved copies as new parts. `motion` is `{"type": "translate", "by": [x, y, z]}`, `{"type": "rotate", "point": [x, y, z], "axis": [x, y, z], "degrees": d}`, or with `axis` naming any [line](#planes) and no `point`: `{"type": "rotate", "axis": {"axis_of": "f4:side.0"}, "degrees": 90}`; `{"type": "frames", "from": placement, "to": placement}`; or `{"type": "scale", "factor": k, "point": p}`, the same in every direction about any [point](#planes) (default the origin), so 25.4 brings a part drawn in inches to millimetres. A scaled face keeps its name and its kind of surface. A factor from 1e-6 to 1e6 is allowed, and one that would take the part beyond 10 km or shrink an edge below 1e-6 mm is refused |
 | `delete_bodies` | The `bodies` to delete, which it has to name |
 | `boolean` | `operation`: `union`, `subtract` or `intersect`, `tools`: a list of bodies, and `keep_tools` (default false). `subtract` cuts the tools from the `bodies`, its targets, which it has to name. The others take the `bodies` and `tools` together, and what's left has the first one's name. Bodies that don't meet are refused |
 | `delete_face` | `faces` (names or keys): those faces go, and their neighbours grow to close the gap. It takes holes, pockets, bosses, fillets, chamfers, rabbets, slots and corner notches, and refuses by name what it can't close |
@@ -99,6 +100,8 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `fill` | `sketch`: a flat [sheet](#sheets) filling each of its regions, facing along the sketch's normal, named as this feature's end cap: `f3:end` |
 | `copy_faces` | `faces` (names or keys): a copy of them as a sheet. What they're on stays as it is |
 | `sew` | `tolerance` (default 1e-6), and the `bodies` to join, by default every sheet. See [Sheets](#sheets) |
+| `rib` | `sketch`, holding open curves; `thickness`; `direction`, `parallel` (the default) or `normal`; `flip` (default false); `extend` (default true). A wall along each curve that runs until it meets the parts the rib acts on, and joins them: see [Ribs](#ribs) |
+| `split` | What cuts: `plane`, any [plane](#planes); `face`, a face's name or key, cutting along the whole surface it's on, as far as that goes: a plane, facing out of its part as the face does, or a cylinder, cone, sphere or ring-shaped torus; or `tool`, a solid part's name. And `keep_tool` (default true). Each part it acts on, those it names or any it reaches, sheets too, comes apart into pieces that are parts of their own. The piece in front of the plane, or inside the surface or the tool, keeps the part's name, and the others are new parts named for the split (`f9`, `f9.1`, ...). A plane's cut faces are named `start` for the split, on both sides. A part it names but doesn't cut through is refused, and so is a split that cuts nothing. A face on an extruded or turned curve or a free-form surface is refused |
 | `trim` | What cuts: `tool`, a solid's name like `"f3"`, or `plane`, any [plane](#planes), or `point` and `normal`, a plane as numbers, or `sketch`, whose regions cut straight through along its normal. And `keep`: `outside` (the default), `inside` or `both`. Acts on the `bodies` it names, by default every sheet. See [Sheets](#sheets) |
 | `offset` | `distance`: every face moves out, or in if negative. Sharp edges stay sharp. |
 | `shell` | `thickness`, `open` (face names, default none). An inner wall is named for this feature, with the slot of the face it follows: `f9:side.3` lies behind `f2:side.3`. |
@@ -176,7 +179,7 @@ a feature takes one:
 |---|---|
 | A plane | `"top"`, `"front"` or `"right"`; a plane feature's id, like `4`; a flat face's name or key, like `"f2:end"`; or `{"point": [x, y, z], "normal": [x, y, z]}` |
 | A point | `"origin"`; `[x, y, z]`; a corner, `{"faces": [...], "near": [x, y, z]}`, as `vertices_list` and `edges_list` give them; or a constrained sketch's point, `{"sketch": 4, "point": "7.start"}`, with an entity's id for a point, or a curve's `start`, `end`, `center` or `major`, as constraints name them |
-| A line | A straight edge's [selection](#edge-selections), picking one edge, which runs from its start to its end, or the same as `{"edge": selection}`; a constrained sketch's line, `{"sketch": 4, "line": 9}`, from its start to its end; `{"axis_of": "f3:side.0"}`, the axis of a cylinder, cone, torus or turned face, pointing the way `faces_list` gives it, or `{"axis_of": selection}`, of a circle, arc or ellipse; or `{"point": [x, y, z], "direction": [x, y, z]}` |
+| A line | A straight edge's [selection](#edge-selections), picking one edge, which runs from its start to its end, or the same as `{"edge": selection}`; a constrained sketch's line, `{"sketch": 4, "line": 9}`, from its start to its end, or with a circle, arc or ellipse there, its axis, through its center along the sketch's normal; `{"axis_of": "f3:side.0"}`, the axis of a cylinder, cone, torus or turned face, pointing the way `faces_list` gives it, or `{"axis_of": selection}`, of a circle, arc or ellipse; or `{"point": [x, y, z], "direction": [x, y, z]}` |
 
 Top, Front and Right are Onshape's: Top is the XY plane facing +Z with x along X, Front is the XZ plane facing -Y with x along
 X and y up, and Right is the YZ plane facing +X with x along Y and y up. A flat face's plane faces out of the part, and its
@@ -406,6 +409,39 @@ A name that picks several faces, such as a patterned boss's top, extrudes them a
 With `"mode": "add"`, a wall that carries straight on from a face of the part, as the walls over a block's top do, becomes part of that face, which keeps its name. So `f6:wall.0` names only the walls that stand out on their own, and with `new_body` or `surface` it names them all.
 
 A face has to be flat, and bounded by edges with an exact form: lines, arcs, ellipses and splines. An edge that's an intersection curve held as samples, such as where a plane cuts a free-form face, is refused, saying which face. So is a curved face, and a face that has gone.
+
+### Thin walls
+
+**`"thin": {"thickness": t, "side": "inside"}`** extrudes a wall along the sketch's outlines and open curves, in place of its regions, as Onshape's thin extrude does: a ring round each outline of each region it takes, and a strip along each open curve of a whole sketch, with square ends. `side` is `inside` (the default), into the region an outline goes round, or to the left of an open curve as it's drawn; `outside`, the other way; or `both`, half each way. Everything else about the extrude, its `regions`, `end`, `opposite` and `mode`, works as it does without it, so a thin cut `through_all` makes a groove.
+
+```json
+{ "id": 4, "type": "extrude", "sketch": 3, "length": 20, "thin": {"thickness": 1.5, "side": "both"} }
+```
+
+Each curve is moved sideways exactly: a line along its normal, an arc to a larger or smaller radius about the same center. Where the moved curves part at a corner, each is carried on to where they cross, so a wall's corners stay sharp, and where they overlap, each is cut back to the same point. A wall follows lines and arcs, and a spline or an ellipse is refused, as one moved sideways isn't one. So is a wall thicker than an arc is round, a corner so sharp that its outside would reach out more than 50 times the thickness, and a wall too thick for a segment between two corners, whose other side would run backwards: each says where. It can't take a part's `faces`, or make a surface.
+
+The faces on the right of a curve, as drawn, keep the names an extrude would give them, so on an outline that's the side away from the region. Those on its left are named `inner.` and the same, and a strip's ends after its first and last segments:
+
+| Name | Face |
+|---|---|
+| `f4:side.3`, `f4:hole.0.side.1`, `f4:region.1.side.0` | The wall's side to the right of that segment |
+| `f4:inner.side.3`, `f4:inner.hole.0.side.1`, `f4:region.1.inner.side.0` | Its side to the left |
+| `f4:start_of.side.0`, `f4:end_of.side.4` | The ends of a strip along an open curve that starts with segment 0 and ends with segment 4 |
+| `f4:start`, `f4:end` | The ends of the extrude, as always |
+
+A constrained sketch's segments are its entities, so a wall's faces follow them through changes to its dimensions. One sketch can give a thin extrude at most 200 regions and open curves.
+
+## Ribs
+
+A rib is a wall along each of a sketch's open curves, `thickness` thick, half each side, that runs until it meets the parts it acts on, and is joined to them, as Onshape's rib is.
+
+```json
+{ "id": 7, "type": "rib", "sketch": 6, "thickness": 2, "direction": "parallel", "flip": true }
+```
+
+With `"direction": "parallel"`, the default, it runs across from each line in the sketch's plane: to the line's left as it's drawn, or its right with `flip`, and is as thick across the plane. That's a gusset: sketch a line across the corner of a bracket on the plane through its middle, and the rib fills the triangle between the line and the bracket. It follows straight lines, and an arc or a spline is refused. With `"direction": "normal"` it runs along the sketch's normal, or against it with `flip`, and follows lines and arcs: a line sketched on an open box's rim gives a rib down to its floor.
+
+With `extend`, the default, each curve's ends carry straight on until they meet the parts too, so a line short of a box's walls still reaches them. Without it the rib stops where the curve does. Each rib is what's left of a slab along its curve once the parts are cut out of it, next to the curve, so a curve that runs into a part stops there. One that runs on past the parts without meeting them is refused, saying which way it went, rather than left sticking out, and so is a curve inside a part. Its faces are named as a [thin wall's](#thin-walls) are: `side.N` and `inner.side.N` on its two faces along segment N, and `start` on the face where it begins: in the sketch's plane for a rib along the normal, and along the line for one across from it.
 
 ## Sheets
 

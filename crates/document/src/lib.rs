@@ -14,7 +14,7 @@
 //! changes, edits, suppression and reordering alike.
 
 use coreshape::blend::{chamfer_with, fillet_with, BlendOptions};
-use coreshape::boolean::{intersect, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
+use coreshape::boolean::{intersect, subtract, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
 use coreshape::multi::{boolean_many, merged_tools, sweep, sweep_along, PathCurve, PathStep};
 use coreshape::build::{
     box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus, SLOT_END_CAP, SLOT_SEG_BASE, SLOT_START_CAP,
@@ -44,10 +44,13 @@ mod picks;
 mod planes;
 #[doc(hidden)]
 pub mod trace;
+mod rib;
 mod sheet_metal;
+mod thin;
 mod up_to;
 pub use sheet_metal::{Alignment, BendPosition, Corner, FlatBend, FlatEdge, FlatPattern, HemKind};
 use keys::Keys;
+pub use rib::RibDirection;
 pub use planes::{default_x, line_ref_value, plane_ref_value, point_ref_value, read_line_ref, read_plane_ref, read_point_ref, AlongEdge, LineRef, PlaneDef, PlaneRef, PointRef, TangentAt};
 use planes::{Geo, Looker};
 pub use keys::{face_keys, find_faces, find_one, FaceKey};
@@ -68,6 +71,11 @@ const HOLE_SLOTS: u32 = 1000;
 const SLOT_WALL_BASE: u32 = SLOT_SEG_BASE + MAX_REGIONS as u32 * REGION_SLOTS;
 /// The most faces one extrude may list, which keeps its walls' slots within a `u32`.
 const MAX_EXTRUDED_FACES: usize = 100_000;
+/// A thin wall's faces on the left of the curves they follow, and the ends of a wall along an open curve, come after the
+/// walls: `f9:inner.side.3`, `f9:region.1.inner.hole.0.side.2`, `f9:start_of.side.0`, laid out as the sides they follow.
+const SLOT_THIN_BASE: u32 = SLOT_WALL_BASE + MAX_EXTRUDED_FACES as u32;
+/// The most regions and open curves a thin extrude may take from one sketch, which keeps its slots within a `u32`.
+const MAX_THIN_REGIONS: u32 = 200;
 
 // ----- Names -----
 
@@ -123,12 +131,34 @@ impl FaceRef {
     }
 
     /// The name used in files and tools: `f2:end`, `f2:side.3`, `f2:hole.0.side.1`,
-    /// `f2:region.1.side.0`, and `f2:wall.0` for an extruded face's walls.
+    /// `f2:region.1.side.0`, `f2:wall.0` for an extruded face's walls, and for a thin wall `f2:inner.side.3`,
+    /// `f2:start_of.side.0` and `f2:end_of.side.4`.
     pub fn name(self) -> String {
         let f = self.feature.0;
         match self.slot {
             SLOT_START_CAP => format!("f{f}:start"),
             SLOT_END_CAP => format!("f{f}:end"),
+            slot if slot >= SLOT_THIN_BASE => {
+                let rest = slot - SLOT_THIN_BASE;
+                let (region, within) = (rest / REGION_SLOTS, rest % REGION_SLOTS);
+                let (hole, segment) = (within / HOLE_SLOTS, within % HOLE_SLOTS);
+                let mut out = format!("f{f}:");
+                if region > 0 {
+                    out.push_str(&format!("region.{region}."));
+                }
+                match hole * HOLE_SLOTS {
+                    thin::START_OF => out.push_str("start_of."),
+                    thin::END_OF => out.push_str("end_of."),
+                    _ => {
+                        out.push_str("inner.");
+                        if hole > 0 {
+                            out.push_str(&format!("hole.{}.", hole - 1));
+                        }
+                    }
+                }
+                out.push_str(&format!("side.{segment}"));
+                out
+            }
             slot if slot >= SLOT_WALL_BASE => format!("f{f}:wall.{}", slot - SLOT_WALL_BASE),
             slot => {
                 let rest = slot - SLOT_SEG_BASE;
@@ -166,10 +196,24 @@ impl FaceRef {
             return Ok(feature.wall(entry));
         }
         let parts: Vec<&str> = slot.split('.').collect();
-        let (mut region, mut hole, mut segment) = (0u32, 0u32, None);
+        let (mut region, mut hole, mut segment, mut thin) = (0u32, 0u32, None, None);
         let mut i = 0;
-        while i + 1 < parts.len() {
-            let n: u32 = parts[i + 1].parse().map_err(|_| bad())?;
+        while i < parts.len() {
+            // A thin wall's faces, which take no number of their own.
+            let flag = match parts[i] {
+                "inner" => Some(0),
+                "start_of" => Some(thin::START_OF),
+                "end_of" => Some(thin::END_OF),
+                _ => None,
+            };
+            if let Some(code) = flag {
+                if thin.replace(code).is_some() {
+                    return Err(bad());
+                }
+                i += 1;
+                continue;
+            }
+            let n: u32 = parts.get(i + 1).ok_or_else(bad)?.parse().map_err(|_| bad())?;
             match parts[i] {
                 "region" => region = n,
                 "hole" => hole = n.checked_add(1).ok_or_else(bad)?,
@@ -178,11 +222,19 @@ impl FaceRef {
             }
             i += 2;
         }
-        let segment = segment.filter(|_| i == parts.len()).ok_or_else(bad)?;
+        let segment = segment.ok_or_else(bad)?;
         if segment >= HOLE_SLOTS || hole >= REGION_SLOTS / HOLE_SLOTS || region as usize >= MAX_REGIONS {
             return Err(bad());
         }
-        Ok(FaceRef { feature, slot: SLOT_SEG_BASE + region * REGION_SLOTS + hole * HOLE_SLOTS + segment })
+        match thin {
+            None => Ok(FaceRef { feature, slot: SLOT_SEG_BASE + region * REGION_SLOTS + hole * HOLE_SLOTS + segment }),
+            Some(code) => {
+                if region >= MAX_THIN_REGIONS || (code != 0 && hole != 0) || hole * HOLE_SLOTS >= thin::START_OF {
+                    return Err(bad());
+                }
+                Ok(FaceRef { feature, slot: SLOT_THIN_BASE + region * REGION_SLOTS + code + hole * HOLE_SLOTS + segment })
+            }
+        }
     }
 }
 
@@ -697,6 +749,18 @@ pub enum TrimTool {
     Sketch(FeatureId),
 }
 
+/// What a split cuts with.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SplitTool {
+    /// A plane, facing the side whose piece keeps the part's name.
+    Plane(PlaneRef),
+    /// The whole surface a face is on, as far as it goes: a plane, facing out of its part as the face does, or a cylinder,
+    /// cone, sphere or torus, whose inside keeps the part's name.
+    Face(FaceKey),
+    /// A solid part.
+    Body(BodyId),
+}
+
 /// Which part of a cut sheet stays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrimKeep {
@@ -774,8 +838,9 @@ pub enum Op {
     /// flat faces of parts too, each along its own outward normal, holes and all. Its walls are named `f9:wall.0` for the
     /// first face listed, with the face across the edge in its key, and its ends are `start` and `end`, with the face they
     /// came from in their key. With an `end` other than `Blind`, `length` isn't used, and is only kept for going back to
-    /// it. `opposite` goes the other way.
-    Extrude { sketch: Option<FeatureId>, start: Expr, length: Expr, mode: Mode, regions: Vec<RegionPick>, faces: Vec<FaceKey>, end: ExtrudeEnd, opposite: bool },
+    /// it. `opposite` goes the other way. With `thin` it extrudes a wall along the sketch's outlines and open curves in
+    /// place of its regions: see `Thin`.
+    Extrude { sketch: Option<FeatureId>, start: Expr, length: Expr, mode: Mode, regions: Vec<RegionPick>, faces: Vec<FaceKey>, end: ExtrudeEnd, opposite: bool, thin: Option<Thin> },
     /// Revolves a sketch. With an `axis`, about that line in the sketch's plane, as drawn, turning right-handed around its
     /// direction. Without one, about the sketch's Z axis, with profile x the distance from the axis and y the height along it.
     /// With `regions` it takes those, from any sketches, and otherwise whatever `sketch` gives. With an `axis`, a region from
@@ -797,9 +862,10 @@ pub enum Op {
     /// Sweeps a sketch along a smooth path of lines and arcs: steps from the sketch plane, heading along its normal, or a
     /// sketch's curves, or a part's edges. See `SweepPath`.
     Sweep { sketch: FeatureId, path: SweepPath, mode: Mode },
-    /// Sweeps a sketch along a helix around the axis through `point`: a spring, a thread or a twisted bar. `pitch` is how
-    /// far along the axis one turn goes. The sides are named from the sketch, and the ends are the start and end caps.
-    Helix { sketch: FeatureId, point: Point3, axis: Point3, pitch: Expr, turns: Expr, left_handed: bool, mode: Mode },
+    /// Sweeps a sketch along a helix around an axis: a spring, a thread or a twisted bar. `pitch` is how far along the axis
+    /// one turn goes. The axis can be given as numbers or name a line, which it then follows. The sides are named from
+    /// the sketch, and the ends are the start and end caps.
+    Helix { sketch: FeatureId, axis: LineRef, pitch: Expr, turns: Expr, left_handed: bool, mode: Mode },
     /// Deletes faces, picked by name or key, and closes the gap by letting their neighbours grow. It adds no faces, and
     /// what's left keeps its names.
     DeleteFace { faces: Vec<FaceKey> },
@@ -836,6 +902,16 @@ pub enum Op {
     Sew { tolerance: Option<Expr> },
     /// Cuts sheets, those it names or all of them, and keeps a part of each.
     Trim { tool: TrimTool, keep: TrimKeep },
+    /// Walls `thickness` thick along a sketch's open curves, each running until it meets the parts it acts on, and joined to
+    /// them: across from each line in the sketch's plane, or along its normal, as `direction` says, and the other way with
+    /// `flip`. With `extend` (the default) each curve's ends carry straight on until they meet the parts too. Faces are
+    /// named as a thin wall's are.
+    Rib { sketch: FeatureId, thickness: Expr, direction: RibDirection, flip: bool, extend: bool },
+    /// Cuts parts, those it names or any it reaches, keeping every piece as a part of its own. The piece in front of the
+    /// plane, or inside the surface or the part it cuts with, keeps the part's name, and the others are new parts named for
+    /// this feature. A plane's cut faces are named as this feature's `start`. A part it names that it doesn't cut through is
+    /// refused. A tool part stays unless `keep_tool` is false.
+    Split { tool: SplitTool, keep_tool: bool },
     /// A plane, not a part, worked out again at every rebuild from what it names. `flip` turns its normal round, keeping
     /// its origin and x. Sketches can sit on it, and other features can name it.
     Plane { def: PlaneDef, flip: bool },
@@ -893,11 +969,55 @@ pub enum Op {
     Bend { sketch: FeatureId, degrees: Option<Expr>, bend_radius: Option<Expr>, position: BendPosition, flip: bool, right: bool },
 }
 
-/// A line in a sketch's plane to revolve around.
+/// A thin extrude's wall: `thickness` thick, along each outline of the regions it takes and each open curve of its
+/// sketch, on the `side` it says.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RevolveAxis {
-    pub point: Point2,
-    pub direction: Point2,
+pub struct Thin {
+    pub thickness: Expr,
+    pub side: ThinSide,
+}
+
+/// Which side of a curve a wall goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThinSide {
+    /// Into the region an outline goes round, or to the left of an open curve as it's drawn.
+    Inside,
+    /// The other way.
+    Outside,
+    /// Half each way.
+    Both,
+}
+
+impl Thin {
+    /// How far the wall goes to the left of a curve, and to its right.
+    fn sides(&self, env: &Env) -> Result<(f64, f64)> {
+        let t = num(&self.thickness, env)?;
+        if !(t >= MIN_FEATURE && t <= MAX_COORD) {
+            return Err(Error::InvalidInput(format!("a thin wall's thickness has to be at least {MIN_FEATURE}, and {t} isn't")));
+        }
+        Ok(match self.side {
+            ThinSide::Inside => (t, 0.0),
+            ThinSide::Outside => (0.0, t),
+            ThinSide::Both => (t / 2.0, t / 2.0),
+        })
+    }
+}
+
+/// A line to revolve around.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RevolveAxis {
+    /// A line in the sketch's plane, as numbers in its coordinates.
+    InSketch { point: Point2, direction: Point2 },
+    /// A line named as other features name one: a line of a sketch, a straight edge or an axis. It has to lie in the
+    /// sketch's plane, and the revolve follows it.
+    Line(LineRef),
+}
+
+impl RevolveAxis {
+    /// A line in the sketch's plane, as numbers in its coordinates.
+    pub fn in_sketch(point: Point2, direction: Point2) -> RevolveAxis {
+        RevolveAxis::InSketch { point, direction }
+    }
 }
 
 /// How a `Transform` moves things.
@@ -958,9 +1078,12 @@ impl From<RegionPick> for LoftSection {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Motion {
     Translate { by: Point3 },
-    Rotate { point: Point3, axis: Point3, degrees: Expr },
+    /// Turns about a line, right-handed about its direction.
+    Rotate { axis: LineRef, degrees: Expr },
     /// Carries one placement onto another, as Onshape's transform by mate connectors does.
     Frames { from: Placement, to: Placement },
+    /// Scales by `factor`, the same in every direction, about a point: 25.4 brings a part drawn in inches to millimetres.
+    Scale { point: PointRef, factor: Expr },
 }
 
 /// A Boolean between bodies.
@@ -1007,12 +1130,12 @@ impl Op {
     }
 
     pub fn extrude(sketch: FeatureId, start: impl Into<Expr>, length: impl Into<Expr>, mode: Mode) -> Op {
-        Op::Extrude { sketch: Some(sketch), start: start.into(), length: length.into(), mode, regions: Vec::new(), faces: Vec::new(), end: ExtrudeEnd::Blind, opposite: false }
+        Op::Extrude { sketch: Some(sketch), start: start.into(), length: length.into(), mode, regions: Vec::new(), faces: Vec::new(), end: ExtrudeEnd::Blind, opposite: false, thin: None }
     }
 
     /// Extrudes flat faces of parts, each along its own outward normal.
     pub fn extrude_faces(faces: Vec<FaceKey>, length: impl Into<Expr>, mode: Mode) -> Op {
-        Op::Extrude { sketch: None, start: Expr::number(0.0), length: length.into(), mode, regions: Vec::new(), faces, end: ExtrudeEnd::Blind, opposite: false }
+        Op::Extrude { sketch: None, start: Expr::number(0.0), length: length.into(), mode, regions: Vec::new(), faces, end: ExtrudeEnd::Blind, opposite: false, thin: None }
     }
 
     pub fn revolve(sketch: FeatureId, degrees: impl Into<Expr>, mode: Mode) -> Op {
@@ -1046,6 +1169,8 @@ impl Op {
             Op::CopyFaces { .. } => "copy_faces",
             Op::Sew { .. } => "sew",
             Op::Trim { .. } => "trim",
+            Op::Split { .. } => "split",
+            Op::Rib { .. } => "rib",
             Op::Fillet { .. } => "fillet",
             Op::FilletRadii { .. } => "fillet_radii",
             Op::Chamfer { .. } => "chamfer",
@@ -1088,8 +1213,14 @@ impl Op {
             Op::Sketch { plane, .. } | Op::ConstrainedSketch { plane, .. } | Op::Solid { at: plane, .. } if following(plane) => vec![Geo::Place(plane)],
             Op::Transform { motion: Motion::Frames { from, to }, .. } => [from, to].into_iter().filter(|p| following(p)).map(Geo::Place).collect(),
             Op::Plane { def, flip } => vec![Geo::Def(def, *flip)],
-            Op::Mirror { plane, .. } | Op::Draft { neutral: plane, .. } | Op::Trim { tool: TrimTool::Plane(plane), .. } | Op::Extrude { end: ExtrudeEnd::UpToPlane(plane), .. } => vec![Geo::Plane(plane)],
+            Op::Mirror { plane, .. }
+            | Op::Draft { neutral: plane, .. }
+            | Op::Trim { tool: TrimTool::Plane(plane), .. }
+            | Op::Split { tool: SplitTool::Plane(plane), .. }
+            | Op::Extrude { end: ExtrudeEnd::UpToPlane(plane), .. } => vec![Geo::Plane(plane)],
             Op::Pattern { along: PatternPath::Linear { direction: line, .. } | PatternPath::Circular { axis: line, .. }, .. } => vec![Geo::Line(line)],
+            Op::Helix { axis: line, .. } | Op::Transform { motion: Motion::Rotate { axis: line, .. }, .. } | Op::Revolve { axis: Some(RevolveAxis::Line(line)), .. } => vec![Geo::Line(line)],
+            Op::Transform { motion: Motion::Scale { point, .. }, .. } => vec![Geo::Point(point)],
             _ => Vec::new(),
         }
     }
@@ -1105,6 +1236,7 @@ impl Op {
             | Op::Sweep { mode, .. }
             | Op::Helix { mode, .. }
             | Op::Thicken { mode, .. } => Some(*mode),
+            Op::Rib { .. } => Some(Mode::Add),
             Op::ImportStepParts { .. } => Some(Mode::NewBody),
             Op::Fill { .. } => Some(Mode::Surface),
             Op::SheetMetal { .. } => Some(Mode::NewBody),
@@ -1114,14 +1246,15 @@ impl Op {
 
     /// Whether a feature with no list of bodies acts on sheets as well as solids. The rest only ever reach solids unless told.
     fn takes_sheets(&self) -> bool {
-        matches!(self, Op::Transform { .. } | Op::Thicken { .. } | Op::CopyFaces { .. } | Op::Sew { .. } | Op::Trim { .. })
+        matches!(self, Op::Transform { .. } | Op::Thicken { .. } | Op::CopyFaces { .. } | Op::Sew { .. } | Op::Trim { .. } | Op::Split { .. })
     }
 
     /// Whether this uses a sketch's open curves: to make a surface from, or as a sweep's path.
     fn uses_open_curves_of(&self, id: FeatureId) -> bool {
         self.surface_from() == Some(id)
+            || matches!(self, Op::Extrude { sketch: Some(sketch), regions, thin: Some(_), .. } if *sketch == id && regions.is_empty())
             || matches!(self, Op::Sweep { path: SweepPath::Sketch(along), .. } if *along == id)
-            || matches!(self, Op::SheetMetal { sketch, .. } | Op::Bend { sketch, .. } if *sketch == id)
+            || matches!(self, Op::SheetMetal { sketch, .. } | Op::Bend { sketch, .. } | Op::Rib { sketch, .. } if *sketch == id)
     }
 
     /// The sketch this makes a surface from, whose open curves it can use.
@@ -1144,6 +1277,8 @@ impl Op {
             Op::CopyFaces { .. } => "Copied faces",
             Op::Sew { .. } => "Sew",
             Op::Trim { .. } => "Trim",
+            Op::Split { .. } => "Split",
+            Op::Rib { .. } => "Rib",
             Op::Fillet { .. } | Op::FilletRadii { .. } => "Fillet",
             Op::Chamfer { .. } => "Chamfer",
             Op::Sweep { .. } => "Sweep",
@@ -1201,11 +1336,13 @@ impl Op {
                     SweepPath::Edges(edges) => edges.references(&mut out),
                 }
             }
-            Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::SheetMetal { sketch, .. } | Op::Tab { sketch } | Op::Bend { sketch, .. } => out.push(*sketch),
+            Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::SheetMetal { sketch, .. } | Op::Tab { sketch } | Op::Bend { sketch, .. } | Op::Rib { sketch, .. } => out.push(*sketch),
             Op::Loft { sections, .. } => out.extend(sections.iter().map(|s| s.sketch)),
             Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
             Op::Trim { tool: TrimTool::Body(body), .. } => out.push(body.feature),
             Op::Trim { tool: TrimTool::Sketch(sketch), .. } => out.push(*sketch),
+            Op::Split { tool: SplitTool::Body(body), .. } => out.push(body.feature),
+            Op::Split { tool: SplitTool::Face(key), .. } => key.references(&mut out),
             Op::DeleteFace { faces } | Op::Thicken { faces, .. } | Op::CopyFaces { faces } => {
                 for key in faces {
                     key.references(&mut out);
@@ -1269,7 +1406,8 @@ impl Op {
         match self {
             Op::ImportStep { .. } | Op::ImportStepParts { .. } | Op::Fill { .. } | Op::CopyFaces { .. } | Op::Tab { .. } => {}
             Op::Sew { tolerance } => out.extend(tolerance.iter()),
-            Op::Trim { .. } => {}
+            Op::Trim { .. } | Op::Split { .. } => {}
+            Op::Rib { thickness, .. } => out.push(thickness),
             Op::Sketch { plane, regions } => {
                 place(plane, &mut out);
                 for r in regions {
@@ -1288,8 +1426,9 @@ impl Op {
                 place(plane, &mut out);
                 out.extend(sketch.constraints.iter().filter_map(|c| c.rule.value()));
             }
-            Op::Extrude { start, length, end, .. } => {
+            Op::Extrude { start, length, end, thin, .. } => {
                 out.extend([start, length]);
+                out.extend(thin.iter().map(|t| &t.thickness));
                 match end {
                     ExtrudeEnd::UpToVertex(VertexRef::Point(p)) | ExtrudeEnd::UpToVertex(VertexRef::Faces { near: Some(p), .. }) => out.extend(p.iter()),
                     _ => {}
@@ -1297,18 +1436,15 @@ impl Op {
             }
             Op::Revolve { degrees, axis, .. } => {
                 out.push(degrees);
-                if let Some(axis) = axis {
-                    out.extend(axis.point.iter());
-                    out.extend(axis.direction.iter());
+                if let Some(RevolveAxis::InSketch { point, direction }) = axis {
+                    out.extend(point.iter());
+                    out.extend(direction.iter());
                 }
             }
             Op::Transform { motion, .. } => match motion {
                 Motion::Translate { by } => out.extend(by.iter()),
-                Motion::Rotate { point, axis, degrees } => {
-                    out.extend(point.iter());
-                    out.extend(axis.iter());
-                    out.push(degrees);
-                }
+                Motion::Rotate { degrees, .. } => out.push(degrees),
+                Motion::Scale { factor, .. } => out.push(factor),
                 Motion::Frames { from, to } => {
                     place(from, &mut out);
                     place(to, &mut out);
@@ -1326,11 +1462,7 @@ impl Op {
                 }
             }
             Op::Loft { .. } | Op::DeleteFace { .. } => {}
-            Op::Helix { point, axis, pitch, turns, .. } => {
-                out.extend(point.iter());
-                out.extend(axis.iter());
-                out.extend([pitch, turns]);
-            }
+            Op::Helix { pitch, turns, .. } => out.extend([pitch, turns]),
             Op::Thicken { thickness, .. } => out.push(thickness),
             Op::Sweep { path, .. } => match path {
                 SweepPath::Steps(steps) => {
@@ -1967,6 +2099,61 @@ fn trim_parts(
     }
 }
 
+/// A box standing on a plane, on the side its normal points to, reaching well past `around` every way.
+fn half_space(f: &Frame, around: &Aabb, tag: u32) -> Result<Body> {
+    let c = around.center();
+    let height = (c - f.origin).dot(f.z);
+    let reach = around.diagonal() + height.abs() + 10.0;
+    let origin = c - f.z * height - f.x * reach - f.y * reach;
+    box_solid(&Frame { origin, ..*f }, 2.0 * reach, 2.0 * reach, reach, tag)
+}
+
+/// The solid inside a round surface, as far as it reaches past `around`: a cylinder or cone running past it along the
+/// axis, a sphere or a torus.
+fn inside_of(surface: &Surface, around: &Aabb, tag: u32) -> Result<Body> {
+    let along = |f: &Frame| {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for k in 0..8 {
+            let p = v3(
+                if k & 1 == 0 { around.min.x } else { around.max.x },
+                if k & 2 == 0 { around.min.y } else { around.max.y },
+                if k & 4 == 0 { around.min.z } else { around.max.z },
+            );
+            let h = (p - f.origin).dot(f.z);
+            lo = lo.min(h);
+            hi = hi.max(h);
+        }
+        (lo - 1.0, hi + 1.0)
+    };
+    match *surface {
+        Surface::Cylinder { frame, radius } => {
+            let (lo, hi) = along(&frame);
+            cylinder(&Frame { origin: frame.origin + frame.z * lo, ..frame }, radius, hi - lo, tag)
+        }
+        Surface::Cone { frame, radius, half_angle } => {
+            let t = half_angle.tan();
+            let apex = -radius / t;
+            let (lo, hi) = along(&frame);
+            let lo = lo.max(apex);
+            if hi <= lo {
+                return Err(Error::InvalidInput("the cone doesn't reach the part".into()));
+            }
+            cone_frustum(&Frame { origin: frame.origin + frame.z * lo, ..frame }, (radius + lo * t).max(0.0), radius + hi * t, hi - lo, tag)
+        }
+        Surface::Sphere { frame, radius } => sphere(&frame, radius, tag),
+        Surface::Torus { frame, major, minor } if major > minor => torus(&frame, major, minor, tag),
+        ref other => Err(Error::InvalidInput(format!(
+            "a split goes along a flat, cylindrical, conical, spherical or ring-shaped face's whole surface, and this one is {}",
+            match other {
+                Surface::Torus { .. } => "a torus that passes through its own axis",
+                Surface::Extruded { .. } => "an extruded curve",
+                Surface::Revolved { .. } => "a turned curve",
+                _ => "free-form",
+            }
+        ))),
+    }
+}
+
 /// Profiles and a frame for revolving about a line in a sketch's plane, in the terms the kernel's revolve takes: distance
 /// from its frame's Z axis, and height along it. That's the same plane turned, with the profile on the +x side, so the
 /// axis has to point whichever way leaves it there. Going the other way round needs starting from the far end.
@@ -1983,8 +2170,24 @@ fn into_plane(list: &[Profile], from: &Frame, to: &Frame) -> std::result::Result
     Ok(list.iter().map(|p| coreshape::multi::mapped_profile(p, m, v2(o.x, o.y))).collect())
 }
 
-fn revolve_frame(axis: &RevolveAxis, frame: &Frame, list: &[Profile], angle: f64, env: &Env) -> Result<(Frame, Vec<Profile>)> {
-    let (point, along) = (v2(num(&axis.point[0], env)?, num(&axis.point[1], env)?), v2(num(&axis.direction[0], env)?, num(&axis.direction[1], env)?));
+/// A revolve's axis in its sketch's coordinates: a point on it and its direction.
+fn axis_in_sketch(axis: &RevolveAxis, frame: &Frame, look: &Looker, env: &Env) -> Result<(Vec2, Vec2)> {
+    match axis {
+        RevolveAxis::InSketch { point, direction } => Ok((v2(num(&point[0], env)?, num(&point[1], env)?), v2(num(&direction[0], env)?, num(&direction[1], env)?))),
+        RevolveAxis::Line(line) => {
+            let (q, d) = look.line(line)?;
+            let off = (q - frame.origin).dot(frame.z);
+            if d.dot(frame.z).abs() > 1e-9 || off.abs() > 1e-6 * (1.0 + (q - frame.origin).norm()) {
+                let how = if d.dot(frame.z).abs() > 1e-9 { "runs out of".to_string() } else { format!("is {:.6} off", off.abs()) };
+                return Err(Error::InvalidInput(format!("a revolve's axis has to lie in its sketch's plane, and this one {how} it")));
+            }
+            let r = q - frame.origin;
+            Ok((v2(r.dot(frame.x), r.dot(frame.y)), v2(d.dot(frame.x), d.dot(frame.y))))
+        }
+    }
+}
+
+fn revolve_frame((point, along): (Vec2, Vec2), frame: &Frame, list: &[Profile], angle: f64) -> Result<(Frame, Vec<Profile>)> {
     let length = along.x.hypot(along.y);
     if !(length >= 1e-12 && length <= 1e150) {
         return Err(Error::InvalidInput("a revolve's axis must have a sensible, non-zero direction".into()));
@@ -2351,6 +2554,7 @@ impl Document {
                 Geo::Place(p) => format!("{:?}", look.placement(p)?),
                 Geo::Plane(p) => format!("{:?}", look.plane(p)?),
                 Geo::Line(l) => format!("{:?}", look.line(l)?),
+                Geo::Point(p) => format!("{:?}", look.point(p)?),
                 Geo::Def(d, flip) => format!("{:?}", look.def(d, flip)?),
             };
             out.push(' ');
@@ -2770,7 +2974,8 @@ impl Document {
             let makes_its_own = |f: &FeatureId| self.feature(*f).is_some_and(|g| matches!(g.op.mode(), Some(Mode::NewBody | Mode::Surface)));
             // So does one made from faces or edges, which can be on any part.
             let looks_around = matches!(&feature.op, Op::Extrude { end, faces, .. } if *end != ExtrudeEnd::Blind || !faces.is_empty())
-                || matches!(&feature.op, Op::Sweep { path: SweepPath::Edges(_), .. });
+                || matches!(&feature.op, Op::Sweep { path: SweepPath::Edges(_), .. })
+                || matches!(&feature.op, Op::Split { tool: SplitTool::Face(_), .. });
             let independent = match &feature.op {
                 Op::Thicken { .. } => false,
                 _ if looks_around => false,
@@ -2795,7 +3000,7 @@ impl Document {
                         body_key ^= key_of(id).rotate_left(29);
                     }
                 }
-                if let Op::Trim { tool: TrimTool::Body(id), .. } = &feature.op {
+                if let Op::Trim { tool: TrimTool::Body(id), .. } | Op::Split { tool: SplitTool::Body(id), .. } = &feature.op {
                     body_key ^= key_of(id).rotate_left(29);
                 }
             }
@@ -2817,7 +3022,8 @@ impl Document {
                 | Op::Trim { tool: TrimTool::Sketch(sketch), .. }
                 | Op::SheetMetal { sketch, .. }
                 | Op::Tab { sketch }
-                | Op::Bend { sketch, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
+                | Op::Bend { sketch, .. }
+                | Op::Rib { sketch, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
                 Op::Loft { sections, .. } => hash_text(body_key ^ mixed(&sections.iter().map(|s| s.sketch).collect::<Vec<_>>()), &own),
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
                 _ => hash_text(body_key, &own),
@@ -2951,7 +3157,7 @@ impl Document {
                 }
                 Ok(sketched(SketchOutput { frame, profiles: Arc::new(list), by_entity: true, solved: Some(Arc::new(solved.sketch)), open: Arc::new(open), no_regions }))
             }
-            Op::Extrude { sketch, start, length, mode, regions, faces, end, opposite } => {
+            Op::Extrude { sketch, start, length, mode, regions, faces, end, opposite, thin } => {
                 // Each sketch it takes from, in the order they first come up.
                 let mut sketches: Vec<FeatureId> = Vec::new();
                 for id in regions.iter().map(|r| r.sketch) {
@@ -2969,6 +3175,13 @@ impl Document {
                 if surface && *end != ExtrudeEnd::Blind {
                     return Err(Error::InvalidInput("a surface is extruded to a length: through all and up to something are only built for solids".into()));
                 }
+                if thin.is_some() && surface {
+                    return Err(Error::InvalidInput("a thin extrude makes a wall with a thickness, and a surface has none".into()));
+                }
+                if thin.is_some() && !faces.is_empty() {
+                    return Err(Error::InvalidInput("a thin wall follows a sketch's outlines and curves, and can't take a part's faces".into()));
+                }
+                let sides = thin.as_ref().map(|t| t.sides(env)).transpose()?;
                 let plane = match end {
                     ExtrudeEnd::UpToPlane(p) => Some(look.plane(p)?),
                     _ => None,
@@ -2988,6 +3201,35 @@ impl Document {
                 let mut tools = Vec::new();
                 for (order, id) in sketches.iter().enumerate() {
                     let out = sketch_output(id)?;
+                    if let Some((left, right)) = sides {
+                        // A wall along each outline of the regions it takes, and along each open curve of a whole sketch.
+                        let list: Vec<Profile> = if regions.is_empty() { out.profiles.to_vec() } else { picked_profiles(*id, &out, regions)? };
+                        let open: &[Wire] = if regions.is_empty() { &out.open } else { &[] };
+                        if list.is_empty() && open.is_empty() {
+                            return Err(Error::InvalidInput(format!("a thin extrude follows a sketch's outlines and curves, and f{} has none", id.0)));
+                        }
+                        let shifted = Frame { origin: out.frame.origin + out.frame.z * offset, ..out.frame };
+                        let mut walls: Vec<(Profile, u32)> = Vec::new();
+                        for (k, p) in list.iter().enumerate() {
+                            let region = if out.by_entity { order } else { k };
+                            for ring in thin::rings(p, left, right)? {
+                                walls.push((ring, region as u32));
+                            }
+                        }
+                        for (j, w) in open.iter().enumerate() {
+                            let region = if out.by_entity { order } else { list.len() + j };
+                            walls.push((thin::strip(w, left, right)?, region as u32));
+                        }
+                        for (wall, region) in walls {
+                            if region >= MAX_THIN_REGIONS {
+                                return Err(Error::InvalidInput(format!("a thin extrude can follow at most {MAX_THIN_REGIONS} outlines and curves of one sketch")));
+                            }
+                            for b in made_from(&wall, &shifted)? {
+                                tools.push(thin_tagged(b, region, tag));
+                            }
+                        }
+                        continue;
+                    }
                     let list = match (regions.is_empty(), surface) {
                         (true, true) => out.profiles.clone(),
                         (true, false) => out.closed(*id, "an extrude")?,
@@ -3074,7 +3316,7 @@ impl Document {
                     let (frame, moved): (Frame, Vec<Profile>) = match axis {
                         Some(axis) => {
                             let here = if *id == *sketch { all_curves } else { into_plane(&all_curves, &out.frame, &own.frame).map_err(|why| Error::InvalidInput(format!("a region from sketch f{} {why} of f{}, whose axis it turns around", id.0, sketch.0)))? };
-                            revolve_frame(axis, &own.frame, &here, a, env)?
+                            revolve_frame(axis_in_sketch(axis, &own.frame, &look, env)?, &own.frame, &here, a)?
                         }
                         None => (out.frame, all_curves),
                     };
@@ -3163,11 +3405,12 @@ impl Document {
                     .collect::<Result<Vec<Body>>>()?;
                 applied(tools, *mode)
             }
-            Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => {
+            Op::Helix { sketch, axis, pitch, turns, left_handed, mode } => {
                 let out = sketch_output(sketch)?;
                 let list = if *mode == Mode::Surface { out.profiles.clone() } else { out.closed(*sketch, "a helix")? };
                 let SketchOutput { frame, by_entity, .. } = out;
-                let motion = Helix { origin: at_point(point)?, axis: at_point(axis)?, pitch: num(pitch, env)?, turns: num(turns, env)?, left_handed: *left_handed };
+                let (origin, axis) = look.line(axis)?;
+                let motion = Helix { origin, axis, pitch: num(pitch, env)?, turns: num(turns, env)?, left_handed: *left_handed };
                 let tools = list
                     .iter()
                     .enumerate()
@@ -3391,14 +3634,25 @@ impl Document {
                 }
                 let m = match motion {
                     Motion::Translate { by } => Frame::translation(at_point(by)?),
-                    Motion::Rotate { point, axis, degrees } => {
-                        let a = at_point(axis)?;
-                        if !(a.norm() >= 1e-12 && a.norm() <= 1e150) {
-                            return Err(Error::InvalidInput("a rotation's axis must have a sensible, non-zero length".into()));
-                        }
-                        Frame::rotation(at_point(point)?, a.normalized(), num(degrees, env)?.to_radians())
+                    Motion::Rotate { axis, degrees } => {
+                        let (q, d) = look.line(axis)?;
+                        Frame::rotation(q, d, num(degrees, env)?.to_radians())
                     }
                     Motion::Frames { from, to } => look.placement(to)?.compose(&look.placement(from)?.inverse()),
+                    Motion::Scale { point, factor } => {
+                        let (c, k) = (look.point(point)?, num(factor, env)?);
+                        let mut out = Changes::default();
+                        for (n, (id, body)) in scope.iter().enumerate() {
+                            let mut scaled = body.scaled(c, k).map_err(|e| on_body(e, *id, scope.len() > 1))?;
+                            if *copy {
+                                scaled.mark_copy(tag, n as u32 + 1);
+                                out.added.push(Arc::new(scaled));
+                            } else {
+                                out.changed.push((*id, Some(Arc::new(scaled))));
+                            }
+                        }
+                        return Ok(out.done(None));
+                    }
                 };
                 let mut out = Changes::default();
                 for (k, (id, body)) in scope.iter().enumerate() {
@@ -3470,6 +3724,68 @@ impl Document {
                         }
                         (Some(a), None) | (None, Some(a)) => out.settle(*id, a, tag),
                         (None, None) => {}
+                    }
+                }
+                Ok(out.done(None))
+            }
+            Op::Rib { sketch, thickness, direction, flip, extend } => {
+                let out = sketch_output(sketch)?;
+                let parts: Vec<Body> = scope.iter().filter(|(_, b)| !b.sheet).map(|(_, b)| (**b).clone()).collect();
+                let made = rib::ribs(&out.open, &out.frame, &parts, num(thickness, env)?, *direction, *flip, *extend, tag)?;
+                let region = |k: u32| if out.by_entity { 0 } else { k };
+                applied(made.into_iter().map(|(b, k)| thin_tagged(b, region(k), tag)).collect(), Mode::Add)
+            }
+            Op::Split { tool, keep_tool } => {
+                let by = match tool {
+                    SplitTool::Plane(p) => p.describe(),
+                    SplitTool::Face(key) => format!("the surface of {}", key.text()),
+                    SplitTool::Body(id) => format!("body {}", id.text()),
+                };
+                let tool_body = match tool {
+                    SplitTool::Body(id) => {
+                        let h = all.iter().find(|h| h.id == *id).ok_or_else(|| Error::InvalidInput(format!("it splits with body {}, which isn't there at this point", id.text())))?;
+                        if h.body.sheet {
+                            return Err(Error::InvalidInput(format!("a split cuts with a plane, a face's surface or a solid part, and {} is a sheet", id.text())));
+                        }
+                        Some((h.id, h.body.clone()))
+                    }
+                    _ => None,
+                };
+                let named = !feature.scope.is_empty();
+                let mut out = Changes::default();
+                for (id, body) in scope {
+                    if tool_body.as_ref().is_some_and(|t| t.0 == *id) {
+                        continue;
+                    }
+                    let bounds = body.aabb();
+                    let cutter = match tool {
+                        SplitTool::Plane(p) => half_space(&look.plane(p)?, &bounds, tag)?,
+                        SplitTool::Face(key) => match look.face_surface(key)? {
+                            Surface::Plane(_) => half_space(&look.plane(&PlaneRef::Face(key.clone()))?, &bounds, tag)?,
+                            surface => inside_of(&surface, &bounds, tag).map_err(|e| Error::InvalidInput(format!("splitting along {}: {e}", key.text())))?,
+                        },
+                        SplitTool::Body(_) => (*tool_body.as_ref().expect("a body").1).clone(),
+                    };
+                    let (inside, outside) = if body.sheet {
+                        (trim_sheet(body, &cutter, Keep::Inside)?, trim_sheet(body, &cutter, Keep::Outside)?)
+                    } else {
+                        (intersect(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?, subtract(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?)
+                    };
+                    if inside.faces.is_empty() || outside.faces.is_empty() {
+                        if named {
+                            return Err(Error::InvalidInput(format!("{by} doesn't cut through body {}: it's all on one side", id.text())));
+                        }
+                        continue;
+                    }
+                    out.settle(*id, inside, tag);
+                    out.added.extend(outside.solids().into_iter().filter(|p| !p.faces.is_empty()).map(Arc::new));
+                }
+                if out.changed.is_empty() {
+                    return Err(Error::InvalidInput(format!("{by} doesn't cut through any part")));
+                }
+                if !keep_tool {
+                    if let Some((id, _)) = tool_body {
+                        out.changed.push((id, None));
                     }
                 }
                 Ok(out.done(None))
@@ -4002,6 +4318,18 @@ fn picked_profiles(id: FeatureId, out: &SketchOutput, regions: &[RegionPick]) ->
     Ok(list)
 }
 
+/// A thin wall's faces moved to the slots of the region or curve they follow: those on the left of it into the thin range.
+/// Only the faces `feature` made move: a rib cut against a part has some of the part's faces too, and they keep theirs.
+fn thin_tagged(mut body: Body, region: u32, feature: u32) -> Body {
+    for f in &mut body.faces {
+        if f.tag.feature == feature && f.tag.slot >= SLOT_SEG_BASE {
+            let id = f.tag.slot - SLOT_SEG_BASE;
+            f.tag.slot = if id >= thin::INNER { SLOT_THIN_BASE + region * REGION_SLOTS + (id - thin::INNER) } else { SLOT_SEG_BASE + region * REGION_SLOTS + id };
+        }
+    }
+    body
+}
+
 fn with_region(mut body: Body, region: u32) -> Body {
     if region > 0 {
         for f in &mut body.faces {
@@ -4388,6 +4716,42 @@ fn read_point3(v: &Value) -> Result<Point3> {
     match v.as_array() {
         Some([a, b, c]) => Ok([read_expr(a)?, read_expr(b)?, read_expr(c)?]),
         _ => Err(Error::InvalidInput("a 3D point is written [x, y, z]".into())),
+    }
+}
+
+/// An axis among a feature's fields: `"point"` and `"axis"` as numbers, as they've always been written, or `"axis"` naming
+/// a line.
+fn axis_items(axis: &LineRef) -> Vec<(&'static str, Value)> {
+    match axis {
+        LineRef::Given { point, direction } => vec![("point", point3_value(point)), ("axis", point3_value(direction))],
+        other => vec![("axis", line_ref_value(other))],
+    }
+}
+
+/// `"axis"` among a feature's fields: a direction as numbers, with `"point"` beside it, or naming a line, which has a point
+/// of its own. With a `default` direction, `"axis"` can be left out and `"point"` defaults to the origin.
+fn read_axis(v: &Value, default: Option<Point3>, what: &str) -> Result<LineRef> {
+    match v.get("axis") {
+        Some(a) if a.as_array().is_none() => {
+            if v.get("point").is_some() {
+                return Err(Error::InvalidInput(format!("{what}'s axis names a line, which has a point of its own, so it takes no \"point\"")));
+            }
+            read_line_ref(a)
+        }
+        given => {
+            let defaulted = default.is_some();
+            let direction = match (given, default) {
+                (Some(a), _) => read_point3(a)?,
+                (None, Some(d)) => d,
+                (None, None) => return Err(Error::InvalidInput(format!("{what} needs an \"axis\""))),
+            };
+            let point = match (v.get("point"), defaulted) {
+                (Some(p), _) => read_point3(p)?,
+                (None, true) => point3(0.0, 0.0, 0.0),
+                (None, false) => return Err(Error::InvalidInput(format!("{what} needs a \"point\" on its axis, or an \"axis\" naming a line"))),
+            };
+            Ok(LineRef::Given { point, direction })
+        }
     }
 }
 
@@ -4798,7 +5162,7 @@ pub fn op_value(op: &Op) -> Value {
             ("plane", placement_value(plane)),
             ("sketch", sketch.to_json()),
         ]),
-        Op::Extrude { sketch, start, length, mode, regions, faces, end, opposite } => {
+        Op::Extrude { sketch, start, length, mode, regions, faces, end, opposite, thin } => {
             let mut items = vec![("type", Value::str("extrude"))];
             if let Some(sketch) = sketch {
                 items.push(("sketch", Value::Num(sketch.0 as f64)));
@@ -4820,12 +5184,22 @@ pub fn op_value(op: &Op) -> Value {
             if *opposite {
                 items.push(("opposite", Value::Bool(true)));
             }
+            if let Some(t) = thin {
+                let side = match t.side {
+                    ThinSide::Inside => "inside",
+                    ThinSide::Outside => "outside",
+                    ThinSide::Both => "both",
+                };
+                items.push(("thin", Value::obj(vec![("thickness", expr_value(&t.thickness)), ("side", Value::str(side))])));
+            }
             Value::obj(items)
         }
         Op::Revolve { sketch, degrees, mode, axis, regions } => {
             let mut items = vec![("type", Value::str("revolve")), ("sketch", Value::Num(sketch.0 as f64)), ("degrees", expr_value(degrees)), ("mode", mode_value(*mode))];
-            if let Some(axis) = axis {
-                items.push(("axis", Value::obj(vec![("point", point2_value(&axis.point)), ("direction", point2_value(&axis.direction))])));
+            match axis {
+                Some(RevolveAxis::InSketch { point, direction }) => items.push(("axis", Value::obj(vec![("point", point2_value(point)), ("direction", point2_value(direction))]))),
+                Some(RevolveAxis::Line(line)) => items.push(("axis", line_ref_value(line))),
+                None => {}
             }
             if !regions.is_empty() {
                 items.push(("regions", region_picks_value(regions, Some(*sketch))));
@@ -4835,8 +5209,14 @@ pub fn op_value(op: &Op) -> Value {
         Op::Transform { motion, copy } => {
             let how = match motion {
                 Motion::Translate { by } => Value::obj(vec![("type", Value::str("translate")), ("by", point3_value(by))]),
-                Motion::Rotate { point, axis, degrees } => Value::obj(vec![("type", Value::str("rotate")), ("point", point3_value(point)), ("axis", point3_value(axis)), ("degrees", expr_value(degrees))]),
+                Motion::Rotate { axis, degrees } => {
+                    let mut items = vec![("type", Value::str("rotate"))];
+                    items.extend(axis_items(axis));
+                    items.push(("degrees", expr_value(degrees)));
+                    Value::obj(items)
+                }
                 Motion::Frames { from, to } => Value::obj(vec![("type", Value::str("frames")), ("from", placement_value(from)), ("to", placement_value(to))]),
+                Motion::Scale { point, factor } => Value::obj(vec![("type", Value::str("scale")), ("point", point_ref_value(point)), ("factor", expr_value(factor))]),
             };
             Value::obj(vec![("type", Value::str("transform")), ("motion", how), ("copy", Value::Bool(*copy))])
         }
@@ -4957,6 +5337,26 @@ pub fn op_value(op: &Op) -> Value {
             ));
             Value::obj(items)
         }
+        Op::Rib { sketch, thickness, direction, flip, extend } => Value::obj(vec![
+            ("type", Value::str("rib")),
+            ("sketch", Value::Num(sketch.0 as f64)),
+            ("thickness", expr_value(thickness)),
+            ("direction", Value::str(if *direction == RibDirection::Normal { "normal" } else { "parallel" })),
+            ("flip", Value::Bool(*flip)),
+            ("extend", Value::Bool(*extend)),
+        ]),
+        Op::Split { tool, keep_tool } => {
+            let mut items = vec![("type", Value::str("split"))];
+            match tool {
+                SplitTool::Plane(plane) => items.push(("plane", plane_ref_value(plane))),
+                SplitTool::Face(key) => items.push(("face", Value::str(key.text()))),
+                SplitTool::Body(id) => items.push(("tool", Value::str(id.text()))),
+            }
+            if !keep_tool {
+                items.push(("keep_tool", Value::Bool(false)));
+            }
+            Value::obj(items)
+        }
         Op::Solid { primitive, at, mode } => {
             let mut items = vec![("type", Value::str("solid"))];
             match primitive {
@@ -5049,16 +5449,12 @@ pub fn op_value(op: &Op) -> Value {
             }
             Value::obj(items)
         }
-        Op::Helix { sketch, point, axis, pitch, turns, left_handed, mode } => Value::obj(vec![
-            ("type", Value::str("helix")),
-            ("sketch", Value::Num(sketch.0 as f64)),
-            ("point", point3_value(point)),
-            ("axis", point3_value(axis)),
-            ("pitch", expr_value(pitch)),
-            ("turns", expr_value(turns)),
-            ("left_handed", Value::Bool(*left_handed)),
-            ("mode", mode_value(*mode)),
-        ]),
+        Op::Helix { sketch, axis, pitch, turns, left_handed, mode } => {
+            let mut items = vec![("type", Value::str("helix")), ("sketch", Value::Num(sketch.0 as f64))];
+            items.extend(axis_items(axis));
+            items.extend([("pitch", expr_value(pitch)), ("turns", expr_value(turns)), ("left_handed", Value::Bool(*left_handed)), ("mode", mode_value(*mode))]);
+            Value::obj(items)
+        }
         Op::DeleteFace { faces } => Value::obj(vec![("type", Value::str("delete_face")), ("faces", key_list_value(faces))]),
         Op::Thicken { faces, thickness, mode } => Value::obj(vec![
             ("type", Value::str("thicken")),
@@ -5240,7 +5636,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::ConstrainedSketch { plane, sketch })
         }
         "extrude" => {
-            with(&["type", "sketch", "start", "length", "mode", "regions", "faces", "end", "opposite"])?;
+            with(&["type", "sketch", "start", "length", "mode", "regions", "faces", "end", "opposite", "thin"])?;
             let named = v.get("sketch").map(|_| read_sketch_id(v)).transpose()?;
             let regions = read_region_picks(v, named, "an extrude")?;
             let faces = read_key_list(v, "faces")?;
@@ -5260,7 +5656,20 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 None => false,
                 Some(b) => b.as_bool().ok_or_else(|| Error::InvalidInput("an extrude's \"opposite\" must be true or false".into()))?,
             };
-            Ok(Op::Extrude { sketch, start: v.get("start").map(read_expr).transpose()?.unwrap_or(Expr::number(0.0)), length, mode: read_mode(v)?, regions, faces, end, opposite })
+            let thin = match v.get("thin") {
+                None => None,
+                Some(t) => {
+                    known_keys(t, &["thickness", "side"])?;
+                    let side = match t.get("side").map(|s| s.as_str().unwrap_or("")) {
+                        None | Some("inside") => ThinSide::Inside,
+                        Some("outside") => ThinSide::Outside,
+                        Some("both") => ThinSide::Both,
+                        Some(other) => return Err(Error::InvalidInput(format!("unknown thin wall side \"{other}\"; expected inside, outside or both"))),
+                    };
+                    Some(Thin { thickness: expr_field(t, "thickness", "a thin wall")?, side })
+                }
+            };
+            Ok(Op::Extrude { sketch, start: v.get("start").map(read_expr).transpose()?.unwrap_or(Expr::number(0.0)), length, mode: read_mode(v)?, regions, faces, end, opposite, thin })
         }
         "revolve" => {
             with(&["type", "sketch", "degrees", "mode", "axis", "regions"])?;
@@ -5273,11 +5682,13 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             };
             let axis = match v.get("axis") {
                 None => None,
-                Some(a) => {
+                // Two numbers each is a line in the sketch's plane, and anything else names a line.
+                Some(a) if a.get("direction").and_then(Value::as_array).is_some_and(|d| d.len() == 2) => {
                     known_keys(a, &["point", "direction"])?;
                     let need = |key: &str| a.get(key).ok_or_else(|| Error::InvalidInput(format!("a revolve's axis needs a \"{key}\"")));
-                    Some(RevolveAxis { point: read_point2(need("point")?)?, direction: read_point2(need("direction")?)? })
+                    Some(RevolveAxis::InSketch { point: read_point2(need("point")?)?, direction: read_point2(need("direction")?)? })
                 }
+                Some(a) => Some(RevolveAxis::Line(read_line_ref(a)?)),
             };
             Ok(Op::Revolve { sketch, degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)), mode: read_mode(v)?, axis, regions })
         }
@@ -5292,13 +5703,17 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 }
                 "rotate" => {
                     known_keys(m, &["type", "point", "axis", "degrees"])?;
-                    Motion::Rotate { point: at("point", "a rotation")?, axis: at("axis", "a rotation")?, degrees: expr_field(m, "degrees", "a rotation")? }
+                    Motion::Rotate { axis: read_axis(m, None, "a rotation")?, degrees: expr_field(m, "degrees", "a rotation")? }
                 }
                 "frames" => {
                     known_keys(m, &["type", "from", "to"])?;
                     Motion::Frames { from: read_placement(field(m, "from", "a transform by frames")?)?, to: read_placement(field(m, "to", "a transform by frames")?)? }
                 }
-                other => return Err(Error::InvalidInput(format!("unknown motion \"{other}\"; expected translate, rotate or frames"))),
+                "scale" => {
+                    known_keys(m, &["type", "point", "factor"])?;
+                    Motion::Scale { point: m.get("point").map(read_point_ref).transpose()?.unwrap_or(PointRef::Origin), factor: expr_field(m, "factor", "a scale")? }
+                }
+                other => return Err(Error::InvalidInput(format!("unknown motion \"{other}\"; expected translate, rotate, frames or scale"))),
             };
             let copy = match v.get("copy") {
                 None => false,
@@ -5369,6 +5784,35 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 Some(other) => return Err(Error::InvalidInput(format!("unknown \"keep\" of \"{other}\"; expected outside, inside or both"))),
             };
             Ok(Op::Trim { tool, keep })
+        }
+        "rib" => {
+            with(&["type", "sketch", "thickness", "direction", "flip", "extend"])?;
+            let flag = |key: &str, default: bool| -> Result<bool> {
+                match v.get(key) {
+                    None => Ok(default),
+                    Some(b) => b.as_bool().ok_or_else(|| Error::InvalidInput(format!("a rib's \"{key}\" must be true or false"))),
+                }
+            };
+            let direction = match v.get("direction").map(|d| d.as_str().unwrap_or("")) {
+                None | Some("parallel") => RibDirection::Parallel,
+                Some("normal") => RibDirection::Normal,
+                Some(other) => return Err(Error::InvalidInput(format!("unknown rib direction \"{other}\"; expected parallel or normal"))),
+            };
+            Ok(Op::Rib { sketch: read_sketch_id(v)?, thickness: expr_field(v, "thickness", "a rib")?, direction, flip: flag("flip", false)?, extend: flag("extend", true)? })
+        }
+        "split" => {
+            with(&["type", "plane", "face", "tool", "keep_tool"])?;
+            let tool = match (v.get("plane"), v.get("face"), v.get("tool")) {
+                (Some(p), None, None) => SplitTool::Plane(read_plane_ref(p)?),
+                (None, Some(f), None) => SplitTool::Face(FaceKey::parse(f.as_str().ok_or_else(|| Error::InvalidInput("a split's \"face\" is a face's name or key, like \"f3:side.0\"".into()))?)?),
+                (None, None, Some(t)) => SplitTool::Body(BodyId::parse(t.as_str().ok_or_else(|| Error::InvalidInput("a split's \"tool\" must be the name of a part, like f3 or f3.2".into()))?)?),
+                _ => return Err(Error::InvalidInput("a split takes one of \"plane\", \"face\" (the whole surface it's on) or \"tool\" (a solid part)".into())),
+            };
+            let keep_tool = match v.get("keep_tool") {
+                None => true,
+                Some(b) => b.as_bool().ok_or_else(|| Error::InvalidInput("\"keep_tool\" must be true or false".into()))?,
+            };
+            Ok(Op::Split { tool, keep_tool })
         }
         "solid" => {
             let shape = field(v, "shape", "a solid")?.as_str().unwrap_or("");
@@ -5501,8 +5945,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 .ok_or_else(|| Error::InvalidInput("\"sketch\" must be a feature id".into()))?;
             Ok(Op::Helix {
                 sketch,
-                point: v.get("point").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 0.0)),
-                axis: v.get("axis").map(read_point3).transpose()?.unwrap_or(point3(0.0, 0.0, 1.0)),
+                axis: read_axis(v, Some(point3(0.0, 0.0, 1.0)), "a helix")?,
                 pitch: expr_field(v, "pitch", "a helix")?,
                 turns: expr_field(v, "turns", "a helix")?,
                 left_handed: match v.get("left_handed") {

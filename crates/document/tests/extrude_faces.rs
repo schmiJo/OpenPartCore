@@ -53,7 +53,7 @@ fn block(doc: &mut Document, dx: impl Into<Expr>, dy: impl Into<Expr>, dz: impl 
 }
 
 fn extrude_faces(list: &[&str], length: f64, mode: Mode, end: ExtrudeEnd, opposite: bool) -> Op {
-    Op::Extrude { sketch: None, start: 0.0.into(), length: length.into(), mode, regions: Vec::new(), faces: keys(list), end, opposite }
+    Op::Extrude { sketch: None, start: 0.0.into(), length: length.into(), mode, regions: Vec::new(), faces: keys(list), end, opposite, thin: None }
 }
 
 /// The span of a body's mesh along a direction.
@@ -183,7 +183,7 @@ fn faces_and_regions_together_keep_their_names_apart() {
     let mut doc = Document::new();
     block(&mut doc, 10.0, 6.0, 4.0, [0.0; 3], Mode::Add);
     let s = doc.add(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::Circle { cx: 30.0.into(), cy: 0.0.into(), r: 2.0.into() })])).unwrap();
-    doc.add(Op::Extrude { sketch: Some(s), start: 0.0.into(), length: 3.0.into(), mode: Mode::NewBody, regions: Vec::new(), faces: keys(&["f1:end"]), end: ExtrudeEnd::Blind, opposite: false }).unwrap();
+    doc.add(Op::Extrude { sketch: Some(s), start: 0.0.into(), length: 3.0.into(), mode: Mode::NewBody, regions: Vec::new(), faces: keys(&["f1:end"]), end: ExtrudeEnd::Blind, opposite: false, thin: None }).unwrap();
     let o = ok(&mut doc);
     near(total(&o), 240.0 + 60.0 * 3.0 + PI * 4.0 * 3.0, 1e-6, "volume");
     assert_eq!(o.bodies.len(), 3);

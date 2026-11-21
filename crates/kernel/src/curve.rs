@@ -277,6 +277,23 @@ impl Curve {
         }
     }
 
+    /// The image under a scaling by `k` about `c`, with `k` above 0. A line's parameter is a length, so it scales too, and
+    /// an edge along one has to scale its ends: see `Body::scaled`. Every other curve's parameter still means the same point.
+    pub fn scaled(&self, c: Vec3, k: f64) -> crate::error::Result<Curve> {
+        let at = |p: Vec3| c + (p - c) * k;
+        Ok(match self {
+            Curve::Line { origin, dir } => Curve::Line { origin: at(*origin), dir: *dir },
+            Curve::Circle { frame, radius } => Curve::Circle { frame: Frame { origin: at(frame.origin), ..*frame }, radius: radius * k },
+            Curve::Ellipse { frame, major, minor } => Curve::Ellipse { frame: Frame { origin: at(frame.origin), ..*frame }, major: major * k, minor: minor * k },
+            Curve::Sampled(s) => Curve::Sampled(Arc::new(SampledCurve::new(
+                s.points.iter().map(|p| at(*p)).collect(),
+                s.tangents.clone(),
+                (s.surfaces.0.scaled(c, k)?, s.surfaces.1.scaled(c, k)?),
+            ))),
+            Curve::Spline(s) => Curve::Spline(Arc::new(s.mapped(at))),
+        })
+    }
+
     pub fn transformed(&self, t: &Frame) -> Curve {
         match self {
             Curve::Line { origin, dir } => Curve::Line { origin: t.to_world(*origin), dir: t.dir_to_world(*dir) },

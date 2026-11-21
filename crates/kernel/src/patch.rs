@@ -1128,6 +1128,16 @@ impl Patch {
         (ds / (cell.u.1 - cell.u.0), dt / (cell.v.1 - cell.v.0))
     }
 
+    /// The same surface scaled by `k` about its frame's origin, moved as far along its normal, scaled, as this one is.
+    pub fn scaled(&self, k: f64) -> Result<Patch> {
+        let plain = Patch::new(self.degree, self.knots.clone(), self.count, self.points.iter().map(|p| *p * k).collect(), self.weights.clone())?;
+        if self.offset != 0.0 {
+            plain.moved_by(self.offset * k)
+        } else {
+            Ok(plain)
+        }
+    }
+
     /// The same surface reflected in local y, with `v` running the other way, which makes its normal the
     /// reflection of this one's.
     pub fn reflected_y(&self) -> Result<Patch> {

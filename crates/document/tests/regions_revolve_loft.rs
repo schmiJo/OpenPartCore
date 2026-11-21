@@ -77,7 +77,7 @@ fn pick(sketch: FeatureId, region: RegionId) -> RegionPick {
 
 /// About the sketch's y axis.
 fn y_axis() -> Option<RevolveAxis> {
-    Some(RevolveAxis { point: point(0.0, 0.0), direction: point(0.0, 1.0) })
+    Some(RevolveAxis::in_sketch(point(0.0, 0.0), point(0.0, 1.0)))
 }
 
 fn revolve(sketch: FeatureId, degrees: f64, mode: Mode, axis: Option<RevolveAxis>, regions: Vec<RegionPick>) -> Op {
