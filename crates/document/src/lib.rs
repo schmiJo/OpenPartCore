@@ -14,7 +14,7 @@
 //! changes, edits, suppression and reordering alike.
 
 use coreshape::blend::{chamfer_with, fillet_with, BlendOptions};
-use coreshape::boolean::{intersect, subtract, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
+use coreshape::boolean::{intersect, split_by_sheet, subtract, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
 use coreshape::multi::{boolean_many, merged_tools, sweep, sweep_along, PathCurve, PathStep};
 use coreshape::build::{
     box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus, SLOT_END_CAP, SLOT_SEG_BASE, SLOT_START_CAP,
@@ -28,7 +28,7 @@ use coreshape::curve::Curve;
 use coreshape::topo::{Body, FaceTag};
 use coreshape::delete::delete_faces;
 use coreshape::helix::{helix, Helix};
-use coreshape::sheet::{extrude_open, fill, revolve_open, sew, sheet_from_faces, sides_of};
+use coreshape::sheet::{extrude_open, fill, revolve_open, sew, sheet_from_faces, sides_of, turned_over};
 use coreshape::flat::flat_face_profile;
 use coreshape::thicken::thicken;
 use coreshape::tweak::{draft, offset, shell};
@@ -845,7 +845,8 @@ pub enum Op {
     /// direction. Without one, about the sketch's Z axis, with profile x the distance from the axis and y the height along it.
     /// With `regions` it takes those, from any sketches, and otherwise whatever `sketch` gives. With an `axis`, a region from
     /// another sketch has to be in the same plane as `sketch`, and without one it goes around its own sketch's Z axis.
-    Revolve { sketch: FeatureId, degrees: Expr, mode: Mode, axis: Option<RevolveAxis>, regions: Vec<RegionPick> },
+    /// With `thin` it turns a wall along the sketch's outlines and open curves in place of its regions: see `Thin`.
+    Revolve { sketch: FeatureId, degrees: Expr, mode: Mode, axis: Option<RevolveAxis>, regions: Vec<RegionPick>, thin: Option<Thin> },
     Solid { primitive: Primitive, at: Placement, mode: Mode },
     /// The solids in a STEP file, kept here in full so that the document stands alone. Their faces are named by their
     /// place in the file: `f3:side.0` is the first. A piece cut from a wide face keeps that face's name.
@@ -858,10 +859,13 @@ pub enum Op {
     Chamfer { edges: EdgeSelect, distance: Expr, propagate: bool },
     /// A solid through sections in order, each a sketch holding one outline or one region of a sketch, with free-form sides.
     /// Straight between two sections, and a smooth cubic through three or more. Sides are named from the first section.
-    Loft { sections: Vec<LoftSection>, mode: Mode },
+    /// With `thin` it lofts walls through the sections' outlines or open curves, each as thick as it says in its own
+    /// section's plane: see `Thin`.
+    Loft { sections: Vec<LoftSection>, mode: Mode, thin: Option<Thin> },
     /// Sweeps a sketch along a smooth path of lines and arcs: steps from the sketch plane, heading along its normal, or a
-    /// sketch's curves, or a part's edges. See `SweepPath`.
-    Sweep { sketch: FeatureId, path: SweepPath, mode: Mode },
+    /// sketch's curves, or a part's edges. See `SweepPath`. With `thin` it sweeps a wall along the sketch's outlines and
+    /// open curves in place of its regions: see `Thin`.
+    Sweep { sketch: FeatureId, path: SweepPath, mode: Mode, thin: Option<Thin> },
     /// Sweeps a sketch along a helix around an axis: a spring, a thread or a twisted bar. `pitch` is how far along the axis
     /// one turn goes. The axis can be given as numbers or name a line, which it then follows. The sides are named from
     /// the sketch, and the ends are the start and end caps.
@@ -969,8 +973,9 @@ pub enum Op {
     Bend { sketch: FeatureId, degrees: Option<Expr>, bend_radius: Option<Expr>, position: BendPosition, flip: bool, right: bool },
 }
 
-/// A thin extrude's wall: `thickness` thick, along each outline of the regions it takes and each open curve of its
-/// sketch, on the `side` it says.
+/// A thin feature's wall: `thickness` thick, along each outline of the regions it takes and each open curve of its
+/// sketch, on the `side` it says. Extrudes, revolves, sweeps and lofts take one, and it's measured in the sketch's plane,
+/// which for all but a loft is square to the wall.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Thin {
     pub thickness: Expr,
@@ -1084,6 +1089,9 @@ pub enum Motion {
     Frames { from: Placement, to: Placement },
     /// Scales by `factor`, the same in every direction, about a point: 25.4 brings a part drawn in inches to millimetres.
     Scale { point: PointRef, factor: Expr },
+    /// Stretches by `factor` along a line's direction only, about the plane through it square to it: what's on that plane
+    /// stays, and the rest goes `factor` times as far from it. Three of them stretch x, y and z each its own way.
+    Stretch { axis: LineRef, factor: Expr },
 }
 
 /// A Boolean between bodies.
@@ -1139,7 +1147,7 @@ impl Op {
     }
 
     pub fn revolve(sketch: FeatureId, degrees: impl Into<Expr>, mode: Mode) -> Op {
-        Op::Revolve { sketch, degrees: degrees.into(), mode, axis: None, regions: Vec::new() }
+        Op::Revolve { sketch, degrees: degrees.into(), mode, axis: None, regions: Vec::new(), thin: None }
     }
 
     pub fn solid(primitive: Primitive, at: Placement, mode: Mode) -> Op {
@@ -1221,6 +1229,7 @@ impl Op {
             Op::Pattern { along: PatternPath::Linear { direction: line, .. } | PatternPath::Circular { axis: line, .. }, .. } => vec![Geo::Line(line)],
             Op::Helix { axis: line, .. } | Op::Transform { motion: Motion::Rotate { axis: line, .. }, .. } | Op::Revolve { axis: Some(RevolveAxis::Line(line)), .. } => vec![Geo::Line(line)],
             Op::Transform { motion: Motion::Scale { point, .. }, .. } => vec![Geo::Point(point)],
+            Op::Transform { motion: Motion::Stretch { axis: line, .. }, .. } => vec![Geo::Line(line)],
             _ => Vec::new(),
         }
     }
@@ -1252,7 +1261,9 @@ impl Op {
     /// Whether this uses a sketch's open curves: to make a surface from, or as a sweep's path.
     fn uses_open_curves_of(&self, id: FeatureId) -> bool {
         self.surface_from() == Some(id)
-            || matches!(self, Op::Extrude { sketch: Some(sketch), regions, thin: Some(_), .. } if *sketch == id && regions.is_empty())
+            || matches!(self, Op::Extrude { sketch: Some(sketch), regions, thin: Some(_), .. } | Op::Revolve { sketch, regions, thin: Some(_), .. } if *sketch == id && regions.is_empty())
+            || matches!(self, Op::Sweep { sketch, thin: Some(_), .. } if *sketch == id)
+            || matches!(self, Op::Loft { sections, thin: Some(_), .. } if sections.iter().any(|s| s.sketch == id && s.region.is_none()))
             || matches!(self, Op::Sweep { path: SweepPath::Sketch(along), .. } if *along == id)
             || matches!(self, Op::SheetMetal { sketch, .. } | Op::Bend { sketch, .. } | Op::Rib { sketch, .. } if *sketch == id)
     }
@@ -1434,8 +1445,9 @@ impl Op {
                     _ => {}
                 }
             }
-            Op::Revolve { degrees, axis, .. } => {
+            Op::Revolve { degrees, axis, thin, .. } => {
                 out.push(degrees);
+                out.extend(thin.iter().map(|t| &t.thickness));
                 if let Some(RevolveAxis::InSketch { point, direction }) = axis {
                     out.extend(point.iter());
                     out.extend(direction.iter());
@@ -1444,7 +1456,7 @@ impl Op {
             Op::Transform { motion, .. } => match motion {
                 Motion::Translate { by } => out.extend(by.iter()),
                 Motion::Rotate { degrees, .. } => out.push(degrees),
-                Motion::Scale { factor, .. } => out.push(factor),
+                Motion::Scale { factor, .. } | Motion::Stretch { factor, .. } => out.push(factor),
                 Motion::Frames { from, to } => {
                     place(from, &mut out);
                     place(to, &mut out);
@@ -1461,21 +1473,25 @@ impl Op {
                     Primitive::Torus { major, minor } => out.extend([major, minor]),
                 }
             }
-            Op::Loft { .. } | Op::DeleteFace { .. } => {}
+            Op::Loft { thin, .. } => out.extend(thin.iter().map(|t| &t.thickness)),
+            Op::DeleteFace { .. } => {}
             Op::Helix { pitch, turns, .. } => out.extend([pitch, turns]),
             Op::Thicken { thickness, .. } => out.push(thickness),
-            Op::Sweep { path, .. } => match path {
-                SweepPath::Steps(steps) => {
-                    for step in steps {
-                        match step {
-                            SweepStep::Line { length } => out.push(length),
-                            SweepStep::Arc { radius, degrees, toward_degrees } => out.extend([radius, degrees, toward_degrees]),
+            Op::Sweep { path, thin, .. } => {
+                out.extend(thin.iter().map(|t| &t.thickness));
+                match path {
+                    SweepPath::Steps(steps) => {
+                        for step in steps {
+                            match step {
+                                SweepStep::Line { length } => out.push(length),
+                                SweepStep::Arc { radius, degrees, toward_degrees } => out.extend([radius, degrees, toward_degrees]),
+                            }
                         }
                     }
+                    SweepPath::Sketch(_) => {}
+                    SweepPath::Edges(edges) => edges.collect_exprs(&mut out),
                 }
-                SweepPath::Sketch(_) => {}
-                SweepPath::Edges(edges) => edges.collect_exprs(&mut out),
-            },
+            }
             Op::Pattern { along, .. } => match along {
                 PatternPath::Linear { count, spacing, .. } => out.extend([count, spacing]),
                 PatternPath::Circular { count, degrees, .. } => out.extend([count, degrees]),
@@ -2108,6 +2124,142 @@ fn half_space(f: &Frame, around: &Aabb, tag: u32) -> Result<Body> {
     box_solid(&Frame { origin, ..*f }, 2.0 * reach, 2.0 * reach, reach, tag)
 }
 
+/// What a split along a face cuts with: the solid in front of a plane or inside a round surface, or for an extruded or turned
+/// curve or a free-form face, a sheet, with whether it's a sheet. A sheet faces as the face does, out of its part.
+fn face_cutter(look: &Looker, key: &FaceKey, around: &Aabb, tag: u32) -> Result<(Body, bool)> {
+    let (body, found) = look.picked_faces(key)?;
+    match &body.faces[found[0]].surface {
+        Surface::Plane(_) => Ok((half_space(&look.plane(&PlaneRef::Face(key.clone()))?, around, tag)?, false)),
+        Surface::Extruded { .. } | Surface::Revolved { .. } => Ok((curve_sheet(body, &found, around, tag)?, true)),
+        Surface::Free { .. } => {
+            // As far as the faces go: a free-form surface isn't carried on past its edges.
+            let mut sheet = sheet_from_faces(body, &found)?;
+            for (k, f) in sheet.faces.iter_mut().enumerate() {
+                f.tag = FaceTag { feature: tag, slot: SLOT_SEG_BASE + k as u32 };
+            }
+            Ok((sheet, true))
+        }
+        _ => Ok((inside_of(&look.face_surface(key)?, around, tag)?, false)),
+    }
+}
+
+/// The whole surface an extruded or turned curve's faces are on, as a sheet reaching past `around`: the curve, carried on
+/// along its end tangents as the surface is, extruded along the surface's direction past `around` both ways, or turned
+/// all the way round, stopping at the axis. Faces that a curve's turning split, or a cut parted, are one curve's pieces,
+/// and go end to end. It faces as the first face does.
+fn curve_sheet(body: &Body, found: &[usize], around: &Aabb, tag: u32) -> Result<Body> {
+    let first = &body.faces[found[0]];
+    let (frame, turned) = match &first.surface {
+        Surface::Extruded { frame, .. } => (*frame, false),
+        Surface::Revolved { frame, .. } => (*frame, true),
+        _ => unreachable!("only an extruded or turned curve"),
+    };
+    let size = around.diagonal().max(1.0);
+    // Each different curve among the faces, in the first one's terms.
+    let mut pieces: Vec<Spline> = Vec::new();
+    for &f in found {
+        let (here, curve) = match &body.faces[f].surface {
+            Surface::Extruded { frame, curve } if !turned => (frame, curve),
+            Surface::Revolved { frame, curve } if turned => (frame, curve),
+            _ => return Err(Error::InvalidInput("the faces it names aren't on one surface".into())),
+        };
+        let spline = if turned {
+            if here.origin.dist(frame.origin) > 1e-9 * size || here.z.dot(frame.z) < 1.0 - 1e-12 {
+                return Err(Error::InvalidInput("the faces it names are turned about different axes".into()));
+            }
+            // Distance from the axis and height along it stay as they are about the same axis.
+            curve.spline.clone()
+        } else {
+            if here.z.dot(frame.z).abs() < 1.0 - 1e-12 {
+                return Err(Error::InvalidInput("the faces it names run different ways".into()));
+            }
+            curve.spline.mapped(|q| {
+                let l = frame.to_local(here.point(q.x, q.y, 0.0));
+                v3(l.x, l.y, 0.0)
+            })
+        };
+        if !pieces.contains(&spline) {
+            pieces.push(spline);
+        }
+    }
+    // End to end.
+    let join = 1e-7 * size;
+    let mut chain = vec![pieces.remove(0)];
+    while !pieces.is_empty() {
+        let (head, tail) = (chain[0].start(), chain[chain.len() - 1].end());
+        let next = pieces.iter().position(|p| p.start().dist(tail) <= join || p.end().dist(tail) <= join || p.end().dist(head) <= join || p.start().dist(head) <= join);
+        let Some(k) = next else {
+            return Err(Error::InvalidInput("the faces it names aren't pieces of one curve end to end".into()));
+        };
+        let p = pieces.remove(k);
+        if p.start().dist(tail) <= join {
+            chain.push(p);
+        } else if p.end().dist(tail) <= join {
+            chain.push(p.reversed());
+        } else if p.end().dist(head) <= join {
+            chain.insert(0, p);
+        } else {
+            chain.insert(0, p.reversed());
+        }
+    }
+    // Carried on straight from each end, far enough to leave `around`, or for a turned curve as far as the axis.
+    let flat = |v: Vec3| v2(v.x, v.y);
+    let reach = |at: Vec2| -> f64 {
+        let world = if turned { frame.point(at.x, 0.0, at.y) } else { frame.point(at.x, at.y, 0.0) };
+        around.diagonal() + world.dist(around.center()) + 1.0
+    };
+    let carried = |at: Vec2, way: Vec2| -> Option<Vec2> {
+        let way = way.normalized();
+        let mut length = reach(at);
+        if turned {
+            if at.x <= 1e-9 * size {
+                return None;
+            }
+            if way.x < 0.0 {
+                length = length.min(at.x / -way.x);
+            }
+        }
+        (length > MIN_FEATURE).then(|| {
+            let to = at + way * length;
+            // Onto the axis exactly, where it stops there.
+            if turned && to.x.abs() <= 1e-9 * size { v2(0.0, to.y) } else { to }
+        })
+    };
+    let (a, b) = (chain[0].clone(), chain[chain.len() - 1].clone());
+    let (start, end) = (flat(a.start()), flat(b.end()));
+    let mut segs: Vec<Seg> = Vec::new();
+    if let Some(before) = carried(start, -flat(a.derivative(a.domain().0))) {
+        segs.push(Seg { geom: SegGeom::Line { a: before, b: start }, id: 0 });
+    }
+    for s in chain {
+        segs.push(Seg { geom: SegGeom::Spline(Arc::new(s)), id: segs.len() as u32 });
+    }
+    if let Some(after) = carried(end, flat(b.derivative(b.domain().1))) {
+        segs.push(Seg { geom: SegGeom::Line { a: end, b: after }, id: segs.len() as u32 });
+    }
+    let wire = Wire { segs };
+    let sheet = if turned {
+        revolve_open(&wire, &frame, TAU, tag)?
+    } else {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for k in 0..8 {
+            let p = v3(
+                if k & 1 == 0 { around.min.x } else { around.max.x },
+                if k & 2 == 0 { around.min.y } else { around.max.y },
+                if k & 4 == 0 { around.min.z } else { around.max.z },
+            );
+            let h = (p - frame.origin).dot(frame.z);
+            lo = lo.min(h);
+            hi = hi.max(h);
+        }
+        extrude_open(&wire, &Frame { origin: frame.origin + frame.z * (lo - 1.0), ..frame }, hi - lo + 2.0, tag)?
+    };
+    // Facing as the face does, out of its part.
+    let at = body.coedge_point(first.loops[0][0], 0.5);
+    let theirs = sheet.faces.iter().find(|f| f.surface.sdf(at).abs() <= 1e-6 * size).ok_or_else(|| Error::Internal("the sheet along a face's surface misses the face".into()))?;
+    Ok(if theirs.outward_normal(at).dot(first.outward_normal(at)) < 0.0 { turned_over(&sheet) } else { sheet })
+}
+
 /// The solid inside a round surface, as far as it reaches past `around`: a cylinder or cone running past it along the
 /// axis, a sphere or a torus.
 fn inside_of(surface: &Surface, around: &Aabb, tag: u32) -> Result<Body> {
@@ -2142,15 +2294,7 @@ fn inside_of(surface: &Surface, around: &Aabb, tag: u32) -> Result<Body> {
         }
         Surface::Sphere { frame, radius } => sphere(&frame, radius, tag),
         Surface::Torus { frame, major, minor } if major > minor => torus(&frame, major, minor, tag),
-        ref other => Err(Error::InvalidInput(format!(
-            "a split goes along a flat, cylindrical, conical, spherical or ring-shaped face's whole surface, and this one is {}",
-            match other {
-                Surface::Torus { .. } => "a torus that passes through its own axis",
-                Surface::Extruded { .. } => "an extruded curve",
-                Surface::Revolved { .. } => "a turned curve",
-                _ => "free-form",
-            }
-        ))),
+        _ => Err(Error::InvalidInput("a split goes along a torus's whole surface only where it's ring-shaped, and this one passes through its own axis".into())),
     }
 }
 
@@ -3202,28 +3346,8 @@ impl Document {
                 for (order, id) in sketches.iter().enumerate() {
                     let out = sketch_output(id)?;
                     if let Some((left, right)) = sides {
-                        // A wall along each outline of the regions it takes, and along each open curve of a whole sketch.
-                        let list: Vec<Profile> = if regions.is_empty() { out.profiles.to_vec() } else { picked_profiles(*id, &out, regions)? };
-                        let open: &[Wire] = if regions.is_empty() { &out.open } else { &[] };
-                        if list.is_empty() && open.is_empty() {
-                            return Err(Error::InvalidInput(format!("a thin extrude follows a sketch's outlines and curves, and f{} has none", id.0)));
-                        }
                         let shifted = Frame { origin: out.frame.origin + out.frame.z * offset, ..out.frame };
-                        let mut walls: Vec<(Profile, u32)> = Vec::new();
-                        for (k, p) in list.iter().enumerate() {
-                            let region = if out.by_entity { order } else { k };
-                            for ring in thin::rings(p, left, right)? {
-                                walls.push((ring, region as u32));
-                            }
-                        }
-                        for (j, w) in open.iter().enumerate() {
-                            let region = if out.by_entity { order } else { list.len() + j };
-                            walls.push((thin::strip(w, left, right)?, region as u32));
-                        }
-                        for (wall, region) in walls {
-                            if region >= MAX_THIN_REGIONS {
-                                return Err(Error::InvalidInput(format!("a thin extrude can follow at most {MAX_THIN_REGIONS} outlines and curves of one sketch")));
-                            }
+                        for (wall, region) in thin_walls(*id, order, &out, regions, left, right, "a thin extrude")? {
                             for b in made_from(&wall, &shifted)? {
                                 tools.push(thin_tagged(b, region, tag));
                             }
@@ -3283,9 +3407,13 @@ impl Document {
                 }
                 applied(tools, *mode)
             }
-            Op::Revolve { sketch, degrees, mode, axis, regions } => {
+            Op::Revolve { sketch, degrees, mode, axis, regions, thin } => {
                 let a = num(degrees, env)?.to_radians();
                 let surface = *mode == Mode::Surface;
+                if thin.is_some() && surface {
+                    return Err(Error::InvalidInput("a thin revolve makes a wall with a thickness, and a surface has none".into()));
+                }
+                let sides = thin.as_ref().map(|t| t.sides(env)).transpose()?;
                 // Each sketch it takes from, in the order they first come up.
                 let mut sketches: Vec<FeatureId> = Vec::new();
                 for id in regions.iter().map(|r| r.sketch) {
@@ -3301,6 +3429,25 @@ impl Document {
                 let mut tools = Vec::new();
                 for (order, id) in sketches.iter().enumerate() {
                     let out = sketch_output(id)?;
+                    // The axis frame, and the profiles moved into it from the sketch's plane.
+                    let around = |list: Vec<Profile>| -> Result<(Frame, Vec<Profile>)> {
+                        match axis {
+                            Some(axis) => {
+                                let here = if *id == *sketch { list } else { into_plane(&list, &out.frame, &own.frame).map_err(|why| Error::InvalidInput(format!("a region from sketch f{} {why} of f{}, whose axis it turns around", id.0, sketch.0)))? };
+                                revolve_frame(axis_in_sketch(axis, &own.frame, &look, env)?, &own.frame, &here, a)
+                            }
+                            None => Ok((out.frame, list)),
+                        }
+                    };
+                    if let Some((left, right)) = sides {
+                        let walls = thin_walls(*id, order, &out, regions, left, right, "a thin revolve")?;
+                        let (frame, moved) = around(walls.iter().map(|w| w.0.clone()).collect())?;
+                        for (p, (_, region)) in moved.iter().zip(&walls) {
+                            let made = revolve(p, &frame, a, tag).map_err(|e| thin_refused(e, "revolve"))?;
+                            tools.push(thin_tagged(made, *region, tag));
+                        }
+                        continue;
+                    }
                     let list: Vec<Profile> = match (regions.is_empty(), surface) {
                         (true, true) => out.profiles.to_vec(),
                         (true, false) => out.closed(*id, "a revolve")?.to_vec(),
@@ -3313,13 +3460,7 @@ impl Document {
                     if whole_surface {
                         all_curves.extend(out.open.iter().map(|w| Profile { outer: w.clone(), holes: Vec::new() }));
                     }
-                    let (frame, moved): (Frame, Vec<Profile>) = match axis {
-                        Some(axis) => {
-                            let here = if *id == *sketch { all_curves } else { into_plane(&all_curves, &out.frame, &own.frame).map_err(|why| Error::InvalidInput(format!("a region from sketch f{} {why} of f{}, whose axis it turns around", id.0, sketch.0)))? };
-                            revolve_frame(axis_in_sketch(axis, &own.frame, &look, env)?, &own.frame, &here, a)?
-                        }
-                        None => (out.frame, all_curves),
-                    };
+                    let (frame, moved) = around(all_curves)?;
                     let (closed, curves) = moved.split_at(closed_count);
                     if whole_surface {
                         let closed = closed.iter().map(|p| revolve(p, &frame, a, tag).and_then(|b| sides_of(&b))).collect::<Result<Vec<Body>>>()?;
@@ -3339,7 +3480,38 @@ impl Document {
                 }
                 applied(tools, *mode)
             }
-            Op::Loft { sections, mode } => {
+            Op::Loft { sections, mode, thin: Some(t) } => {
+                if *mode == Mode::Surface {
+                    return Err(Error::InvalidInput("a thin loft makes a wall with a thickness, and a surface has none".into()));
+                }
+                let (left, right) = t.sides(env)?;
+                // Each section's walls, in its own plane: the rings round its outlines and the strips along its open curves.
+                let mut walls: Vec<(Vec<(Profile, u32)>, Frame)> = Vec::with_capacity(sections.len());
+                for section in sections {
+                    let out = sketch_output(&section.sketch)?;
+                    let picked: Vec<RegionPick> = section.region.iter().map(|&region| RegionPick { sketch: section.sketch, region }).collect();
+                    walls.push((thin_walls(section.sketch, 0, &out, &picked, left, right, "a thin loft's section")?, out.frame));
+                }
+                // They go through the sections in order, the first wall of each, then the second, and so on.
+                let shape = |list: &[(Profile, u32)]| list.iter().map(|w| if w.0.holes.is_empty() { "an open curve" } else { "an outline" }).collect::<Vec<_>>();
+                let first = shape(&walls[0].0);
+                if let Some((k, _)) = walls.iter().enumerate().find(|(_, w)| shape(&w.0) != first) {
+                    return Err(Error::InvalidInput(format!(
+                        "a thin loft's sections have to follow the same outlines and curves in the same order, and section {k} (f{}) has {} where the first has {}",
+                        sections[k].sketch.0,
+                        shape(&walls[k].0).join(", "),
+                        first.join(", ")
+                    )));
+                }
+                let mut tools = Vec::with_capacity(first.len());
+                for i in 0..first.len() {
+                    let through: Vec<(&Profile, Frame)> = walls.iter().map(|(list, frame)| (&list[i].0, *frame)).collect();
+                    let made = coreshape::loft::loft(&through, tag).map_err(|e| thin_refused(e, "loft"))?;
+                    tools.push(thin_tagged(made, walls[0].0[i].1, tag));
+                }
+                applied(tools, *mode)
+            }
+            Op::Loft { sections, mode, thin: None } => {
                 let mut list: Vec<(Profile, Frame)> = Vec::with_capacity(sections.len());
                 for section in sections {
                     let out = sketch_output(&section.sketch)?;
@@ -3362,9 +3534,22 @@ impl Document {
                 let refs: Vec<(&Profile, Frame)> = list.iter().map(|(p, f)| (p, *f)).collect();
                 applied(vec![coreshape::loft::loft(&refs, tag)?], *mode)
             }
-            Op::Sweep { sketch, path, mode } => {
+            Op::Sweep { sketch, path, mode, thin } => {
+                if thin.is_some() && *mode == Mode::Surface {
+                    return Err(Error::InvalidInput("a thin sweep makes a wall with a thickness, and a surface has none".into()));
+                }
                 let out = sketch_output(sketch)?;
-                let list = if *mode == Mode::Surface { out.profiles.clone() } else { out.closed(*sketch, "a sweep")? };
+                // With a thin wall, what goes along the path is the wall, named as its faces will be.
+                let (list, regions): (Arc<Vec<Profile>>, Vec<u32>) = match thin {
+                    Some(t) => {
+                        let (left, right) = t.sides(env)?;
+                        let walls = thin_walls(*sketch, 0, &out, &[], left, right, "a thin sweep")?;
+                        let regions = walls.iter().map(|w| w.1).collect();
+                        (Arc::new(walls.into_iter().map(|w| w.0).collect()), regions)
+                    }
+                    None if *mode == Mode::Surface => (out.profiles.clone(), Vec::new()),
+                    None => (out.closed(*sketch, "a sweep")?, Vec::new()),
+                };
                 let SketchOutput { frame, by_entity, .. } = out;
                 let along: Option<Vec<PathCurve>> = match path {
                     SweepPath::Steps(_) => None,
@@ -3397,10 +3582,13 @@ impl Document {
                     .enumerate()
                     .map(|(k, p)| {
                         let made = match &along {
-                            Some(pieces) => sweep_along(p, &frame, pieces, tag)?,
-                            None => sweep(p, &frame, &steps, tag)?,
+                            Some(pieces) => sweep_along(p, &frame, pieces, tag),
+                            None => sweep(p, &frame, &steps, tag),
                         };
-                        Ok(with_region(made, if by_entity { 0 } else { k as u32 }))
+                        if thin.is_some() {
+                            return Ok(thin_tagged(made.map_err(|e| thin_refused(e, "sweep"))?, regions[k], tag));
+                        }
+                        Ok(with_region(made?, if by_entity { 0 } else { k as u32 }))
                     })
                     .collect::<Result<Vec<Body>>>()?;
                 applied(tools, *mode)
@@ -3639,11 +3827,25 @@ impl Document {
                         Frame::rotation(q, d, num(degrees, env)?.to_radians())
                     }
                     Motion::Frames { from, to } => look.placement(to)?.compose(&look.placement(from)?.inverse()),
-                    Motion::Scale { point, factor } => {
-                        let (c, k) = (look.point(point)?, num(factor, env)?);
+                    Motion::Scale { .. } | Motion::Stretch { .. } => {
+                        let k = match motion {
+                            Motion::Scale { factor, .. } | Motion::Stretch { factor, .. } => num(factor, env)?,
+                            _ => unreachable!("a scale or a stretch"),
+                        };
+                        let resize: Box<dyn Fn(&Body) -> Result<Body>> = match motion {
+                            Motion::Stretch { axis, .. } => {
+                                let (q, d) = look.line(axis)?;
+                                Box::new(move |b: &Body| b.stretched(q, d, k))
+                            }
+                            Motion::Scale { point, .. } => {
+                                let c = look.point(point)?;
+                                Box::new(move |b: &Body| b.scaled(c, k))
+                            }
+                            _ => unreachable!("a scale or a stretch"),
+                        };
                         let mut out = Changes::default();
                         for (n, (id, body)) in scope.iter().enumerate() {
-                            let mut scaled = body.scaled(c, k).map_err(|e| on_body(e, *id, scope.len() > 1))?;
+                            let mut scaled = resize(body).map_err(|e| on_body(e, *id, scope.len() > 1))?;
                             if *copy {
                                 scaled.mark_copy(tag, n as u32 + 1);
                                 out.added.push(Arc::new(scaled));
@@ -3744,9 +3946,6 @@ impl Document {
                 let tool_body = match tool {
                     SplitTool::Body(id) => {
                         let h = all.iter().find(|h| h.id == *id).ok_or_else(|| Error::InvalidInput(format!("it splits with body {}, which isn't there at this point", id.text())))?;
-                        if h.body.sheet {
-                            return Err(Error::InvalidInput(format!("a split cuts with a plane, a face's surface or a solid part, and {} is a sheet", id.text())));
-                        }
                         Some((h.id, h.body.clone()))
                     }
                     _ => None,
@@ -3758,18 +3957,25 @@ impl Document {
                         continue;
                     }
                     let bounds = body.aabb();
-                    let cutter = match tool {
-                        SplitTool::Plane(p) => half_space(&look.plane(p)?, &bounds, tag)?,
-                        SplitTool::Face(key) => match look.face_surface(key)? {
-                            Surface::Plane(_) => half_space(&look.plane(&PlaneRef::Face(key.clone()))?, &bounds, tag)?,
-                            surface => inside_of(&surface, &bounds, tag).map_err(|e| Error::InvalidInput(format!("splitting along {}: {e}", key.text())))?,
-                        },
-                        SplitTool::Body(_) => (*tool_body.as_ref().expect("a body").1).clone(),
+                    // A solid to cut by, whose inside is what keeps the part's name, or a sheet, whose front does.
+                    let (cutter, along_sheet) = match tool {
+                        SplitTool::Plane(p) => (half_space(&look.plane(p)?, &bounds, tag)?, false),
+                        SplitTool::Face(key) => face_cutter(&look, key, &bounds, tag).map_err(|e| Error::InvalidInput(format!("splitting along {}: {e}", key.text())))?,
+                        SplitTool::Body(_) => {
+                            let b = &tool_body.as_ref().expect("a body").1;
+                            ((**b).clone(), b.sheet)
+                        }
                     };
-                    let (inside, outside) = if body.sheet {
-                        (trim_sheet(body, &cutter, Keep::Inside)?, trim_sheet(body, &cutter, Keep::Outside)?)
-                    } else {
-                        (intersect(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?, subtract(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?)
+                    let (inside, outside) = match (along_sheet, body.sheet) {
+                        (false, true) => (trim_sheet(body, &cutter, Keep::Inside)?, trim_sheet(body, &cutter, Keep::Outside)?),
+                        (false, false) => (intersect(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?, subtract(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?),
+                        (true, false) => split_by_sheet(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?,
+                        (true, true) => {
+                            return Err(Error::Unsupported(format!(
+                                "splitting the sheet {} along another sheet isn't built, as a sheet has no inside to tell the two sides apart by: cutting a sheet with another sheet takes a plane, a face's flat, round or ring-shaped surface, or a solid part",
+                                id.text()
+                            )))
+                        }
                     };
                     if inside.faces.is_empty() || outside.faces.is_empty() {
                         if named {
@@ -4328,6 +4534,43 @@ fn thin_tagged(mut body: Body, region: u32, feature: u32) -> Body {
         }
     }
     body
+}
+
+/// The walls along a sketch's outlines, those of the regions picked or of every region, and along a whole sketch's open
+/// curves, in its plane, each with the number its faces are named by: the sketch's place among those a feature takes,
+/// `order`, as entities tell a sketch's walls apart.
+#[allow(clippy::too_many_arguments)]
+fn thin_walls(id: FeatureId, order: usize, out: &SketchOutput, regions: &[RegionPick], left: f64, right: f64, what: &str) -> Result<Vec<(Profile, u32)>> {
+    let list: Vec<Profile> = if regions.is_empty() { out.profiles.to_vec() } else { picked_profiles(id, out, regions)? };
+    let open: &[Wire] = if regions.is_empty() { &out.open } else { &[] };
+    if list.is_empty() && open.is_empty() {
+        return Err(Error::InvalidInput(format!("{what} follows a sketch's outlines and curves, and f{} has none", id.0)));
+    }
+    let mut walls: Vec<(Profile, u32)> = Vec::new();
+    for (k, p) in list.iter().enumerate() {
+        let region = if out.by_entity { order } else { k };
+        for ring in thin::rings(p, left, right)? {
+            walls.push((ring, region as u32));
+        }
+    }
+    for (j, w) in open.iter().enumerate() {
+        let region = if out.by_entity { order } else { list.len() + j };
+        walls.push((thin::strip(w, left, right)?, region as u32));
+    }
+    if walls.iter().any(|w| w.1 >= MAX_THIN_REGIONS) {
+        return Err(Error::InvalidInput(format!("{what} can follow at most {MAX_THIN_REGIONS} outlines and curves of one sketch")));
+    }
+    Ok(walls)
+}
+
+/// A kernel's refusal of a thin wall, saying that it's the wall that was refused, as it isn't what was drawn.
+fn thin_refused(e: Error, what: &str) -> Error {
+    let say = |m: &str| format!("the thin wall can't {what}: {m}");
+    match e {
+        Error::InvalidProfile(m) => Error::InvalidProfile(say(&m)),
+        Error::InvalidInput(m) => Error::InvalidInput(say(&m)),
+        other => other,
+    }
 }
 
 fn with_region(mut body: Body, region: u32) -> Body {
@@ -5137,6 +5380,28 @@ fn mode_value(m: Mode) -> Value {
     })
 }
 
+/// A feature's `"thin"`: `{"thickness": t, "side": "inside"}`, or nothing.
+fn read_thin(v: &Value) -> Result<Option<Thin>> {
+    let Some(t) = v.get("thin") else { return Ok(None) };
+    known_keys(t, &["thickness", "side"])?;
+    let side = match t.get("side").map(|s| s.as_str().unwrap_or("")) {
+        None | Some("inside") => ThinSide::Inside,
+        Some("outside") => ThinSide::Outside,
+        Some("both") => ThinSide::Both,
+        Some(other) => return Err(Error::InvalidInput(format!("unknown thin wall side \"{other}\"; expected inside, outside or both"))),
+    };
+    Ok(Some(Thin { thickness: expr_field(t, "thickness", "a thin wall")?, side }))
+}
+
+fn thin_value(t: &Thin) -> Value {
+    let side = match t.side {
+        ThinSide::Inside => "inside",
+        ThinSide::Outside => "outside",
+        ThinSide::Both => "both",
+    };
+    Value::obj(vec![("thickness", expr_value(&t.thickness)), ("side", Value::str(side))])
+}
+
 fn read_mode(v: &Value) -> Result<Mode> {
     match v.get("mode").and_then(Value::as_str) {
         None | Some("add") => Ok(Mode::Add),
@@ -5184,17 +5449,10 @@ pub fn op_value(op: &Op) -> Value {
             if *opposite {
                 items.push(("opposite", Value::Bool(true)));
             }
-            if let Some(t) = thin {
-                let side = match t.side {
-                    ThinSide::Inside => "inside",
-                    ThinSide::Outside => "outside",
-                    ThinSide::Both => "both",
-                };
-                items.push(("thin", Value::obj(vec![("thickness", expr_value(&t.thickness)), ("side", Value::str(side))])));
-            }
+            items.extend(thin.as_ref().map(|t| ("thin", thin_value(t))));
             Value::obj(items)
         }
-        Op::Revolve { sketch, degrees, mode, axis, regions } => {
+        Op::Revolve { sketch, degrees, mode, axis, regions, thin } => {
             let mut items = vec![("type", Value::str("revolve")), ("sketch", Value::Num(sketch.0 as f64)), ("degrees", expr_value(degrees)), ("mode", mode_value(*mode))];
             match axis {
                 Some(RevolveAxis::InSketch { point, direction }) => items.push(("axis", Value::obj(vec![("point", point2_value(point)), ("direction", point2_value(direction))]))),
@@ -5204,6 +5462,7 @@ pub fn op_value(op: &Op) -> Value {
             if !regions.is_empty() {
                 items.push(("regions", region_picks_value(regions, Some(*sketch))));
             }
+            items.extend(thin.as_ref().map(|t| ("thin", thin_value(t))));
             Value::obj(items)
         }
         Op::Transform { motion, copy } => {
@@ -5217,6 +5476,12 @@ pub fn op_value(op: &Op) -> Value {
                 }
                 Motion::Frames { from, to } => Value::obj(vec![("type", Value::str("frames")), ("from", placement_value(from)), ("to", placement_value(to))]),
                 Motion::Scale { point, factor } => Value::obj(vec![("type", Value::str("scale")), ("point", point_ref_value(point)), ("factor", expr_value(factor))]),
+                Motion::Stretch { axis, factor } => {
+                    let mut items = vec![("type", Value::str("stretch"))];
+                    items.extend(axis_items(axis));
+                    items.push(("factor", expr_value(factor)));
+                    Value::obj(items)
+                }
             };
             Value::obj(vec![("type", Value::str("transform")), ("motion", how), ("copy", Value::Bool(*copy))])
         }
@@ -5391,28 +5656,31 @@ pub fn op_value(op: &Op) -> Value {
             items.push(("mode", mode_value(*mode)));
             Value::obj(items)
         }
-        Op::Loft { sections, mode } => Value::obj(vec![
-            ("type", Value::str("loft")),
-            (
-                "sections",
-                Value::Arr(
-                    sections
-                        .iter()
-                        .map(|s| match s.region {
-                            None => Value::Num(s.sketch.0 as f64),
-                            Some(region) => Value::obj(vec![("sketch", Value::Num(s.sketch.0 as f64)), ("region", Value::str(region.name()))]),
-                        })
-                        .collect(),
+        Op::Loft { sections, mode, thin } => {
+            let mut items = vec![
+                ("type", Value::str("loft")),
+                (
+                    "sections",
+                    Value::Arr(
+                        sections
+                            .iter()
+                            .map(|s| match s.region {
+                                None => Value::Num(s.sketch.0 as f64),
+                                Some(region) => Value::obj(vec![("sketch", Value::Num(s.sketch.0 as f64)), ("region", Value::str(region.name()))]),
+                            })
+                            .collect(),
+                    ),
                 ),
-            ),
-            ("mode", mode_value(*mode)),
-        ]),
-        Op::Sweep { sketch, path, mode } => Value::obj(vec![
-            ("type", Value::str("sweep")),
-            ("sketch", Value::Num(sketch.0 as f64)),
-            ("path", sweep_path_value(path)),
-            ("mode", mode_value(*mode)),
-        ]),
+                ("mode", mode_value(*mode)),
+            ];
+            items.extend(thin.as_ref().map(|t| ("thin", thin_value(t))));
+            Value::obj(items)
+        }
+        Op::Sweep { sketch, path, mode, thin } => {
+            let mut items = vec![("type", Value::str("sweep")), ("sketch", Value::Num(sketch.0 as f64)), ("path", sweep_path_value(path)), ("mode", mode_value(*mode))];
+            items.extend(thin.as_ref().map(|t| ("thin", thin_value(t))));
+            Value::obj(items)
+        }
         Op::Pattern { of, along } => {
             let mut items = vec![("type", Value::str("pattern")), ("of", ids_value(of))];
             match along {
@@ -5656,23 +5924,11 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 None => false,
                 Some(b) => b.as_bool().ok_or_else(|| Error::InvalidInput("an extrude's \"opposite\" must be true or false".into()))?,
             };
-            let thin = match v.get("thin") {
-                None => None,
-                Some(t) => {
-                    known_keys(t, &["thickness", "side"])?;
-                    let side = match t.get("side").map(|s| s.as_str().unwrap_or("")) {
-                        None | Some("inside") => ThinSide::Inside,
-                        Some("outside") => ThinSide::Outside,
-                        Some("both") => ThinSide::Both,
-                        Some(other) => return Err(Error::InvalidInput(format!("unknown thin wall side \"{other}\"; expected inside, outside or both"))),
-                    };
-                    Some(Thin { thickness: expr_field(t, "thickness", "a thin wall")?, side })
-                }
-            };
+            let thin = read_thin(v)?;
             Ok(Op::Extrude { sketch, start: v.get("start").map(read_expr).transpose()?.unwrap_or(Expr::number(0.0)), length, mode: read_mode(v)?, regions, faces, end, opposite, thin })
         }
         "revolve" => {
-            with(&["type", "sketch", "degrees", "mode", "axis", "regions"])?;
+            with(&["type", "sketch", "degrees", "mode", "axis", "regions", "thin"])?;
             let named = v.get("sketch").map(|_| read_sketch_id(v)).transpose()?;
             let regions = read_region_picks(v, named, "a revolve")?;
             let sketch = match (named, regions.first()) {
@@ -5690,7 +5946,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 }
                 Some(a) => Some(RevolveAxis::Line(read_line_ref(a)?)),
             };
-            Ok(Op::Revolve { sketch, degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)), mode: read_mode(v)?, axis, regions })
+            Ok(Op::Revolve { sketch, degrees: v.get("degrees").map(read_expr).transpose()?.unwrap_or(Expr::number(360.0)), mode: read_mode(v)?, axis, regions, thin: read_thin(v)? })
         }
         "transform" => {
             with(&["type", "motion", "copy"])?;
@@ -5713,7 +5969,11 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                     known_keys(m, &["type", "point", "factor"])?;
                     Motion::Scale { point: m.get("point").map(read_point_ref).transpose()?.unwrap_or(PointRef::Origin), factor: expr_field(m, "factor", "a scale")? }
                 }
-                other => return Err(Error::InvalidInput(format!("unknown motion \"{other}\"; expected translate, rotate, frames or scale"))),
+                "stretch" => {
+                    known_keys(m, &["type", "point", "axis", "factor"])?;
+                    Motion::Stretch { axis: read_axis(m, None, "a stretch")?, factor: expr_field(m, "factor", "a stretch")? }
+                }
+                other => return Err(Error::InvalidInput(format!("unknown motion \"{other}\"; expected translate, rotate, frames, scale or stretch"))),
             };
             let copy = match v.get("copy") {
                 None => false,
@@ -5847,7 +6107,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::Solid { primitive, at, mode: read_mode(v)? })
         }
         "loft" => {
-            with(&["type", "sections", "mode"])?;
+            with(&["type", "sections", "mode", "thin"])?;
             let bad = || Error::InvalidInput("\"sections\" must be a list of sketch ids, or of {\"sketch\": 4, \"region\": \"r...\"}".into());
             let sections = field(v, "sections", "a loft")?
                 .as_array()
@@ -5859,10 +6119,10 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                     None => Err(bad()),
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(Op::Loft { sections, mode: read_mode(v)? })
+            Ok(Op::Loft { sections, mode: read_mode(v)?, thin: read_thin(v)? })
         }
         "sweep" => {
-            with(&["type", "sketch", "path", "mode"])?;
+            with(&["type", "sketch", "path", "mode", "thin"])?;
             let given = field(v, "path", "a sweep")?;
             if given.as_array().is_none() {
                 let path = if given.get("sketch").is_some() {
@@ -5874,7 +6134,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 } else {
                     return Err(Error::InvalidInput("a sweep's path is a list of steps, {\"sketch\": 5} or {\"edges\": selection}".into()));
                 };
-                return Ok(Op::Sweep { sketch: read_sketch_id(v)?, path, mode: read_mode(v)? });
+                return Ok(Op::Sweep { sketch: read_sketch_id(v)?, path, mode: read_mode(v)?, thin: read_thin(v)? });
             }
             let mut path = Vec::new();
             for step in given.as_array().unwrap_or_default() {
@@ -5892,7 +6152,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                     return Err(Error::InvalidInput("a sweep step is {\"line\": length} or {\"arc_radius\": r, \"degrees\": a, \"toward_degrees\": d}".into()));
                 }
             }
-            Ok(Op::Sweep { sketch: read_sketch_id(v)?, path: SweepPath::Steps(path), mode: read_mode(v)? })
+            Ok(Op::Sweep { sketch: read_sketch_id(v)?, path: SweepPath::Steps(path), mode: read_mode(v)?, thin: read_thin(v)? })
         }
         "pattern" => {
             let of = read_ids(v)?;

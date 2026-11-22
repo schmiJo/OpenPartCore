@@ -31,6 +31,7 @@ pub mod radii;
 pub mod rolling;
 pub mod sheet;
 pub mod spline;
+pub mod stretch;
 pub mod surface;
 pub mod tess;
 pub mod thicken;
@@ -39,7 +40,7 @@ pub mod tweak;
 pub mod validate;
 
 pub use blend::{chamfer, chamfer_with, fillet, fillet_with, BlendOptions};
-pub use boolean::{intersect, subtract, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
+pub use boolean::{intersect, split_by_sheet, subtract, trim_sheet, trim_sheet_by_plane, union, BoolOp, Keep};
 pub use build::{box_solid, cone_frustum, cylinder, extrude, revolve, sphere, torus};
 pub use curve::Curve;
 pub use delete::delete_faces;
@@ -55,7 +56,7 @@ pub use multi::{boolean_many, compound, merged_tools, sweep, sweep_along, PathCu
 pub use spline::{FacePiece, PlaneCurve, Spline};
 pub use surface::{Chart, Surface};
 pub use tess::{tessellate, Mesh, TessParams};
-pub use sheet::{extrude_open, fill, revolve_open, sew, sheet_from_faces, sides_of};
+pub use sheet::{extrude_open, fill, revolve_open, sew, sheet_from_faces, sides_of, turned_over};
 pub use thicken::thicken;
 pub use topo::{Body, Coedge, Edge, Face, FaceTag};
 pub use tweak::{draft, offset, offset_faces, shell};

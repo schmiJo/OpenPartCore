@@ -189,7 +189,7 @@ fn nozzle(doc: &mut Document, _: usize) {
         Placement::xy("height"),
         vec![Region::new(Shape::Ellipse { cx: 0.0.into(), cy: 0.0.into(), rx: "lip".into(), ry: "lip * 0.7".into(), degrees: 0.0.into() })],
     ));
-    doc.with(Op::Loft { sections: vec![base.into(), waist.into(), lip.into()], mode: Mode::Add });
+    doc.with(Op::Loft { sections: vec![base.into(), waist.into(), lip.into()], mode: Mode::Add, thin: None });
     let across = doc.with(Op::sketch(
         Placement::new(point3("-width", 0.0, "height * 0.3"), point3(1.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)),
         vec![Region::new(Shape::circle(0.0, 0.0, "pin / 2"))],
@@ -239,7 +239,7 @@ fn cup(doc: &mut Document, _: usize) {
     let base = doc.with(Op::sketch(xy(), vec![Region::new(Shape::circle(0.0, 0.0, "foot"))]));
     let waist = doc.with(Op::sketch(Placement::xy("height * 0.5"), vec![Region::new(Shape::circle(0.0, 0.0, "waist"))]));
     let lip = doc.with(Op::sketch(Placement::xy("height"), vec![Region::new(Shape::circle(0.0, 0.0, "lip"))]));
-    let body = doc.with(Op::Loft { sections: vec![base.into(), waist.into(), lip.into()], mode: Mode::Add });
+    let body = doc.with(Op::Loft { sections: vec![base.into(), waist.into(), lip.into()], mode: Mode::Add, thin: None });
     doc.with(Op::Shell { open: vec![body.end_cap()], thickness: "wall".into() });
 }
 
@@ -435,6 +435,26 @@ fn ribbed_tray(doc: &mut Document, _: usize) {
         ],
     ));
     doc.with(Op::Rib { sketch: ribs, thickness: "rib".into(), direction: RibDirection::Normal, flip: true, extend: true });
+}
+
+/// A duct: a thin loft from a rectangle up to a circle, and a thin sweep on from the circle round a bend, stretched along
+/// x as a whole.
+fn thin_duct(doc: &mut Document, _: usize) {
+    let base = doc.with(Op::sketch(xy(), vec![Region::new(Shape::centered("width", "depth"))]));
+    let top = doc.with(Op::sketch(Placement::xy("height"), vec![Region::new(Shape::circle(0.0, 0.0, "radius"))]));
+    let thin = || Some(Thin { thickness: "wall".into(), side: ThinSide::Inside });
+    doc.with(Op::Loft { sections: vec![base.into(), top.into()], mode: Mode::Add, thin: thin() });
+    let ring = doc.with(Op::sketch(Placement::xy("height"), vec![Region::new(Shape::circle(0.0, 0.0, "radius"))]));
+    doc.with(Op::Sweep {
+        sketch: ring,
+        path: SweepPath::Steps(vec![
+            SweepStep::Arc { radius: "bend".into(), degrees: 90.0.into(), toward_degrees: 0.0.into() },
+            SweepStep::Line { length: "radius".into() },
+        ]),
+        mode: Mode::Add,
+        thin: thin(),
+    });
+    doc.with(Op::Transform { motion: Motion::Stretch { axis: LineRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)), factor: "stretch / 100".into() }, copy: false });
 }
 
 fn rounded_block(doc: &mut Document, _: usize) {
@@ -844,6 +864,15 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("rib", "Rib thickness", 1.0, 4.0, 2.0),
         ParamDef { key: "rib_share", label: "Rib height", unit: "%", min: 30.0, max: 100.0, step: 1.0, default: 70.0, choices: &[] },
     ];
+    static DUCT: [ParamDef; 7] = [
+        mm("width", "Width", 60.0, 110.0, 80.0),
+        mm("depth", "Depth", 50.0, 90.0, 60.0),
+        mm("height", "Height", 30.0, 60.0, 45.0),
+        mm("radius", "Pipe radius", 6.0, 15.0, 12.0),
+        mm("bend", "Bend radius", 25.0, 60.0, 35.0),
+        mm("wall", "Wall", 1.0, 4.0, 2.0),
+        ParamDef { key: "stretch", label: "Stretch across", unit: "%", min: 60.0, max: 180.0, step: 1.0, default: 100.0, choices: &[] },
+    ];
     static SHEET: [ParamDef; 8] = [
         mm("width", "Length", 80.0, 160.0, 120.0),
         mm("depth", "Width", 50.0, 90.0, 70.0),
@@ -926,7 +955,7 @@ pub fn catalog() -> &'static [ModelDef] {
         choices: &STRESS_NAMES,
     }];
     static SLIDER_CRANK: [ParamDef; 3] = [mm("crank", "Crank length", 15.0, 80.0, 30.0), mm("rod", "Rod length", 40.0, 160.0, 100.0), deg("angle", "Crank angle", 0.0, 720.0, 30.0)];
-    static MODELS: [ModelDef; 23] = [
+    static MODELS: [ModelDef; 24] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -957,6 +986,14 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "Walls a thin extrude round a rounded outline, inside it, and ribs sketched part way up that run down to the floor and out to the walls on their own. Every corner of the walls is sharp or round as the outline is.",
             params: &TRAY,
             build: ribbed_tray,
+            assembly: None,
+        },
+        ModelDef {
+            id: "duct",
+            name: "Thin duct",
+            blurb: "A thin loft from a rectangle up to a circle, and a thin sweep on from it round a bend: walls as thick as the slider says, all the way. Then the whole part is stretched across one way only, which turns its round faces into the exact free-form surfaces they become.",
+            params: &DUCT,
+            build: thin_duct,
             assembly: None,
         },
         ModelDef {

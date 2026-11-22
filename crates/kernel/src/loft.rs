@@ -276,6 +276,8 @@ pub fn loft(sections: &[(&Profile, Frame)], feature: u32) -> Result<Body> {
     let mut body = Body::default();
     let (mut start_loops, mut end_loops) = (Vec::new(), Vec::new());
     let mut all_patches: Vec<Vec<Arc<Patch>>> = Vec::with_capacity(holes + 1);
+    // How far the outline turns from each section to the one before it, which its holes follow.
+    let mut twists = vec![0.0; wires.len()];
     for w in 0..=holes {
         // The same number of pieces in every section, by cutting the longest.
         let count = wires.iter().map(|s| s[w].len()).max().unwrap_or(0);
@@ -290,11 +292,43 @@ pub fn loft(sections: &[(&Profile, Frame)], feature: u32) -> Result<Body> {
         }
         // Each section starts at the piece closest to where the last one started, so the sides don't twist.
         for k in 1..wires.len() {
+            let axis = (centers[k] - centers[k - 1]).normalized();
             let (before, after) = wires.split_at_mut(k);
             let (last, this) = (&before[k - 1][w], &mut after[0][w]);
             let (ca, cb) = (wire_centroid(last), wire_centroid(this));
             let cost = |r: usize| -> f64 { (0..count).map(|i| ((this[(i + r) % count].start() - cb) - (last[i].start() - ca)).norm2()).sum() };
-            let best = (0..count).min_by(|&a, &b| cost(a).total_cmp(&cost(b))).unwrap_or(0);
+            // How far the starts turn about the way the loft goes, on average.
+            let twist = |r: usize| -> f64 {
+                let flat = |v: Vec3| v - axis * v.dot(axis);
+                let sum: f64 = (0..count)
+                    .map(|i| {
+                        let (a, b) = (flat(last[i].start() - ca), flat(this[(i + r) % count].start() - cb));
+                        axis.dot(a.cross(b)).atan2(a.dot(b))
+                    })
+                    .sum();
+                sum / count as f64
+            };
+            let costs: Vec<f64> = (0..count).map(cost).collect();
+            let turns: Vec<f64> = (0..count).map(twist).collect();
+            // The smaller twist, or the clockwise one where they're the same size, as a square's going to a circle are. Either
+            // would do; clockwise is what rounding happened to choose for the lofts this kernel's demos and tests have.
+            let by_twist = |a: f64, b: f64| if (a.abs() - b.abs()).abs() <= 1e-9 { a.total_cmp(&b) } else { a.abs().total_cmp(&b.abs()) };
+            let best = if w == 0 {
+                // Starts that fit as well as each other, as a rectangle's corners do a circle's, can't be told apart by how well
+                // they fit, and rounding would choose. They go by their twist, so that outlines lofted side by side, as a thin
+                // loft's are, twist alike.
+                let least = costs.iter().copied().fold(f64::INFINITY, f64::min);
+                let scale = costs.iter().copied().fold(0.0, f64::max);
+                (0..count).filter(|&r| costs[r] <= least + 1e-9 * scale).min_by(|&a, &b| by_twist(turns[a], turns[b])).unwrap_or(0)
+            } else {
+                // A hole twists as the outline does, so that the wall between them doesn't.
+                (0..count)
+                    .min_by(|&a, &b| by_twist(turns[a] - twists[k], turns[b] - twists[k]).then(costs[a].total_cmp(&costs[b])))
+                    .unwrap_or(0)
+            };
+            if w == 0 {
+                twists[k] = turns[best];
+            }
             this.rotate_left(best);
         }
 

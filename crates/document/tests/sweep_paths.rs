@@ -63,7 +63,7 @@ fn arc(x: f64, y: f64, cx: f64, cy: f64, ccw: bool) -> Move {
 }
 
 fn sweep(profile: FeatureId, path: SweepPath, mode: Mode) -> Op {
-    Op::Sweep { sketch: profile, path, mode }
+    Op::Sweep { sketch: profile, path, mode, thin: None }
 }
 
 /// Up 10, a quarter bend of radius 5 toward +x, and on 8, in the XZ plane.

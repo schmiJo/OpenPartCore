@@ -78,6 +78,14 @@ fn with_vertices_by_fan(mut body: Body) -> Body {
     body
 }
 
+/// A sheet facing the other way, every face of it turned over.
+pub fn turned_over(sheet: &Body) -> Body {
+    let mut out = sheet.clone();
+    let all: Vec<usize> = (0..out.faces.len()).collect();
+    flip_faces(&mut out, &all);
+    out
+}
+
 /// Turns a shell's faces to face the other way.
 fn flip_faces(body: &mut Body, faces: &[usize]) {
     for &f in faces {

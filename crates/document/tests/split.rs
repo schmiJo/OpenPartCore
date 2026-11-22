@@ -1,4 +1,5 @@
 //! Splitting parts: along a plane, which it follows; along the whole surface a face is on; by another part; and a sheet.
+//! Splitting along sheets is in split_sheets.rs.
 //! The piece in front of the plane, or inside, keeps the part's name, and each piece is a part of its own.
 
 use coreshape::*;
@@ -136,18 +137,7 @@ fn a_face_cuts_along_its_whole_surface() {
     near(size_of(&o, "f2"), eighth, "the corner inside the ball");
     near(size_of(&o, "f4"), 240.0 - PI * 4.0 - eighth, "the rest");
 
-    // A face on a surface the split can't go along is refused, saying what it is.
-    let mut doc = Document::new();
-    // A vase, turned from a spline.
-    let through = vec![[8.0.into(), 3.0.into()], [5.0.into(), 6.0.into()]];
-    let outline = Shape::Path { start: [0.0.into(), 0.0.into()], moves: vec![Move::Line { to: [6.0.into(), 0.0.into()] }, Move::Spline { through }, Move::Line { to: [0.0.into(), 6.0.into()] }, Move::Line { to: [0.0.into(), 0.0.into()] }] };
-    let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(outline)]));
-    doc.with(Op::revolve(s, 360.0, Mode::Add));
-    let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(-1.0, -10.0, 2.0, 20.0))]));
-    doc.with(Op::extrude(s, 0.0, 2.0, Mode::NewBody));
-    feature(&mut doc, r#"{"type": "split", "face": "f2:side.1"}"#);
-    let why = failure(&mut doc);
-    assert!(why.contains("turned curve"), "{why}");
+    // A face on a turned or extruded curve, or a free-form one, cuts along a sheet: see split_sheets.rs.
 }
 
 #[test]
@@ -181,13 +171,19 @@ fn a_part_cuts_others_into_inside_and_outside() {
         let inside = o.bodies.iter().find(|b| b.id.text() == "f2").unwrap().body.aabb();
         assert!(((inside.min.y + inside.max.y) / 2.0 - ry).abs() < 1e-6, "the piece inside the rod is where it is: {inside:?}");
     }
-    // A sheet can't split.
+    // A flat sheet right across it, half way up, splits it too: the half above, the way the sheet faces, keeps the name.
     let mut doc = block();
     let s = doc.with(Op::sketch(Placement::xy(2.0), vec![Region::new(Shape::rect(-1.0, -1.0, 20.0, 20.0))]));
     doc.with(Op::Fill { sketch: s });
-    feature(&mut doc, r#"{"type": "split", "tool": "f4"}"#);
-    let why = failure(&mut doc);
-    assert!(why.contains("is a sheet"), "{why}");
+    let split = feature(&mut doc, r#"{"type": "split", "tool": "f4"}"#);
+    doc.set_scope(split, vec![BodyId::parse("f2").unwrap()]).unwrap();
+    let o = ok(&mut doc);
+    for (name, low) in [("f2", 2.0), ("f5", 0.0)] {
+        near(size_of(&o, name), (240.0 - PI * 4.0) / 2.0, "half the block");
+        let b = o.bodies.iter().find(|b| b.id.text() == name).unwrap();
+        let lowest = b.body.vertices.iter().map(|v| v.z).fold(f64::MAX, f64::min);
+        assert!((lowest - low).abs() < 1e-9, "{name} starts at {lowest}");
+    }
 }
 
 #[test]

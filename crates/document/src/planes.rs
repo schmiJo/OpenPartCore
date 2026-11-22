@@ -491,6 +491,11 @@ impl<'a> Looker<'a> {
         Ok((body, found[0]))
     }
 
+    /// Every face a key picks, and the body they're on.
+    pub(crate) fn picked_faces(&self, key: &FaceKey) -> Result<(&Arc<Body>, Vec<usize>)> {
+        self.faces(key)
+    }
+
     /// The surface of the face a key picks, or of the first of several that are all on one surface.
     pub(crate) fn face_surface(&self, key: &FaceKey) -> Result<Surface> {
         let (body, f) = self.one_surface(key)?;

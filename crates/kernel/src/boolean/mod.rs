@@ -194,6 +194,82 @@ pub fn trim_sheet_by_plane(sheet: &Body, point: Vec3, normal: Vec3, keep: Keep) 
     trim_sheet(sheet, &behind, keep)
 }
 
+/// Cuts a solid along a sheet that runs right through it: what's in front of the sheet, the way its faces face, and what's
+/// behind it, each as one body of however many solids. The sheet's faces inside the solid become faces of both, facing out
+/// of each, and keep their names. Nothing in front and the whole solid behind means the sheet doesn't reach it. A sheet that
+/// ends inside the solid, which would only slit it, is refused, and so is one that leaves it in one piece.
+pub fn split_by_sheet(solid: &Body, sheet: &Body) -> Result<(Body, Body)> {
+    solid.needs_solid("splitting along a sheet")?;
+    if !sheet.sheet {
+        return Err(Error::InvalidInput("splitting along a sheet takes a sheet, and this is a solid: a Boolean splits by a solid".into()));
+    }
+    let cut = run(solid, sheet, Plan::Split)?;
+    let pieces = cut.solids();
+    // A piece is in front of the sheet if the copies of the sheet's faces it has face back at it.
+    let side = |piece: &Body| -> Option<bool> {
+        let mut found = None;
+        for f in &piece.faces {
+            for g in &sheet.faces {
+                if f.tag == g.tag && f.surface == g.surface {
+                    let front = f.flipped != g.flipped;
+                    if found.is_some_and(|x| x != front) {
+                        return Some(false);
+                    }
+                    found = Some(front);
+                }
+            }
+        }
+        found
+    };
+    let (mut front, mut back): (Vec<&Body>, Vec<&Body>) = (Vec::new(), Vec::new());
+    let sides: Vec<Option<bool>> = pieces.iter().map(side).collect();
+    if sides.iter().all(Option::is_none) {
+        return Ok((Body::default(), solid.clone()));
+    }
+    if pieces.len() < 2 {
+        return Err(Error::InvalidInput("the sheet cuts into the part but leaves it in one piece, so it would only slit it".into()));
+    }
+    for (piece, s) in pieces.iter().zip(&sides) {
+        match s {
+            Some(true) => front.push(piece),
+            Some(false) => back.push(piece),
+            None => return Err(Error::Internal("a piece of a split touches nothing of the sheet".into())),
+        }
+    }
+    let (front, back) = (Body::side_by_side(&front), Body::side_by_side(&back));
+    verify_split(solid, &front, &back)?;
+    Ok((front, back))
+}
+
+/// Checks a split against what it is: every point of the solid in one piece or the other, and none outside it in either, and
+/// the pieces' volumes adding up to the solid's.
+fn verify_split(solid: &Body, front: &Body, back: &Body) -> Result<()> {
+    let whole = crate::mass::mass_properties(solid).volume;
+    let parts = crate::mass::mass_properties(front).volume + crate::mass::mass_properties(back).volume;
+    if (whole - parts).abs() > 1e-6 * whole.abs().max(1.0) {
+        return Err(Error::NearDegenerate(format!("the pieces of a split come to a volume of {parts}, and the part's is {whole}")));
+    }
+    let (of_solid, of_front, of_back) = (Index::new(solid), Index::new(front), Index::new(back));
+    let within = |of: &Index, body: &Body, p: Vec3| if body.faces.is_empty() { BodyLoc::Outside } else { of.locate_in_body(p) };
+    let bx = of_solid.bounds;
+    let mut rng = Rng::new(0x5EED);
+    let inside = |loc: BodyLoc| match loc {
+        BodyLoc::Inside => Some(true),
+        BodyLoc::Outside => Some(false),
+        BodyLoc::OnFace(_) => None,
+    };
+    for _ in 0..60 {
+        let p = v3(rng.range(bx.min.x, bx.max.x), rng.range(bx.min.y, bx.max.y), rng.range(bx.min.z, bx.max.z));
+        let (Some(a), Some(f), Some(b)) = (inside(of_solid.locate_in_body(p)), inside(within(&of_front, front, p)), inside(within(&of_back, back, p))) else {
+            continue;
+        };
+        if a != (f || b) || (f && b) {
+            return Err(Error::NearDegenerate(format!("a split's pieces are wrong at ({:.4}, {:.4}, {:.4}): an intersection was probably missed at a tangency", p.x, p.y, p.z)));
+        }
+    }
+    Ok(())
+}
+
 /// What a run through the arrangement is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Plan {
@@ -201,6 +277,9 @@ enum Plan {
     Solids(BoolOp, Checks),
     /// The first is a sheet, cut by the second, a solid. Only the sheet's pieces are traced, classified or kept.
     Trim(Keep),
+    /// The first is a solid, cut along the second, a sheet: all of the solid is kept, and each piece of the sheet inside it
+    /// twice, once facing each way, so that the solid comes apart into pieces on either side.
+    Split,
 }
 
 fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
@@ -370,6 +449,16 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
     // Step 6: classify and select.
     let mut selected: Vec<(usize, bool)> = Vec::new(); // (piece, flip)
     for (i, piece) in pieces.iter().enumerate() {
+        if plan == Plan::Split {
+            // A sheet has no inside to sort the solid's pieces by: they all stay.
+            if piece.source == 0 || classify_piece(piece, bodies, &index, &arr)? == Class::In {
+                selected.push((i, false));
+            }
+            if piece.source == 1 && selected.last() == Some(&(i, false)) {
+                selected.push((i, true));
+            }
+            continue;
+        }
         let class = classify_piece(piece, bodies, &index, &arr)?;
         let keep = match plan {
             Plan::Solids(op, _) => match (op, piece.source, class) {
@@ -386,10 +475,15 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
                 (Keep::Inside, Class::In) => Some(false),
                 _ => None,
             },
+            Plan::Split => unreachable!("chosen above"),
         };
         if let Some(flip) = keep {
             selected.push((i, flip));
         }
+    }
+
+    if plan == Plan::Split {
+        sheet_reaches_through(&pieces, &selected, &arr)?;
     }
 
     // Step 7: assemble.
@@ -406,8 +500,37 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
             verify_meshable(&body, bodies)?;
             verify_trim(a, &index[1], &body, side)?;
         }
+        // The pieces are checked against the solid once they're apart.
+        Plan::Split => verify_meshable(&body, bodies)?,
     }
     Ok(body)
+}
+
+/// Refuses a split along a sheet that ends inside the solid. Where it does, the edge it ends at has only the sheet's piece
+/// there, its two sides, and no face of the solid: the solid would be slit, not cut.
+fn sheet_reaches_through(pieces: &[Piece], selected: &[(usize, bool)], arr: &Arrangement) -> Result<()> {
+    let mut uses: HashMap<usize, (usize, usize)> = HashMap::default();
+    for &(i, _) in selected {
+        for c in pieces[i].loops.iter().flatten() {
+            let entry = uses.entry(c.edge).or_default();
+            if pieces[i].source == 0 {
+                entry.0 += 1;
+            } else {
+                entry.1 += 1;
+            }
+        }
+    }
+    let mut ends: Vec<usize> = uses.iter().filter(|(_, &(solid, sheet))| solid == 0 && sheet == 2).map(|(&e, _)| e).collect();
+    ends.sort_unstable();
+    if let Some(&e) = ends.first() {
+        let edge = &arr.edges[e];
+        let p = edge.curve.eval((edge.t0 + edge.t1) / 2.0);
+        return Err(Error::InvalidInput(format!(
+            "the sheet ends inside the part, near ({:.4}, {:.4}, {:.4}), so it would only slit it: a split needs one that runs right through",
+            p.x, p.y, p.z
+        )));
+    }
+    Ok(())
 }
 
 /// Checks a cut sheet against what a cut is, by points on the original: one on the side kept has to be on the result, and one
@@ -1035,7 +1158,9 @@ fn assemble(pieces: &[Piece], selected: &[(usize, bool)], bodies: [&Body; 2], ar
                 let material_ahead = tangent.cross(into).dot(-n) > 0.0;
                 around.push((angle, material_ahead, entry));
             }
-            around.sort_by(|x, y| x.0.total_cmp(&y.0));
+            // Two faces leaving the edge the same way, as a sheet's two sides do when a split keeps both, have no material
+            // between them: the one with material behind it comes first, so that each pairs with its neighbour beyond.
+            around.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
             let n = around.len();
             let start = around
                 .iter()

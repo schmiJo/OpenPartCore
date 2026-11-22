@@ -81,7 +81,7 @@ fn y_axis() -> Option<RevolveAxis> {
 }
 
 fn revolve(sketch: FeatureId, degrees: f64, mode: Mode, axis: Option<RevolveAxis>, regions: Vec<RegionPick>) -> Op {
-    Op::Revolve { sketch, degrees: degrees.into(), mode, axis, regions }
+    Op::Revolve { sketch, degrees: degrees.into(), mode, axis, regions, thin: None }
 }
 
 // A rectangle 2 wide and 3 high centred 3 from the axis, and one 1 wide and 2 high centred 6.5 from it.
@@ -182,8 +182,8 @@ fn a_loft_takes_regions_from_sketches_with_several_outlines() {
     let high = sketch_on(&mut doc, Placement::xy(20.0), circles(&[(0.0, 0.0, 5.0), (30.0, 0.0, 4.0)]));
     let (big, small) = (region_of_area(&doc, low, PI * 100.0), region_of_area(&doc, high, PI * 25.0));
     let (side_low, side_high) = (region_of_area(&doc, low, PI * 16.0), region_of_area(&doc, high, PI * 16.0));
-    doc.add(Op::Loft { sections: vec![pick(low, big).into(), pick(high, small).into()], mode: Mode::Add }).unwrap();
-    doc.add(Op::Loft { sections: vec![pick(low, side_low).into(), pick(high, side_high).into()], mode: Mode::Add }).unwrap();
+    doc.add(Op::Loft { sections: vec![pick(low, big).into(), pick(high, small).into()], mode: Mode::Add, thin: None }).unwrap();
+    doc.add(Op::Loft { sections: vec![pick(low, side_low).into(), pick(high, side_high).into()], mode: Mode::Add, thin: None }).unwrap();
     let o = ok(&mut doc);
     assert_eq!(o.bodies.len(), 2);
     near(total(&o), PI * 20.0 * (100.0 + 50.0 + 25.0) / 3.0 + PI * 16.0 * 20.0, 1e-6, "a frustum and a cylinder");
@@ -194,11 +194,11 @@ fn a_loft_section_with_several_outlines_says_to_pick_one_and_a_gone_one_says_wha
     let mut doc = Document::new();
     let low = sketch_on(&mut doc, Placement::xy(0.0), circles(&[(0.0, 0.0, 10.0), (30.0, 0.0, 4.0)]));
     let high = sketch_on(&mut doc, Placement::xy(20.0), circles(&[(0.0, 0.0, 5.0)]));
-    let l = doc.add(Op::Loft { sections: vec![low.into(), high.into()], mode: Mode::Add }).unwrap();
+    let l = doc.add(Op::Loft { sections: vec![low.into(), high.into()], mode: Mode::Add, thin: None }).unwrap();
     let why = failure(&mut doc);
     assert!(why.contains("not 2") && why.contains("\"region\""), "{why}");
     let gone = RegionId::parse("r0123456789ab").unwrap();
-    doc.edit(l, Op::Loft { sections: vec![pick(low, gone).into(), high.into()], mode: Mode::Add }).unwrap();
+    doc.edit(l, Op::Loft { sections: vec![pick(low, gone).into(), high.into()], mode: Mode::Add, thin: None }).unwrap();
     let why = failure(&mut doc);
     let big = region_of_area(&doc, low, PI * 100.0);
     assert!(why.contains("r0123456789ab") && why.contains(&big.name()), "{why}");

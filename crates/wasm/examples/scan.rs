@@ -1,5 +1,5 @@
 //! Scans random slider positions on every demo and reports the refusals.
-//! Usage: scan [positions per model]
+//! Usage: scan [positions per model] [model id, for that one only]
 use coreshape::*;
 use coreshape_wasm::models;
 use coreshape_document::Document;
@@ -7,9 +7,10 @@ use std::collections::{BTreeMap, HashMap};
 
 fn main() {
     let runs: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let only = std::env::args().nth(2);
     let mut rng = Rng::new(2026);
     println!("{:<10} {:>9} {:>8} {:>8}", "model", "positions", "refused", "invalid");
-    for m in models::catalog() {
+    for m in models::catalog().iter().filter(|m| only.as_deref().is_none_or(|id| m.id == id)) {
         let mut docs: HashMap<usize, Document> = HashMap::new();
         let mut refused = 0;
         let mut invalid = 0;

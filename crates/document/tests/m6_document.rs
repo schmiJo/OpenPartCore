@@ -863,6 +863,7 @@ fn a_sweep_feature_follows_its_path_and_saves() {
             SweepStep::Line { length: 10.0.into() },
         ]),
         mode: Mode::Add,
+        thin: None,
     });
     let want = |bend: f64| PI * 5.0 * (20.0 + bend * PI / 2.0);
     let o = doc.rebuild(None);
