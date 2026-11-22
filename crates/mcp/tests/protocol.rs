@@ -1405,3 +1405,28 @@ fn flat_pattern_lays_a_sheet_metal_part_out() {
     assert_eq!(plate.get("bends").and_then(Value::as_array).map(|l| l.len()), Some(0));
     assert!((plate.get("area").and_then(Value::as_f64).unwrap() - 6000.0).abs() < 1e-6);
 }
+
+#[test]
+fn holes_list_says_what_each_hole_is() {
+    let root = folder("holes");
+    let mut c = Client::start(&root);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":40,"dy":30,"dz":12}}"#);
+    let added = c.ok("feature_add", r#"{"feature":{"type":"hole","plane":"f1:end","points":[[10,15],[30,15]],"size":"M6","tapped":{"depth":8},"depth":9}}"#);
+    assert!(!added.contains("left no faces"), "{added}");
+    let list = parsed(&c.ok("holes_list", "{}"));
+    let list = list.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    let first = &list[0];
+    assert_eq!(first.get("callout").and_then(Value::as_str), Some("M6×1 tapped 8 deep, drill ⌀5 9 deep, 118° point"));
+    assert_eq!(numbers(first.get("start").unwrap()), vec![10.0, 15.0, 12.0]);
+    assert_eq!(numbers(first.get("direction").unwrap()), vec![0.0, 0.0, -1.0]);
+    assert_eq!(first.get("bore").and_then(Value::as_str), Some("f2:bore.0"));
+    let thread = first.get("thread").unwrap();
+    assert_eq!(thread.get("size").and_then(Value::as_str), Some("M6"));
+    assert_eq!(thread.get("pitch").and_then(Value::as_f64), Some(1.0));
+    assert_eq!(thread.get("depth").and_then(Value::as_f64), Some(8.0));
+    // Its faces are there to pick, and rolled back before it there are none.
+    let faces = c.ok("faces_list", "{}");
+    assert!(faces.contains("f2:tip.1"), "{faces}");
+    assert!(parsed(&c.ok("holes_list", r#"{"upto":0}"#)).as_array().unwrap().is_empty());
+}

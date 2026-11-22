@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 #[doc(hidden)]
 pub mod follow;
+mod hole;
 mod keys;
 mod picks;
 mod planes;
@@ -51,6 +52,7 @@ mod up_to;
 pub use sheet_metal::{Alignment, BendPosition, Corner, FlatBend, FlatEdge, FlatPattern, HemKind};
 use keys::Keys;
 pub use rib::RibDirection;
+pub use hole::{hole_sizes, Fit, HoleAt, HoleCallout, HoleEnd, HoleFace, HoleSpec, HoleStyle, Tapped, ThreadCallout};
 pub use planes::{default_x, line_ref_value, plane_ref_value, point_ref_value, read_line_ref, read_plane_ref, read_point_ref, AlongEdge, LineRef, PlaneDef, PlaneRef, PointRef, TangentAt};
 use planes::{Geo, Looker};
 pub use keys::{face_keys, find_faces, find_one, FaceKey};
@@ -76,6 +78,9 @@ const MAX_EXTRUDED_FACES: usize = 100_000;
 const SLOT_THIN_BASE: u32 = SLOT_WALL_BASE + MAX_EXTRUDED_FACES as u32;
 /// The most regions and open curves a thin extrude may take from one sketch, which keeps its slots within a `u32`.
 const MAX_THIN_REGIONS: u32 = 200;
+/// A hole feature's faces come after a thin wall's: `f9:bore.3`, `f9:cbore.3`, `f9:tip.3`, `HOLE_PARTS` to a hole.
+const SLOT_HOLE_BASE: u32 = SLOT_THIN_BASE + MAX_THIN_REGIONS * REGION_SLOTS;
+const _: () = assert!(SLOT_HOLE_BASE as u64 + hole::MAX_HOLE_NUMBER as u64 * hole::HOLE_PARTS as u64 <= u32::MAX as u64);
 
 // ----- Names -----
 
@@ -119,6 +124,11 @@ impl FeatureId {
     pub fn wall(self, entry: u32) -> FaceRef {
         FaceRef { feature: self, slot: SLOT_WALL_BASE + entry }
     }
+
+    /// A face of hole `number` of a hole feature: `f9:bore.3`.
+    pub fn hole_face(self, number: u32, face: HoleFace) -> FaceRef {
+        FaceRef { feature: self, slot: SLOT_HOLE_BASE + number * hole::HOLE_PARTS + face.part() }
+    }
 }
 
 impl FaceRef {
@@ -138,6 +148,13 @@ impl FaceRef {
         match self.slot {
             SLOT_START_CAP => format!("f{f}:start"),
             SLOT_END_CAP => format!("f{f}:end"),
+            slot if slot >= SLOT_HOLE_BASE => {
+                let rest = slot - SLOT_HOLE_BASE;
+                match HoleFace::from_part(rest % hole::HOLE_PARTS) {
+                    Some(face) => format!("f{f}:{}.{}", face.name(), rest / hole::HOLE_PARTS),
+                    None => format!("f{f}:slot.{slot}"),
+                }
+            }
             slot if slot >= SLOT_THIN_BASE => {
                 let rest = slot - SLOT_THIN_BASE;
                 let (region, within) = (rest / REGION_SLOTS, rest % REGION_SLOTS);
@@ -194,6 +211,13 @@ impl FaceRef {
                 return Err(bad());
             }
             return Ok(feature.wall(entry));
+        }
+        if let Some((face, number)) = slot.split_once('.').and_then(|(a, b)| Some((HoleFace::parse(a)?, b))) {
+            let number: u32 = number.parse().map_err(|_| bad())?;
+            if number >= hole::MAX_HOLE_NUMBER {
+                return Err(bad());
+            }
+            return Ok(feature.hole_face(number, face));
         }
         let parts: Vec<&str> = slot.split('.').collect();
         let (mut region, mut hole, mut segment, mut thin) = (0u32, 0u32, None, None);
@@ -971,6 +995,12 @@ pub enum Op {
     /// on its right with `right`; it bends toward the side the sketch's normal points to, or the other way with `flip`.
     /// `position` says where the bend is against the line.
     Bend { sketch: FeatureId, degrees: Option<Expr>, bend_radius: Option<Expr>, position: BendPosition, flip: bool, right: bool },
+    /// Holes at points of a sketch or a plane, cut from the parts it acts on: see `HoleSpec` for what each is like, and
+    /// `HoleEnd` for how deep. Each goes in against the sketch's normal, or along it with `opposite`, and starts where
+    /// its axis first meets the parts, or at the sketch's plane with `from_sketch`. Its faces are named for its hole:
+    /// `f9:bore.3`, `f9:cbore.3`, `f9:cbore_floor.3`, `f9:csink.3`, `f9:tip.3` and `f9:floor.3`. The outcome's
+    /// `holes` say what each is, with its thread.
+    Hole { at: HoleAt, spec: HoleSpec, end: HoleEnd, from_sketch: bool, opposite: bool },
 }
 
 /// A thin feature's wall: `thickness` thick, along each outline of the regions it takes and each open curve of its
@@ -1201,6 +1231,7 @@ impl Op {
             Op::Hem { .. } => "hem",
             Op::Tab { .. } => "tab",
             Op::Bend { .. } => "bend",
+            Op::Hole { .. } => "hole",
         }
     }
 
@@ -1225,7 +1256,8 @@ impl Op {
             | Op::Draft { neutral: plane, .. }
             | Op::Trim { tool: TrimTool::Plane(plane), .. }
             | Op::Split { tool: SplitTool::Plane(plane), .. }
-            | Op::Extrude { end: ExtrudeEnd::UpToPlane(plane), .. } => vec![Geo::Plane(plane)],
+            | Op::Extrude { end: ExtrudeEnd::UpToPlane(plane), .. }
+            | Op::Hole { at: HoleAt::Plane { plane, .. }, .. } => vec![Geo::Plane(plane)],
             Op::Pattern { along: PatternPath::Linear { direction: line, .. } | PatternPath::Circular { axis: line, .. }, .. } => vec![Geo::Line(line)],
             Op::Helix { axis: line, .. } | Op::Transform { motion: Motion::Rotate { axis: line, .. }, .. } | Op::Revolve { axis: Some(RevolveAxis::Line(line)), .. } => vec![Geo::Line(line)],
             Op::Transform { motion: Motion::Scale { point, .. }, .. } => vec![Geo::Point(point)],
@@ -1311,6 +1343,7 @@ impl Op {
             Op::Hem { .. } => "Hem",
             Op::Tab { .. } => "Tab",
             Op::Bend { .. } => "Bend",
+            Op::Hole { .. } => "Hole",
         }
     }
 
@@ -1349,6 +1382,7 @@ impl Op {
             }
             Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::SheetMetal { sketch, .. } | Op::Tab { sketch } | Op::Bend { sketch, .. } | Op::Rib { sketch, .. } => out.push(*sketch),
             Op::Loft { sections, .. } => out.extend(sections.iter().map(|s| s.sketch)),
+            Op::Hole { at: HoleAt::Sketch { sketch, .. }, .. } => out.push(*sketch),
             Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
             Op::Trim { tool: TrimTool::Body(body), .. } => out.push(body.feature),
             Op::Trim { tool: TrimTool::Sketch(sketch), .. } => out.push(*sketch),
@@ -1419,6 +1453,15 @@ impl Op {
             Op::Sew { tolerance } => out.extend(tolerance.iter()),
             Op::Trim { .. } | Op::Split { .. } => {}
             Op::Rib { thickness, .. } => out.push(thickness),
+            Op::Hole { at, spec, end, .. } => {
+                if let HoleAt::Plane { points, .. } = at {
+                    out.extend(points.iter().flatten());
+                }
+                spec.exprs(&mut out);
+                if let HoleEnd::Blind(depth) = end {
+                    out.push(depth);
+                }
+            }
             Op::Sketch { plane, regions } => {
                 place(plane, &mut out);
                 for r in regions {
@@ -1627,6 +1670,9 @@ pub struct Outcome {
     pub failed: Option<usize>,
     /// Each plane feature that built, where it is now, in history order.
     pub planes: Vec<PlaneAt>,
+    /// Each hole that hole features made, as they made it, in history order: where it is, what a drawing would say,
+    /// and its thread. A later feature that moves or fills it doesn't change this.
+    pub holes: Vec<HoleCallout>,
 }
 
 /// A plane feature, as a rebuild left it.
@@ -1707,6 +1753,8 @@ struct Cached {
     tools: Option<(Arc<Vec<Body>>, Mode)>,
     /// A plane feature's plane.
     plane: Option<Frame>,
+    /// A hole feature's holes.
+    holes: Vec<HoleCallout>,
 }
 
 /// What running one feature produced.
@@ -1717,6 +1765,7 @@ struct RunResult {
     sketch: Option<SketchOutput>,
     tools: Option<(Arc<Vec<Body>>, Mode)>,
     plane: Option<Frame>,
+    holes: Vec<HoleCallout>,
     /// What it has to say about what it did, such as what it left out of a file.
     notes: Vec<String>,
     /// Names for the bodies it added, from a file, by their place in `added`.
@@ -2373,7 +2422,7 @@ fn revolve_frame((point, along): (Vec2, Vec2), frame: &Frame, list: &[Profile], 
 }
 
 /// What a rebuild hands back.
-fn finished(steps: Vec<Step>, held: &[Held], failed: Option<usize>, planes: Vec<PlaneAt>) -> Outcome {
+fn finished(steps: Vec<Step>, held: &[Held], failed: Option<usize>, planes: Vec<PlaneAt>, holes: Vec<HoleCallout>) -> Outcome {
     let (mut first_face, mut first_edge) = (0, 0);
     let bodies: Vec<NamedBody> = held
         .iter()
@@ -2392,7 +2441,7 @@ fn finished(steps: Vec<Step>, held: &[Held], failed: Option<usize>, planes: Vec<
             Some(Arc::new(Body::side_by_side(&list)))
         }
     };
-    Outcome { steps, body, bodies, failed, planes }
+    Outcome { steps, body, bodies, failed, planes, holes }
 }
 
 /// What a sketch hands to the features that use it.
@@ -3023,6 +3072,7 @@ impl Document {
         let mut held: Vec<Held> = Vec::new();
         let mut failed: Option<usize> = None;
         let mut planes: Vec<PlaneAt> = Vec::new();
+        let mut holes: Vec<HoleCallout> = Vec::new();
 
         let env = match self.environment() {
             Ok(env) => env,
@@ -3035,7 +3085,7 @@ impl Document {
                     first.state = StepState::Failed(why);
                     failed = Some(0);
                 }
-                return finished(steps, &held, failed, Vec::new());
+                return finished(steps, &held, failed, Vec::new(), Vec::new());
             }
         };
 
@@ -3167,7 +3217,8 @@ impl Document {
                 | Op::SheetMetal { sketch, .. }
                 | Op::Tab { sketch }
                 | Op::Bend { sketch, .. }
-                | Op::Rib { sketch, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
+                | Op::Rib { sketch, .. }
+                | Op::Hole { at: HoleAt::Sketch { sketch, .. }, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
                 Op::Loft { sections, .. } => hash_text(body_key ^ mixed(&sections.iter().map(|s| s.sketch).collect::<Vec<_>>()), &own),
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
                 _ => hash_text(body_key, &own),
@@ -3181,6 +3232,7 @@ impl Document {
                 if let Some(frame) = c.plane {
                     planes.push(PlaneAt { id: feature.id, frame });
                 }
+                holes.extend(c.holes.iter().cloned());
                 steps.push(Step { notes: c.notes.clone(), ..step(StepState::Reused) });
                 continue;
             }
@@ -3197,6 +3249,7 @@ impl Document {
                     if let Some(frame) = result.plane {
                         planes.push(PlaneAt { id: feature.id, frame });
                     }
+                    holes.extend(result.holes.iter().cloned());
                     let notes = result.notes.clone();
                     self.cache.insert(
                         feature.id,
@@ -3210,6 +3263,7 @@ impl Document {
                             sketch: result.sketch,
                             tools: result.tools,
                             plane: result.plane,
+                            holes: result.holes,
                         },
                     );
                     steps.push(Step { notes, ..step(StepState::Rebuilt) });
@@ -3223,7 +3277,7 @@ impl Document {
             }
         }
         coreshape::progress::report("rebuild", last, last);
-        finished(steps, &held, failed, planes)
+        finished(steps, &held, failed, planes, holes)
     }
 
     /// Text covering everything a feature's result depends on: what it is, and the value
@@ -3929,6 +3983,22 @@ impl Document {
                     }
                 }
                 Ok(out.done(None))
+            }
+            Op::Hole { at, spec, end, from_sketch, opposite } => {
+                let drilled = hole::drill(self, &look, at, spec, end, *from_sketch, *opposite, scope, env, feature.id)?;
+                let done = combined(scope, drilled.tools.clone(), Mode::Remove, tag)?;
+                if done.changed.is_empty() {
+                    return Err(Error::InvalidInput("the holes don't go into any part".into()));
+                }
+                // A hole from a sketch inside a part can stop short of every face, and leave a hollow nothing reaches.
+                let voids = |b: &Body| b.shells.len().saturating_sub(b.solid_count());
+                for (id, now) in &done.changed {
+                    let before = scope.iter().find(|(s, _)| s == id).map_or(0, |(_, b)| voids(b));
+                    if now.as_ref().is_some_and(|b| voids(b) > before) {
+                        return Err(Error::InvalidInput(format!("a hole would leave a hollow inside part {}, as it starts inside it and doesn't come out: start it from the part, not the sketch", id.text())));
+                    }
+                }
+                Ok(RunResult { holes: drilled.callouts, notes: drilled.notes, ..done.done(Some((Arc::new(drilled.tools), Mode::Remove))) })
             }
             Op::Rib { sketch, thickness, direction, flip, extend } => {
                 let out = sketch_output(sketch)?;
@@ -5602,6 +5672,72 @@ pub fn op_value(op: &Op) -> Value {
             ));
             Value::obj(items)
         }
+        Op::Hole { at, spec, end, from_sketch, opposite } => {
+            let mut items = vec![("type", Value::str("hole"))];
+            match at {
+                HoleAt::Sketch { sketch, points } => {
+                    items.push(("sketch", Value::Num(sketch.0 as f64)));
+                    if !points.is_empty() {
+                        items.push(("points", Value::Arr(points.iter().map(|r| Value::str(r.name())).collect())));
+                    }
+                }
+                HoleAt::Plane { plane, points } => {
+                    items.push(("plane", plane_ref_value(plane)));
+                    items.push(("points", Value::Arr(points.iter().map(point2_value).collect())));
+                }
+            }
+            items.push((
+                "style",
+                Value::str(match spec.style {
+                    HoleStyle::Simple => "simple",
+                    HoleStyle::Counterbore => "counterbore",
+                    HoleStyle::Countersink => "countersink",
+                }),
+            ));
+            if let Some(size) = &spec.size {
+                items.push(("size", Value::str(size.clone())));
+            }
+            if spec.fit != Fit::Normal {
+                items.push(("fit", Value::str(if spec.fit == Fit::Close { "close" } else { "loose" })));
+            }
+            if let Some(t) = &spec.tapped {
+                let mut thread = Vec::new();
+                if let Some(p) = &t.pitch {
+                    thread.push(("pitch", expr_value(p)));
+                }
+                if let Some(d) = &t.depth {
+                    thread.push(("depth", expr_value(d)));
+                }
+                items.push(("tapped", if thread.is_empty() { Value::Bool(true) } else { Value::obj(thread) }));
+            }
+            for (key, value) in [
+                ("diameter", &spec.diameter),
+                ("cbore_diameter", &spec.cbore_diameter),
+                ("cbore_depth", &spec.cbore_depth),
+                ("csink_diameter", &spec.csink_diameter),
+                ("csink_angle", &spec.csink_angle),
+                ("tip_angle", &spec.tip_angle),
+            ] {
+                if let Some(e) = value {
+                    items.push((key, expr_value(e)));
+                }
+            }
+            match end {
+                HoleEnd::Blind(depth) => {
+                    items.push(("end", Value::str("blind")));
+                    items.push(("depth", expr_value(depth)));
+                }
+                HoleEnd::ThroughAll => items.push(("end", Value::str("through_all"))),
+                HoleEnd::UpToNext => items.push(("end", Value::str("up_to_next"))),
+            }
+            if *from_sketch {
+                items.push(("from_sketch", Value::Bool(true)));
+            }
+            if *opposite {
+                items.push(("opposite", Value::Bool(true)));
+            }
+            Value::obj(items)
+        }
         Op::Rib { sketch, thickness, direction, flip, extend } => Value::obj(vec![
             ("type", Value::str("rib")),
             ("sketch", Value::Num(sketch.0 as f64)),
@@ -6059,6 +6195,81 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                 Some(other) => return Err(Error::InvalidInput(format!("unknown rib direction \"{other}\"; expected parallel or normal"))),
             };
             Ok(Op::Rib { sketch: read_sketch_id(v)?, thickness: expr_field(v, "thickness", "a rib")?, direction, flip: flag("flip", false)?, extend: flag("extend", true)? })
+        }
+        "hole" => {
+            with(&[
+                "type", "sketch", "plane", "points", "style", "size", "fit", "tapped", "diameter", "cbore_diameter", "cbore_depth", "csink_diameter", "csink_angle", "tip_angle",
+                "end", "depth", "from_sketch", "opposite",
+            ])?;
+            let flag = |key: &str| -> Result<bool> {
+                match v.get(key) {
+                    None => Ok(false),
+                    Some(b) => b.as_bool().ok_or_else(|| Error::InvalidInput(format!("a hole's \"{key}\" must be true or false"))),
+                }
+            };
+            let points = v.get("points").map(|p| p.as_array().ok_or_else(|| Error::InvalidInput("a hole's \"points\" must be a list".into()))).transpose()?.unwrap_or(&[]);
+            let at = match (v.get("sketch"), v.get("plane")) {
+                (Some(_), None) => HoleAt::Sketch {
+                    sketch: read_sketch_id(v)?,
+                    points: points
+                        .iter()
+                        .map(|p| {
+                            let text = p.as_str().ok_or_else(|| Error::InvalidInput("a hole's sketch points are named as constraints name them, like \"7\" or \"9.center\"".into()))?;
+                            coreshape_sketch::Ref::parse(text).map_err(Error::InvalidInput)
+                        })
+                        .collect::<Result<_>>()?,
+                },
+                (None, Some(plane)) => HoleAt::Plane { plane: read_plane_ref(plane)?, points: points.iter().map(read_point2).collect::<Result<_>>()? },
+                _ => return Err(Error::InvalidInput("a hole takes its points from a \"sketch\" or a \"plane\"".into())),
+            };
+            let style = match v.get("style").map(|s| s.as_str().unwrap_or("")) {
+                None | Some("simple") => HoleStyle::Simple,
+                Some("counterbore") => HoleStyle::Counterbore,
+                Some("countersink") => HoleStyle::Countersink,
+                Some(other) => return Err(Error::InvalidInput(format!("unknown hole style \"{other}\"; expected simple, counterbore or countersink"))),
+            };
+            let fit = match v.get("fit").map(|s| s.as_str().unwrap_or("")) {
+                None | Some("normal") => Fit::Normal,
+                Some("close") => Fit::Close,
+                Some("loose") => Fit::Loose,
+                Some(other) => return Err(Error::InvalidInput(format!("unknown hole fit \"{other}\"; expected close, normal or loose"))),
+            };
+            let opt = |key: &str| v.get(key).map(read_expr).transpose();
+            let tapped = match v.get("tapped") {
+                None | Some(Value::Bool(false)) => None,
+                Some(Value::Bool(true)) => Some(Tapped { pitch: None, depth: None }),
+                Some(t @ Value::Obj(_)) => {
+                    known_keys(t, &["pitch", "depth"])?;
+                    Some(Tapped { pitch: t.get("pitch").map(read_expr).transpose()?, depth: t.get("depth").map(read_expr).transpose()? })
+                }
+                Some(_) => return Err(Error::InvalidInput("a hole's \"tapped\" is true, or says its \"pitch\" and \"depth\"".into())),
+            };
+            let size = match v.get("size") {
+                None => None,
+                Some(s) => Some(s.as_str().ok_or_else(|| Error::InvalidInput("a hole's \"size\" is a metric size, like \"M6\"".into()))?.to_string()),
+            };
+            let spec = HoleSpec {
+                style,
+                size,
+                fit,
+                tapped,
+                diameter: opt("diameter")?,
+                cbore_diameter: opt("cbore_diameter")?,
+                cbore_depth: opt("cbore_depth")?,
+                csink_diameter: opt("csink_diameter")?,
+                csink_angle: opt("csink_angle")?,
+                tip_angle: opt("tip_angle")?,
+            };
+            let end = match v.get("end").map(|s| s.as_str().unwrap_or("")) {
+                None | Some("blind") => HoleEnd::Blind(expr_field(v, "depth", "a blind hole")?),
+                Some("through_all") => HoleEnd::ThroughAll,
+                Some("up_to_next") => HoleEnd::UpToNext,
+                Some(other) => return Err(Error::InvalidInput(format!("unknown hole end \"{other}\"; expected blind, through_all or up_to_next"))),
+            };
+            if !matches!(end, HoleEnd::Blind(_)) && v.get("depth").is_some() {
+                return Err(Error::InvalidInput("a hole's \"depth\" is for a blind hole".into()));
+            }
+            Ok(Op::Hole { at, spec, end, from_sketch: flag("from_sketch")?, opposite: flag("opposite")? })
         }
         "split" => {
             with(&["type", "plane", "face", "tool", "keep_tool"])?;

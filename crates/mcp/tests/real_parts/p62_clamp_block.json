@@ -1,0 +1,24 @@
+{
+  "name": "Shaft clamp block",
+  "note": "A block bored for a shaft and slotted from the bore to the top, so a cross bolt can close it: an M5 counterbored hole through the near side up to the slot, tapped M5 on through the far side from the slot's wall, and two M6 tapped holes in the bottom for mounting. Every hole is a hole feature on a face's plane.",
+  "scan_fixed": ["bz", "sz", "g"],
+  "kind": "block",
+  "parameters": {"w": 40, "d": 20, "h": 40, "bz": 18, "shaft": 16, "g": 1.5, "sz": 32, "m": 24},
+  "steps": [
+    {"id": 1, "name": "Footprint", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-w / 2", "y": "-d / 2", "w": "w", "h": "d"}}]},
+    {"id": 2, "name": "Block", "type": "extrude", "sketch": 1, "length": "h"},
+    {"id": 3, "name": "Bore", "type": "sketch", "plane": {"origin": [0, "d / 2", 0], "z": [0, -1, 0], "x": [1, 0, 0]}, "regions": [{"outer": {"type": "circle", "cy": "bz", "r": "shaft / 2"}}]},
+    {"id": 4, "name": "Bore it", "type": "extrude", "sketch": 3, "length": "d", "mode": "remove"},
+    {"id": 5, "name": "Slot", "type": "sketch", "regions": [{"outer": {"type": "rect", "x": "-g / 2", "y": "-d / 2 - 1", "w": "g", "h": "d + 2"}}]},
+    {"id": 6, "name": "Cut it", "type": "extrude", "sketch": 5, "start": "bz", "length": "h - bz + 1", "mode": "remove"},
+    {"id": 7, "name": "Cross bolt", "type": "hole", "plane": "f2:side.1", "points": [[0, "sz"]], "style": "counterbore", "size": "M5", "end": "up_to_next"},
+    {"id": 8, "name": "Its thread", "type": "hole", "plane": "f6:side.3", "points": [[0, "sz"]], "size": "M5", "tapped": true, "end": "through_all"},
+    {"id": 9, "name": "Mounting", "type": "hole", "plane": "f2:start", "points": [["-m / 2", 0], ["m / 2", 0]], "size": "M6", "tapped": true, "depth": 10}
+  ],
+  "always": {
+    "volume": "w * d * h - pi * (shaft / 2)^2 * d - d * (g * (h - bz) - ((g / 2) * sqrt((shaft / 2)^2 - (g / 2)^2) + (shaft / 2)^2 * asin(g / shaft) * pi / 180)) - pi * (5^2 * 5 + 2.75^2 * (w / 2 - g / 2 - 5)) - pi * 2.1^2 * (w / 2 - g / 2) - 2 * pi * 2.5^2 * (10 + 2.5 / tan(59) / 3)",
+    "genus": [2],
+    "bounds": [["-w / 2", "-d / 2", 0], ["w / 2", "d / 2", "h"]]
+  },
+  "changes": [{"set": {"shaft": 14}}, {"set": {"w": 46}}, {"set": {"sz": 33}}, {"set": {"m": 28}}]
+}

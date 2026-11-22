@@ -77,9 +77,9 @@ has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
 
 ## Real parts
 
-`crates/mcp/tests/real_parts/` holds 58 parts and 5 assemblies: brackets, flanges, housings, gears, shafts, fasteners with real threads, enclosures, manifolds, pipes and a spring. Each is modelled the way a person does it, feature by feature through the tools an app uses, with flush faces, centred holes, ribs that meet walls exactly and fillets late in the history. If a step is refused, that's written down and it's turned off, so the rest still gets tried.
+`crates/mcp/tests/real_parts/` holds 60 parts and 5 assemblies: brackets, flanges, housings, gears, shafts, fasteners with real threads, enclosures, manifolds, pipes and a spring. Each is modelled the way a person does it, feature by feature through the tools an app uses, with flush faces, centred holes, ribs that meet walls exactly and fillets late in the history. If a step is refused, that's written down and it's turned off, so the rest still gets tried.
 
-Each one is then checked by things that don't depend on this kernel's own answer: a volume formula where one is easy (40 of the 58), the holes through it, where its bounds should be, a watertight mesh, its STEP file read by OpenCASCADE for validity, volume and solids, dimensions changed and changed back, and saved and reopened. `scripts/check_real_parts.sh <folder>` makes the table, and `scripts/real_parts_sheet.py` a picture of them all. `crates/mcp/tests/real_parts.rs` holds it to what's expected, with volumes from OpenCASCADE or a formula: a part that stops working fails it, and so does one that starts to, until the file says so.
+Each one is then checked by things that don't depend on this kernel's own answer: a volume formula where one is easy (42 of the 60), the holes through it, where its bounds should be, a watertight mesh, its STEP file read by OpenCASCADE for validity, volume and solids, dimensions changed and changed back, and saved and reopened. `scripts/check_real_parts.sh <folder>` makes the table, and `scripts/real_parts_sheet.py` a picture of them all. `crates/mcp/tests/real_parts.rs` holds it to what's expected, with volumes from OpenCASCADE or a formula: a part that stops working fails it, and so does one that starts to, until the file says so.
 
 | | Whole | A step refused | Something wrong |
 |---|---|---|---|
@@ -381,7 +381,7 @@ Works, but differs from commercial CAD:
 | Mounting plate | 8 | The holes cross (3), or a fillet meets another tangentially (4), and 1 more |
 | Stress cases | 13 | Always the deliberate known-limit case |
 | Screw | 14 | **Open:** the helix's union fails its own check, "the result does not close: an edge is used by 1 faces", for example at `[9.5, 40, 6, 1]`. Found on 2026-11-22, when a new demo moved the positions the scan draws; the commit before fails there too. Refused, not wrong. Mine to fix if asked |
-| Flange, sheet metal tray, ribbed tray, thin duct, rounded block, crossed cylinders, sliding pockets, vase, joint, crank, panel, spring, cup, healed, walls, tee, nozzle, cam, knob, ring sector | 0 | |
+| Flange, sheet metal tray, ribbed tray, thin duct, hole plate, rounded block, crossed cylinders, sliding pockets, vase, joint, crank, panel, spring, cup, healed, walls, tee, nozzle, cam, knob, ring sector | 0 | |
 
 The positions are drawn in turn from one seeded generator, so adding a demo moves every later demo's positions: crossed cylinders were refused at 7 of 200 before, at exact tangencies, and now aren't, and the screw's refusals only showed up then.
 
@@ -497,6 +497,35 @@ Split, scale, rib, thin extrude and axes from lines (2026-11-22). Each volume in
 - **Thin extrude** follows lines and arcs. A spline or an ellipse is refused, as one moved sideways isn't one, and so are walls thicker than an arc is round, corners so sharp the wall's outside would reach out more than 50 thicknesses, and segments too short for the wall between two corners.
 - **Thin revolve, sweep and loft** make their walls as a thin extrude does, so the same refusals apply. A thin loft's wall is as thick as it says in each section's plane, and in between it's what the loft makes of the sections' walls: where the loft runs at a slant to its sections, as from a wide section to a narrow one, the wall is thinner than that measured square to it. A wall thickened square to the loft would be even, but its ends wouldn't be flat in the sections' planes, so a duct couldn't sit flat on a part. A rectangle lofted to a circle twists 45 degrees one way or the other, which fit equally well: the loft now takes the clockwise one, about the way it goes, which is what rounding happened to choose for the demos, and a hole twists as its outline does, where it used to be left to rounding, which twisted a thin loft's two sides opposite ways and was refused.
 - **Rib** runs across from straight lines in its sketch's plane, or along the sketch's normal from lines and arcs. It has no draft, and an arc across its plane is refused. A rib whose slab runs past the parts without meeting them is refused rather than left sticking out, so a rib sketched well above a part, whose carried-on ends pass over the walls, is refused too: sketch it on the rim, as Onshape's examples do, or leave `extend` off.
+
+## Holes
+
+The hole feature (2026-11-22): simple, counterbored, countersunk and tapped holes, blind with a drill point or a flat bottom,
+through everything, or through the first wall, at a sketch's points or at points on any plane, sizes M1.6 to M36 from tables:
+see [FILE_FORMAT.md](FILE_FORMAT.md#holes). Each volume in its tests is worked out by hand, or against plain extrudes and
+cylinders cutting the same, on a round bar and into a loft's free-form wall. The motor mount among the real parts was made
+again with one hole feature in place of a sketch, a cut, a cone and two patterns, and comes out the same to 1e-11; a clamp
+block with a counterbored cross bolt up to its slot, tapped on through the far side, and tapped mounting holes, matches its
+formula and OpenCASCADE.
+
+- **A thread isn't modelled,** as in Onshape: a tapped hole is drilled at the tap drill, and its thread is in the outcome's
+  `holes` and MCP's `holes_list`, for an app to draw as a cosmetic thread. Nothing draws it yet.
+- **The size tables are as usually published, and only partly checked.** ISO 273's clearances from M4 to M12 were checked
+  against a published chart. The rest, tap drills, DIN 974-1 counterbores and ISO 10642 countersinks, are from memory of the
+  standard tables: check them before making parts. A counterbore is as deep as an ISO 4762 head is high, so the head sits
+  flush with no allowance.
+- **Where a hole starts.** It starts where its axis meets the part and carries its top back by its top radius, so a
+  counterbore or countersink opens cleanly on a curved or slanted face. On a face steeper than 45 degrees to the hole, that
+  isn't far enough, and a sliver of the face stays inside the counterbore's edge. Anything standing over the hole within that
+  distance is cut too, such as a wall right beside a counterbore. Onshape's exact rule here isn't known to me.
+- **Through the first wall** is found by 13 rays, down the middle and round the edge, so a wall that ends between them is
+  missed: a hole whose edge just clips a step can stop short of it there. Parts that touch count as one wall. A hole half over
+  a step, whose edge meets the wall below before its middle leaves the wall above, is refused.
+- **A blind hole deeper than the part** goes through it, as asked, with no note. One from a sketch inside a part that stops
+  short of every face, which would leave a sealed hollow, is refused.
+- **Callouts are as made.** A later feature that moves the part, or fills the hole, doesn't change what `holes` says.
+- **Not built:** inch sizes (ANSI), pipe threads, spot faces, counterdrills, a hole up to a face or a part, holes placed on a
+  cylinder's face by position on it, and drawing a thread.
 
 ## Sheet metal
 

@@ -457,6 +457,38 @@ fn thin_duct(doc: &mut Document, _: usize) {
     doc.with(Op::Transform { motion: Motion::Stretch { axis: LineRef::through(point3(0.0, 0.0, 0.0), point3(0.0, 1.0, 0.0)), factor: "stretch / 100".into() }, copy: false });
 }
 
+const HOLE_NAMES: [&str; 5] = ["M6 counterbored", "M6 countersunk", "M8 clearance", "M8 tapped, blind", "M5 tapped through"];
+
+/// A plate with four holes from the standard tables on its top, picked from a list, and two tapped holes in its front
+/// face, placed on that face's plane so they follow it.
+fn hole_plate(doc: &mut Document, variant: usize) {
+    let s = doc.with(Op::sketch(xy(), vec![Region::new(Shape::centered("width", "depth"))]));
+    let e = doc.with(Op::extrude(s, 0.0, "thick", Mode::Add));
+    let corner = |x: &str, y: &str| -> Point2 { [x.into(), y.into()] };
+    let points = vec![corner("-across / 2", "-along / 2"), corner("across / 2", "-along / 2"), corner("across / 2", "along / 2"), corner("-across / 2", "along / 2")];
+    let (style, size, tapped, end) = match variant {
+        0 => (HoleStyle::Counterbore, "M6", false, HoleEnd::ThroughAll),
+        1 => (HoleStyle::Countersink, "M6", false, HoleEnd::ThroughAll),
+        2 => (HoleStyle::Simple, "M8", false, HoleEnd::ThroughAll),
+        3 => (HoleStyle::Simple, "M8", true, HoleEnd::Blind("thick - 5".into())),
+        _ => (HoleStyle::Simple, "M5", true, HoleEnd::ThroughAll),
+    };
+    let mut spec = HoleSpec::sized(style, size);
+    if tapped {
+        spec.tapped = Some(Tapped { pitch: None, depth: None });
+    }
+    doc.with(Op::Hole { at: HoleAt::Plane { plane: PlaneRef::Face(FaceKey::plain(e.end_cap())), points }, spec, end, from_sketch: false, opposite: false });
+    // The front face is side 0 of the rectangle: x along X and y up, seen from in front.
+    let front = vec![corner("-across / 4", "thick / 2"), corner("across / 4", "thick / 2")];
+    doc.with(Op::Hole {
+        at: HoleAt::Plane { plane: PlaneRef::Face(FaceKey::plain(e.side(0))), points: front },
+        spec: HoleSpec { tapped: Some(Tapped { pitch: None, depth: Some(10.0.into()) }), ..HoleSpec::sized(HoleStyle::Simple, "M5") },
+        end: HoleEnd::Blind(13.0.into()),
+        from_sketch: false,
+        opposite: false,
+    });
+}
+
 fn rounded_block(doc: &mut Document, _: usize) {
     let s = doc.with(Op::sketch(xy(), vec![Region::new(Shape::centered("w", "d"))]));
     doc.with(Op::extrude(s, 0.0, "h", Mode::Add));
@@ -954,8 +986,16 @@ pub fn catalog() -> &'static [ModelDef] {
         default: 0.0,
         choices: &STRESS_NAMES,
     }];
+    static HOLES: [ParamDef; 6] = [
+        ParamDef { key: "kind", label: "Holes", unit: "", min: 0.0, max: 4.0, step: 1.0, default: 0.0, choices: &HOLE_NAMES },
+        mm("width", "Width", 100.0, 160.0, 120.0),
+        mm("depth", "Depth", 70.0, 100.0, 80.0),
+        mm("thick", "Thickness", 12.0, 30.0, 16.0),
+        mm("across", "Holes across", 50.0, 80.0, 70.0),
+        mm("along", "Holes along", 30.0, 50.0, 40.0),
+    ];
     static SLIDER_CRANK: [ParamDef; 3] = [mm("crank", "Crank length", 15.0, 80.0, 30.0), mm("rod", "Rod length", 40.0, 160.0, 100.0), deg("angle", "Crank angle", 0.0, 720.0, 30.0)];
-    static MODELS: [ModelDef; 24] = [
+    static MODELS: [ModelDef; 25] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -1130,6 +1170,14 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "One spline around the outline, with a bore, an elliptical window and a cross hole. Slicing a spline surface by a plane gives an exact spline back, and the cross hole has to follow the curve.",
             params: &CAM,
             build: cam,
+            assembly: None,
+        },
+        ModelDef {
+            id: "holes",
+            name: "Hole plate",
+            blurb: "Holes from the standard metric tables: counterbored, countersunk, clearance and tapped, at points on a face's plane, so they follow it. Tapped threads are noted, not modelled.",
+            params: &HOLES,
+            build: hole_plate,
             assembly: None,
         },
         ModelDef {

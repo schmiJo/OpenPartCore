@@ -92,7 +92,7 @@ fn samples_of(profile: &Profile, way: &Way) -> Result<(Vec<Vec3>, Vec<Vec3>)> {
 }
 
 /// The furthest a body gets along a direction. Exact on a vertex or a flat face, and on a curved face to within its mesh.
-fn furthest(body: &Body, origin: Vec3, dir: Vec3) -> Result<f64> {
+pub(super) fn furthest(body: &Body, origin: Vec3, dir: Vec3) -> Result<f64> {
     let mut out = body.vertices.iter().map(|v| (*v - origin).dot(dir)).fold(f64::NEG_INFINITY, f64::max);
     if body.faces.iter().any(|f| !matches!(f.surface, Surface::Plane(_))) {
         let mesh = tessellate(body, &TessParams::for_size(body.aabb().diagonal()))?;
@@ -167,7 +167,7 @@ pub(super) fn vertex_at(vertex: &VertexRef, all: &[Held], env: &Env) -> Result<V
 }
 
 /// A length as it reads best: to six places, without the zeros after them, so 5 and not 5.000000.
-fn short(x: f64) -> String {
+pub(super) fn short(x: f64) -> String {
     let text = format!("{x:.6}");
     text.trim_end_matches('0').trim_end_matches('.').to_string()
 }

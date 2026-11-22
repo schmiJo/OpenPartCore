@@ -303,7 +303,7 @@ fn assembled(steps: Vec<coreshape_document::Step>, failed: Option<usize>, solved
         first_face += faces;
         first_edge += edges;
     }
-    Outcome { steps, body, bodies, failed, planes: Vec::new() }
+    Outcome { steps, body, bodies, failed, planes: Vec::new(), holes: Vec::new() }
 }
 
 /// What a mechanism adds to a build's info: how free it is, where it's got to, and whether it got there.
@@ -382,7 +382,7 @@ fn build_into(out: &mut Output, model: usize, values: &[f64], rollback: i32, dra
 fn flat_outcome(outcome: Outcome, flat: &coreshape_document::FlatPattern) -> Outcome {
     let body = Arc::new(flat.body.clone());
     let id = outcome.bodies.first().map(|b| b.id).expect("a part to lay flat");
-    Outcome { steps: outcome.steps, body: Some(body.clone()), bodies: vec![NamedBody { id, name: None, copy_of: None, body, first_face: 0, first_edge: 0 }], failed: None, planes: Vec::new() }
+    Outcome { steps: outcome.steps, body: Some(body.clone()), bodies: vec![NamedBody { id, name: None, copy_of: None, body, first_face: 0, first_edge: 0 }], failed: None, planes: Vec::new(), holes: Vec::new() }
 }
 
 /// What the page shows of a flat pattern: its size and how many bends it has.

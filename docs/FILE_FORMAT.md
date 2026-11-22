@@ -45,6 +45,7 @@ are named by the feature that made them:
 | `f2:region.2.side.0` | Swept from segment 0 of the outer wire of region 2 |
 | `f2:wall.0` | The walls an extrude swept from the edges of the first face in its `faces`: see [below](#extruding-faces) |
 | `f2:inner.side.3`, `f2:start_of.side.0`, `f2:end_of.side.4` | A thin wall's side to the left of segment 3, and the ends of a wall along an open curve: see [Thin walls](#thin-walls) |
+| `f2:bore.7`, `f2:cbore.7`, `f2:cbore_floor.7`, `f2:csink.7`, `f2:tip.7`, `f2:floor.7`, `f2:top.7` | The faces of hole 7 of a hole feature: see [Holes](#holes) |
 
 Segments number from 0 in drawing order. A rectangle runs bottom, right, top, left. Both halves of a
 circle are segment 0. Primitives are built by the same sweeps, so `f2:end` is the top of a box.
@@ -101,6 +102,7 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `copy_faces` | `faces` (names or keys): a copy of them as a sheet. What they're on stays as it is |
 | `sew` | `tolerance` (default 1e-6), and the `bodies` to join, by default every sheet. See [Sheets](#sheets) |
 | `rib` | `sketch`, holding open curves; `thickness`; `direction`, `parallel` (the default) or `normal`; `flip` (default false); `extend` (default true). A wall along each curve that runs until it meets the parts the rib acts on, and joins them: see [Ribs](#ribs) |
+| `hole` | Where: `sketch`, a constrained sketch, with `points` naming its points as constraints do (`"7"`, `"9.center"`), or without them every point in it; or `plane`, any [plane](#planes), with `points` as `[x, y]` in its coordinates. What: `style` (`simple`, the default, `counterbore` or `countersink`), `size` (a metric size, `"M1.6"` to `"M36"`), `fit` (`close`, `normal` or `loose`), `tapped`, `diameter`, `cbore_diameter`, `cbore_depth`, `csink_diameter`, `csink_angle`, `tip_angle`. How deep: `end` (`blind`, the default, with `depth`, `through_all` or `up_to_next`). And `from_sketch` and `opposite` (both default false). Cuts a hole at each point, from the parts it acts on: see [Holes](#holes) |
 | `split` | What cuts: `plane`, any [plane](#planes); `face`, a face's name or key, cutting along the whole surface it's on, as far as that goes: a plane, facing out of its part as the face does, a cylinder, cone, sphere or ring-shaped torus, an extruded or turned curve, carried on along the curve's end tangents and past the part, or a free-form face, as far as the face itself goes; or `tool`, a part's name, a solid or a sheet. And `keep_tool` (default true). Each part it acts on, those it names or any it reaches, sheets too, comes apart into pieces that are parts of their own. The piece in front of the plane or a sheet, the way its faces face (for a face, out of its part), or inside the round surface or the solid, keeps the part's name, and the others are new parts named for the split (`f9`, `f9.1`, ...). The cut faces are named for the split: `start` along a plane, and `side.N` along any other face; by a part, they keep that part's names. A part it names but doesn't cut through is refused, and so is a split that cuts nothing, a sheet that ends inside a part, which would only slit it, one that leaves a part in one piece, and a sheet split along a sheet |
 | `trim` | What cuts: `tool`, a solid's name like `"f3"`, or `plane`, any [plane](#planes), or `point` and `normal`, a plane as numbers, or `sketch`, whose regions cut straight through along its normal. And `keep`: `outside` (the default), `inside` or `both`. Acts on the `bodies` it names, by default every sheet. See [Sheets](#sheets) |
 | `offset` | `distance`: every face moves out, or in if negative. Sharp edges stay sharp. |
@@ -454,6 +456,68 @@ A rib is a wall along each of a sketch's open curves, `thickness` thick, half ea
 With `"direction": "parallel"`, the default, it runs across from each line in the sketch's plane: to the line's left as it's drawn, or its right with `flip`, and is as thick across the plane. That's a gusset: sketch a line across the corner of a bracket on the plane through its middle, and the rib fills the triangle between the line and the bracket. It follows straight lines, and an arc or a spline is refused. With `"direction": "normal"` it runs along the sketch's normal, or against it with `flip`, and follows lines and arcs: a line sketched on an open box's rim gives a rib down to its floor.
 
 With `extend`, the default, each curve's ends carry straight on until they meet the parts too, so a line short of a box's walls still reaches them. Without it the rib stops where the curve does. Each rib is what's left of a slab along its curve once the parts are cut out of it, next to the curve, so a curve that runs into a part stops there. One that runs on past the parts without meeting them is refused, saying which way it went, rather than left sticking out, and so is a curve inside a part. Its faces are named as a [thin wall's](#thin-walls) are: `side.N` and `inner.side.N` on its two faces along segment N, and `start` on the face where it begins: in the sketch's plane for a rib along the normal, and along the line for one across from it.
+
+## Holes
+
+A hole feature drills a hole at each of a sketch's points, or at points on a plane, as Onshape's does, and cuts them from the
+parts it acts on.
+
+```json
+{"id": 7, "type": "hole", "sketch": 6, "style": "counterbore", "size": "M6", "end": "through_all"}
+{"id": 8, "type": "hole", "plane": "f2:end", "points": [[10, 10], ["w - 10", 10]], "size": "M5", "tapped": {"depth": 10}, "depth": 14}
+```
+
+- **Where.** A constrained sketch's points: those `points` names, as constraints name them, so a circle's center or a line's end
+  will do, or with no `points` every point entity in it. Or `[x, y]` points on any [plane](#planes): on a face's plane, they move
+  with the face. Each hole goes in against the sketch's or the plane's normal, which for a face's plane is into the part, or along
+  it with `opposite`.
+- **Where it starts.** Where its axis first meets the parts, going in, even if the sketch is above the part or inside it: then
+  it's where the axis comes out behind the sketch. Its top carries on back from there by its top radius, so it opens cleanly on a
+  curved or slanted face; anything standing over the hole within that is cut too. With `from_sketch` it starts at the sketch's
+  plane instead, and goes no further back; one that would then leave a sealed hollow inside a part is refused.
+- **What it's like.** `simple`, `counterbore` (`cbore_diameter`, `cbore_depth`) or `countersink` (`csink_diameter`, and
+  `csink_angle`, default 90). `diameter` is the hole's own. A blind hole has a drill point, `tip_angle` degrees (default 118), or
+  a flat bottom at 180. A `size` fills in whatever isn't given, from the tables below.
+- **Tapped.** `"tapped": true`, or `{"pitch": p, "depth": d}`, needs a `size`. It's drilled at the tap drill, and the thread
+  isn't modelled: it's in the outcome's `holes`, with its size, pitch and depth, as a cosmetic thread. The pitch is the size's
+  coarse one by default, and a fine one is drilled at the major diameter less the pitch. The thread goes as deep as the hole by
+  default, or through.
+- **How deep.** `"end": "blind"` with `depth`, measured from where the hole starts to the end of its full diameter, the drill
+  point going on past it; `through_all`; or `up_to_next`, through the first wall it meets: as deep as rays down its middle and
+  round its edge find that wall's far side, and half way on to what's behind. Parts that touch are one wall. If what's behind
+  comes within the hole's width before the wall ends all round, as with a hole half over a step, it's refused.
+- **Names.** Holes are numbered by their point's entity id when the feature takes every point of a sketch, so that deleting
+  one doesn't renumber the others, and otherwise by their place in `points`. Hole 7's faces are `bore.7` (its own diameter),
+  `cbore.7` and `cbore_floor.7`, `csink.7`, `tip.7` (a drill point), `floor.7` (a flat bottom) and `top.7` (what's left of
+  the part of the top carried back, only where something stands over the hole). Two points at the same place make one hole,
+  and the feature notes it.
+- **Callouts.** The outcome's `holes` list each hole: where it starts, which way it goes, and what a drawing would say, such
+  as `M6 clearance, ⌀6.6 through, counterbore ⌀11 6 deep` or `M6×1 tapped 12 deep, drill ⌀5 15 deep, 118° point`.
+
+| Size | Clearance, close / normal / loose | Tap drill (coarse pitch) | Counterbore ⌀ | Countersink ⌀ |
+|---|---|---|---|---|
+| M1.6 | 1.7 / 1.8 / 2 | 1.25 (0.35) | 3.5 | |
+| M2 | 2.2 / 2.4 / 2.6 | 1.6 (0.4) | 4.4 | |
+| M2.5 | 2.7 / 2.9 / 3.1 | 2.05 (0.45) | 5.5 | |
+| M3 | 3.2 / 3.4 / 3.6 | 2.5 (0.5) | 6.5 | 6.72 |
+| M4 | 4.3 / 4.5 / 4.8 | 3.3 (0.7) | 8 | 8.96 |
+| M5 | 5.3 / 5.5 / 5.8 | 4.2 (0.8) | 10 | 11.2 |
+| M6 | 6.4 / 6.6 / 7 | 5 (1) | 11 | 13.44 |
+| M8 | 8.4 / 9 / 10 | 6.8 (1.25) | 15 | 17.92 |
+| M10 | 10.5 / 11 / 12 | 8.5 (1.5) | 18 | 22.4 |
+| M12 | 13 / 13.5 / 14.5 | 10.2 (1.75) | 20 | 26.88 |
+| M14 | 15 / 15.5 / 16.5 | 12 (2) | 24 | |
+| M16 | 17 / 17.5 / 18.5 | 14 (2) | 26 | 33.6 |
+| M20 | 21 / 22 / 24 | 17.5 (2.5) | 33 | 40.32 |
+| M24 | 25 / 26 / 28 | 21 (3) | 40 | |
+| M30 | 31 / 33 / 35 | 26.5 (3.5) | 50 | |
+| M36 | 37 / 39 / 42 | 32 (4) | 58 | |
+
+Clearance holes are ISO 273's fine, medium and coarse series; pitches are ISO 261's coarse ones. A counterbore is for an
+ISO 4762 socket head cap screw, at DIN 974-1's diameter, and as deep as the head is high, which for ISO 4762 is the size, so
+the head sits flush. A countersink is 90°, at an ISO 10642 countersunk head's theoretical diameter, so the head sits flush;
+the tables have none where that standard has no head. These numbers are as standard tables are usually published, and only
+ISO 273's from M4 to M12 have been checked here against a published chart: check the rest before making parts.
 
 ## Sheets
 

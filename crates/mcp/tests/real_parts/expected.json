@@ -61,5 +61,7 @@
   "p57_ball_pin": {"state": "whole", "volume": 4809.80893817235, "volume_from": "occt", "trouble": []},
   "p58_cyclone": {"state": "whole", "volume": 122173.21249569926, "volume_from": "occt", "trouble": []},
   "p59_keyhole": {"state": "whole", "volume": 12425.415986824604, "volume_from": "occt", "trouble": []},
-  "p60_full_round": {"state": "whole", "volume": 17579.808118646604, "volume_from": "occt", "trouble": []}
+  "p60_full_round": {"state": "whole", "volume": 17579.808118646604, "volume_from": "occt", "trouble": []},
+  "p61_motor_mount_drilled": {"state": "whole", "volume": 11817.239037198673, "volume_from": "occt", "trouble": []},
+  "p62_clamp_block": {"state": "whole", "volume": 26148.09474462965, "volume_from": "occt", "trouble": []}
 }

@@ -96,6 +96,7 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("sketch_regions", "The closed regions a sketch would use: those picked, or by default every other level of nesting, so a loop in a loop is a hole. Says which entity leaves a gap if there aren't any.", r#"{"sketch": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
     ("sketch_arrangement", "Every closed region a sketch's curves make, split at crossings and T-junctions, each with a stable id, plus the curves that make none and why.", r#"{"sketch": {"type": "object"}, "context": {"type": "object", "description": "Where the sketch is, for projected entities: {\"plane\": placement, \"position\": n}, n being where the sketch is or will go in the history. Their geometry is worked out from the parts the features before n make. plane defaults to XY and position to the end."}}"#, r#"["sketch"]"#),
     ("planes_list", "Where each plane is: Top, Front and Right, then each plane feature and each sketch, in history order, with its position, origin, normal, and x and y directions, or why it didn't build. With upto, as the history stood after that position, for rolling back past them.", r#"{"upto": {"type": "integer", "description": "As after the feature at this position."}}"#, "[]"),
+    ("holes_list", "Each hole that hole features made, in history order: its feature and number, where it starts on its axis, the way it goes in, what a drawing would say (\"M6 clearance, ⌀6.6 through, counterbore ⌀11 6 deep\"), its bore face's name, and for a tapped hole its thread, which isn't modelled: size, major diameter, pitch, and depth from the start, or through. With upto, as the history stood after that position.", r#"{"upto": {"type": "integer", "description": "As after the feature at this position."}}"#, "[]"),
     ("flat_pattern", "A sheet metal part laid out flat, unfolded from its first wall's face on its sketch's side, which stays where it is: the frame it lies in (z into the sheet), its outline and holes as lines and arcs in that frame's x and y, each bend's middle line there with its angle, inner radius, whether what's beyond it goes up (toward +z) and how wide its strip is, its size, thickness and k-factor. With body, that part, and without, the only sheet metal part. With upto, as the history stood after that position.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names."}, "upto": {"type": "integer", "description": "As after the feature at this position."}}"#, "[]"),
     ("vertices_list", "The solid's corners: where each is, the edges that meet there, and the vertex that picks it, {\"faces\": [...], \"near\": [x, y, z]}, as an extrude's up_to_vertex and a sketch's projected vertex take it.", r#"{"body": {"type": "string", "description": "One body, like f3 or f3.2. bodies_list gives the names. Leave it out for all of them."}}"#, "[]"),
 ];
@@ -152,6 +153,37 @@ fn num(v: f64) -> Value {
 
 fn point2(p: coreshape::Vec2) -> Value {
     Value::Arr(vec![Value::Num(p.x), Value::Num(p.y)])
+}
+
+/// The holes a rebuild made, for `holes_list`.
+fn holes_value(o: &Outcome) -> Value {
+    Value::Arr(
+        o.holes
+            .iter()
+            .map(|h| {
+                let mut items = vec![
+                    ("feature", Value::Num(h.feature.0 as f64)),
+                    ("number", Value::Num(h.number as f64)),
+                    ("start", vec3(h.start)),
+                    ("direction", vec3(h.direction)),
+                    ("callout", Value::str(&h.text)),
+                    ("bore", Value::str(h.feature.hole_face(h.number, coreshape_document::HoleFace::Bore).name())),
+                ];
+                if let Some(t) = &h.thread {
+                    items.push((
+                        "thread",
+                        Value::obj(vec![
+                            ("size", Value::str(&t.size)),
+                            ("major", Value::Num(t.major)),
+                            ("pitch", Value::Num(t.pitch)),
+                            ("depth", t.depth.map_or(Value::str("through"), Value::Num)),
+                        ]),
+                    ));
+                }
+                Value::obj(items)
+            })
+            .collect(),
+    )
 }
 
 /// A flat pattern as the MCP gives it.
@@ -444,6 +476,11 @@ impl Session {
                 let upto = position_arg(args, "upto")?;
                 let o = self.doc.rebuild(upto);
                 Ok(vec![text(self.planes_value(&o).to_pretty())])
+            }
+            "holes_list" => {
+                let upto = position_arg(args, "upto")?;
+                let o = self.doc.rebuild(upto);
+                Ok(vec![text(holes_value(&o).to_pretty())])
             }
             "flat_pattern" => {
                 let upto = position_arg(args, "upto")?;

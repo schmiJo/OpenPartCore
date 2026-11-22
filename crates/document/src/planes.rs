@@ -754,7 +754,7 @@ impl<'a> Looker<'a> {
 }
 
 /// A point of a solved sketch, in its own coordinates.
-fn sketch_point(sketch: &coreshape_sketch::Sketch, r: Ref) -> std::result::Result<[f64; 2], String> {
+pub(crate) fn sketch_point(sketch: &coreshape_sketch::Sketch, r: Ref) -> std::result::Result<[f64; 2], String> {
     if r.entity == coreshape_sketch::model::ORIGIN && r.part == Part::Whole {
         return Ok([0.0, 0.0]);
     }
