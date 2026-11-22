@@ -63,5 +63,6 @@
   "p59_keyhole": {"state": "whole", "volume": 12425.415986824604, "volume_from": "occt", "trouble": []},
   "p60_full_round": {"state": "whole", "volume": 17579.808118646604, "volume_from": "occt", "trouble": []},
   "p61_motor_mount_drilled": {"state": "whole", "volume": 11817.239037198673, "volume_from": "occt", "trouble": []},
-  "p62_clamp_block": {"state": "whole", "volume": 26148.09474462965, "volume_from": "occt", "trouble": []}
+  "p62_clamp_block": {"state": "whole", "volume": 26126.182135870855, "volume_from": "occt", "trouble": []},
+  "p63_angled_sensor_mount": {"state": "whole", "volume": 62969.657899557205, "volume_from": "formula", "trouble": []}
 }

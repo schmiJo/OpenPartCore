@@ -77,9 +77,9 @@ has volume 8126.09, against this kernel's 8126.16 and its reported 8127.58.
 
 ## Real parts
 
-`crates/mcp/tests/real_parts/` holds 60 parts and 5 assemblies: brackets, flanges, housings, gears, shafts, fasteners with real threads, enclosures, manifolds, pipes and a spring. Each is modelled the way a person does it, feature by feature through the tools an app uses, with flush faces, centred holes, ribs that meet walls exactly and fillets late in the history. If a step is refused, that's written down and it's turned off, so the rest still gets tried.
+`crates/mcp/tests/real_parts/` holds 61 parts and 5 assemblies: brackets, flanges, housings, gears, shafts, fasteners with real threads, enclosures, manifolds, pipes and a spring. Each is modelled the way a person does it, feature by feature through the tools an app uses, with flush faces, centred holes, ribs that meet walls exactly and fillets late in the history. If a step is refused, that's written down and it's turned off, so the rest still gets tried.
 
-Each one is then checked by things that don't depend on this kernel's own answer: a volume formula where one is easy (42 of the 60), the holes through it, where its bounds should be, a watertight mesh, its STEP file read by OpenCASCADE for validity, volume and solids, dimensions changed and changed back, and saved and reopened. `scripts/check_real_parts.sh <folder>` makes the table, and `scripts/real_parts_sheet.py` a picture of them all. `crates/mcp/tests/real_parts.rs` holds it to what's expected, with volumes from OpenCASCADE or a formula: a part that stops working fails it, and so does one that starts to, until the file says so.
+Each one is then checked by things that don't depend on this kernel's own answer: a volume formula where one is easy (43 of the 61), the holes through it, where its bounds should be, a watertight mesh, its STEP file read by OpenCASCADE for validity, volume and solids, dimensions changed and changed back, and saved and reopened. `scripts/check_real_parts.sh <folder>` makes the table, and `scripts/real_parts_sheet.py` a picture of them all. `crates/mcp/tests/real_parts.rs` holds it to what's expected, with volumes from OpenCASCADE or a formula: a part that stops working fails it, and so does one that starts to, until the file says so.
 
 | | Whole | A step refused | Something wrong |
 |---|---|---|---|
@@ -502,27 +502,65 @@ Split, scale, rib, thin extrude and axes from lines (2026-11-22). Each volume in
 
 The hole feature (2026-11-22): simple, counterbored, countersunk and tapped holes, blind with a drill point or a flat bottom,
 through everything, or through the first wall, at a sketch's points or at points on any plane, sizes M1.6 to M36 from tables:
-see [FILE_FORMAT.md](FILE_FORMAT.md#holes). Each volume in its tests is worked out by hand, or against plain extrudes and
-cylinders cutting the same, on a round bar and into a loft's free-form wall. The motor mount among the real parts was made
-again with one hole feature in place of a sketch, a cut, a cone and two patterns, and comes out the same to 1e-11; a clamp
-block with a counterbored cross bolt up to its slot, tapped on through the far side, and tapped mounting holes, matches its
-formula and OpenCASCADE.
+see [FILE_FORMAT.md](FILE_FORMAT.md#holes). Each volume in its tests is worked out by hand, or against plain extrudes,
+cylinders and cones cutting the same, on a round bar, into a loft's free-form wall, and into faces at 30, 60 and 75 degrees.
+The motor mount among the real parts was made again with one hole feature in place of a sketch, a cut, a cone and two
+patterns, and comes out the same to 1e-11. A clamp block with a counterbored cross bolt up to its slot, tapped on through the
+far side, and tapped mounting holes, matches its formula and OpenCASCADE. An angled sensor mount, with a counterbore down into
+a 52 degree ramp and one reaching under the foot of a rib with a 3 degree draft, matches its formula to 4e-11; OpenCASCADE
+reads it as valid and makes its volume 2.8e-8 more, where the counterbore's wall meets the ramp in an ellipse, which is
+written exactly, so that's OpenCASCADE's integration.
 
+**The tables, and where each was read** (2026-11-22):
+
+- **Clearance holes:** ISO 273:1979's table, every size, from IS 1821:1987, the Indian standard identical with it
+  ([law.resource.org](https://law.resource.org/pub/in/bis/S01/is.1821.1987.pdf)). All 16 sizes matched what was there.
+- **Pitches and tap drills:** ISO 2306:1972's tables 1, 2 and 7, from the standard's sample pages
+  ([iTeh](https://cdn.standards.iteh.ai/samples/7135/5bef5f85e78040d6b848307ffd62d83f/ISO-2306-1972.pdf)). The coarse ones
+  matched. Fine pitches were drilled at the major diameter less the pitch, which is what ISO 2306 gives for most, but it
+  rounds six to a drill that's made: M10×1.25 is 8.8, not 8.75, and M6×0.75 5.2, not 5.25. Its drills for every pitch of
+  each size are in the table now.
+- **Counterbores:** DIN 974-1:2008's table 1, series 1, from a reproduction in Beuth's *Tabellenbuch Schrauben, Muttern und
+  Zubehör* ([preview](https://api.pageplace.de/preview/DT0400.9783410231622_A34075842/preview-9783410231622_A34075842.pdf)).
+  All 16 matched. DIN 974-1 sets no depth: it recommends the head's height and an allowance, and leaves it to the designer.
+  The counterbore was exactly as deep as the head is high before; now it adds the allowance, as a table of depths for
+  M3 to M36 gives them ([neue-physik.de](https://www.neue-physik.de/353.9_Senkungen.php)): 0.4 from M3 to M6, 0.6 from M8 to
+  M20, 0.8 at M24, 1 at M36. A forum thread quoting the 2008 edition gives M5's 0.4 too
+  ([cad.de](https://ww3.cad.de/foren/ubb/Forum200/HTML/000551.shtml)). Two are assumed: 0.4 below M3, which no source I found
+  gives, and 1 at M30, where that table prints 34, which fits nothing else in it. ISO 4762's head height is the size, as
+  [Strobel](https://strobel-industry.de/wissen/senkung-fase-rechner) lists from M3 to M20.
+- **Countersinks:** these were wrong. They were at an ISO 10642 head's theoretical diameter, 13.44 for M6, which a table of
+  ISO 10642 heads confirms ([Westfield](https://westfieldfasteners.co.uk/Standards/ScrewBolt-SHCsk-M.html)). But the
+  countersink made for that head is DIN 74:2003's form F, a little wider, 13.71 for M6, from the same Beuth reproduction, and
+  Strobel's rounded figures agree. They're form F's now, M3 to M20 with M14 added, so a head sits just under the face.
+
+**What changed on 2026-11-22, and what's still weak:**
+
+- **Where a hole starts.** It starts where its axis meets the part. Its top used to carry on back by its top radius, which on a
+  face steeper than 45 degrees wasn't far enough: a counterbore into a 60 degree face left a sliver of 31 mm³ inside its
+  edge. And a wall beside a counterbore on a flat face was cut, 43 mm³ of it, up to the top radius above the face. Now rays
+  along the axis in 6 rings of 24 out to the top's radius find the face it goes in through, and the top carries on back as far
+  as that face stands proud, and a fiftieth more, as a ray between those cast could find it a little higher. A flat face square
+  to the hole needs nothing carried back. Going out from the axis, a face that rises steeper than 80 degrees, or that a ray
+  meets rising steeper than that, is something standing over the hole, and it and all beyond it on that side are left alone:
+  a wall, or a rib or a pocket's side with a draft. Both old failing cases are tests, and fail with the old rule put back, and
+  so is a counterbore wider than the floor of a pocket with a 5 degree draft, which a first try at the new rule cut 182 mm³
+  too much from: beyond a ray at the wall's foot it had skipped, it took the next ray's rise of 10 over two rings' width for a
+  79.6 degree face. Of 42 hole bugs put back on purpose, 41 are caught. The one that isn't stops going out at a steep face
+  falling away, as well as at one rising; I know of no case where that matters.
+  What's left: a counterbore that runs under a wall undercuts it, as nothing over the face is cut; a real counterbore cutter
+  coming from above would cut the wall away. A face over the hole at 80 degrees or less, such as a fillet's lower part or a
+  60 degree rib, counts as the face it goes in through, and is cut as high as it rises within the top, and anything standing
+  over that within the top is cut to that height. A countersink carries on back as a cylinder at its widest, as a counterbore
+  does; a real countersink cutter on a slanted face would cut a wider cone there.
 - **A thread isn't modelled,** as in Onshape: a tapped hole is drilled at the tap drill, and its thread is in the outcome's
-  `holes` and MCP's `holes_list`, for an app to draw as a cosmetic thread. Nothing draws it yet.
-- **The size tables are as usually published, and only partly checked.** ISO 273's clearances from M4 to M12 were checked
-  against a published chart. The rest, tap drills, DIN 974-1 counterbores and ISO 10642 countersinks, are from memory of the
-  standard tables: check them before making parts. A counterbore is as deep as an ISO 4762 head is high, so the head sits
-  flush with no allowance.
-- **Where a hole starts.** It starts where its axis meets the part and carries its top back by its top radius, so a
-  counterbore or countersink opens cleanly on a curved or slanted face. On a face steeper than 45 degrees to the hole, that
-  isn't far enough, and a sliver of the face stays inside the counterbore's edge. Anything standing over the hole within that
-  distance is cut too, such as a wall right beside a counterbore. Onshape's exact rule here isn't known to me.
-- **Through the first wall** is found by 13 rays, down the middle and round the edge, so a wall that ends between them is
-  missed: a hole whose edge just clips a step can stop short of it there. Parts that touch count as one wall. A hole half over
-  a step, whose edge meets the wall below before its middle leaves the wall above, is refused.
-- **A blind hole deeper than the part** goes through it, as asked, with no note. One from a sketch inside a part that stops
-  short of every face, which would leave a sealed hollow, is refused.
+  `holes` and MCP's `holes_list`, for an app to draw as a cosmetic thread. Nothing draws it yet. A blind tapped hole is
+  threaded to its bottom by default, which a tap can't do: give the thread a depth.
+- **Through the first wall** is found by 49 rays, down the middle and in two rings of 24 round it, so a wall that ends between
+  them is missed: a hole whose edge just clips a step can stop short of it there. It was 13 rays. Parts that touch count as one
+  wall. A hole half over a step, whose edge meets the wall below before its middle leaves the wall above, is refused.
+- **A blind hole deeper than the part** goes through it, as asked, and now the feature notes it. One from a sketch inside a
+  part that stops short of every face, which would leave a sealed hollow, is refused.
 - **Callouts are as made.** A later feature that moves the part, or fills the hole, doesn't change what `holes` says.
 - **Not built:** inch sizes (ANSI), pipe threads, spot faces, counterdrills, a hole up to a face or a part, holes placed on a
   cylinder's face by position on it, and drawing a thread.

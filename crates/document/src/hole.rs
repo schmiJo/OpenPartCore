@@ -176,46 +176,58 @@ impl HoleSpec {
     }
 }
 
-/// A metric screw size's numbers, in millimetres.
+/// A metric screw size's numbers, in millimetres, each from the standard named, as checked on 2026-11-22: see
+/// docs/KNOWN_LIMITS.md for where each was read.
 struct Size {
     name: &'static str,
     major: f64,
-    /// The coarse pitch, ISO 261.
+    /// The coarse pitch, ISO 261, as ISO 2306's table 1 lists it.
     pitch: f64,
-    /// The usual tap drill for the coarse pitch, about the major diameter less the pitch.
-    tap_drill: f64,
+    /// Tap drills, ISO 2306 (table 7): for each pitch it lists for the size, coarse and fine, the drill. The coarse
+    /// one is the major diameter less the pitch; some fine ones are rounded to a drill that's made.
+    drills: &'static [(f64, f64)],
     /// Clearance holes, ISO 273: fine, medium and coarse.
     clearance: [f64; 3],
-    /// A counterbore for an ISO 4762 socket head cap screw, as DIN 974-1 gives it. Its depth is the head's height,
-    /// which for ISO 4762 is the major diameter, so the head sits flush.
+    /// A counterbore for an ISO 4762 socket head cap screw with no washer, DIN 974-1's series 1.
     cbore: f64,
-    /// A 90 degree countersink for an ISO 10642 countersunk socket head, at the head's theoretical diameter, so the head
-    /// sits flush.
+    /// What a counterbore's depth adds to an ISO 4762 head's height, which is the major diameter, so the head sits
+    /// just under the face: the allowance DIN 974-1 recommends. The standard leaves the depth to the designer.
+    allowance: f64,
+    /// A 90 degree countersink for an ISO 10642 countersunk socket head, DIN 74 form F. It's a little wider than the
+    /// head, so the head sits just under the face.
     csink: Option<f64>,
 }
 
-const fn size(name: &'static str, major: f64, pitch: f64, tap_drill: f64, clearance: [f64; 3], cbore: f64, csink: Option<f64>) -> Size {
-    Size { name, major, pitch, tap_drill, clearance, cbore, csink }
+#[allow(clippy::too_many_arguments)]
+const fn size(name: &'static str, major: f64, pitch: f64, drills: &'static [(f64, f64)], clearance: [f64; 3], cbore: f64, allowance: f64, csink: Option<f64>) -> Size {
+    Size { name, major, pitch, drills, clearance, cbore, allowance, csink }
 }
 
 const SIZES: [Size; 16] = [
-    size("M1.6", 1.6, 0.35, 1.25, [1.7, 1.8, 2.0], 3.5, None),
-    size("M2", 2.0, 0.4, 1.6, [2.2, 2.4, 2.6], 4.4, None),
-    size("M2.5", 2.5, 0.45, 2.05, [2.7, 2.9, 3.1], 5.5, None),
-    size("M3", 3.0, 0.5, 2.5, [3.2, 3.4, 3.6], 6.5, Some(6.72)),
-    size("M4", 4.0, 0.7, 3.3, [4.3, 4.5, 4.8], 8.0, Some(8.96)),
-    size("M5", 5.0, 0.8, 4.2, [5.3, 5.5, 5.8], 10.0, Some(11.2)),
-    size("M6", 6.0, 1.0, 5.0, [6.4, 6.6, 7.0], 11.0, Some(13.44)),
-    size("M8", 8.0, 1.25, 6.8, [8.4, 9.0, 10.0], 15.0, Some(17.92)),
-    size("M10", 10.0, 1.5, 8.5, [10.5, 11.0, 12.0], 18.0, Some(22.4)),
-    size("M12", 12.0, 1.75, 10.2, [13.0, 13.5, 14.5], 20.0, Some(26.88)),
-    size("M14", 14.0, 2.0, 12.0, [15.0, 15.5, 16.5], 24.0, None),
-    size("M16", 16.0, 2.0, 14.0, [17.0, 17.5, 18.5], 26.0, Some(33.6)),
-    size("M20", 20.0, 2.5, 17.5, [21.0, 22.0, 24.0], 33.0, Some(40.32)),
-    size("M24", 24.0, 3.0, 21.0, [25.0, 26.0, 28.0], 40.0, None),
-    size("M30", 30.0, 3.5, 26.5, [31.0, 33.0, 35.0], 50.0, None),
-    size("M36", 36.0, 4.0, 32.0, [37.0, 39.0, 42.0], 58.0, None),
+    size("M1.6", 1.6, 0.35, &[(0.35, 1.25)], [1.7, 1.8, 2.0], 3.5, 0.4, None),
+    size("M2", 2.0, 0.4, &[(0.4, 1.6)], [2.2, 2.4, 2.6], 4.4, 0.4, None),
+    size("M2.5", 2.5, 0.45, &[(0.45, 2.05), (0.35, 2.15)], [2.7, 2.9, 3.1], 5.5, 0.4, None),
+    size("M3", 3.0, 0.5, &[(0.5, 2.5), (0.35, 2.65)], [3.2, 3.4, 3.6], 6.5, 0.4, Some(6.94)),
+    size("M4", 4.0, 0.7, &[(0.7, 3.3), (0.5, 3.5)], [4.3, 4.5, 4.8], 8.0, 0.4, Some(9.18)),
+    size("M5", 5.0, 0.8, &[(0.8, 4.2), (0.5, 4.5)], [5.3, 5.5, 5.8], 10.0, 0.4, Some(11.47)),
+    size("M6", 6.0, 1.0, &[(1.0, 5.0), (0.75, 5.2)], [6.4, 6.6, 7.0], 11.0, 0.4, Some(13.71)),
+    size("M8", 8.0, 1.25, &[(1.25, 6.8), (1.0, 7.0), (0.75, 7.2)], [8.4, 9.0, 10.0], 15.0, 0.6, Some(18.25)),
+    size("M10", 10.0, 1.5, &[(1.5, 8.5), (1.25, 8.8), (1.0, 9.0), (0.75, 9.2)], [10.5, 11.0, 12.0], 18.0, 0.6, Some(22.73)),
+    size("M12", 12.0, 1.75, &[(1.75, 10.2), (1.5, 10.5), (1.25, 10.8), (1.0, 11.0)], [13.0, 13.5, 14.5], 20.0, 0.6, Some(27.21)),
+    size("M14", 14.0, 2.0, &[(2.0, 12.0), (1.5, 12.5), (1.25, 12.8), (1.0, 13.0)], [15.0, 15.5, 16.5], 24.0, 0.6, Some(31.19)),
+    size("M16", 16.0, 2.0, &[(2.0, 14.0), (1.5, 14.5), (1.0, 15.0)], [17.0, 17.5, 18.5], 26.0, 0.6, Some(33.99)),
+    size("M20", 20.0, 2.5, &[(2.5, 17.5), (2.0, 18.0), (1.5, 18.5), (1.0, 19.0)], [21.0, 22.0, 24.0], 33.0, 0.6, Some(40.71)),
+    size("M24", 24.0, 3.0, &[(3.0, 21.0), (2.0, 22.0), (1.5, 22.5), (1.0, 23.0)], [25.0, 26.0, 28.0], 40.0, 0.8, None),
+    size("M30", 30.0, 3.5, &[(3.5, 26.5), (3.0, 27.0), (2.0, 28.0), (1.5, 28.5), (1.0, 29.0)], [31.0, 33.0, 35.0], 50.0, 1.0, None),
+    size("M36", 36.0, 4.0, &[(4.0, 32.0), (3.0, 33.0), (2.0, 34.0), (1.5, 34.5)], [37.0, 39.0, 42.0], 58.0, 1.0, None),
 ];
+
+impl Size {
+    /// ISO 2306's drill for a pitch of this size, if it lists one.
+    fn drill(&self, pitch: f64) -> Option<f64> {
+        self.drills.iter().find(|(p, _)| (p - pitch).abs() < 1e-9).map(|(_, d)| *d)
+    }
+}
 
 /// The sizes the tables know, smallest first.
 pub fn hole_sizes() -> Vec<&'static str> {
@@ -271,6 +283,8 @@ struct Dims {
     thread: Option<(String, f64, f64, Option<f64>)>,
     /// How the callout starts, before the depth.
     words: String,
+    /// What the feature's step should say about where a number came from.
+    notes: Vec<String>,
 }
 
 fn positive(e: &Option<Expr>, what: &str, env: &Env) -> Result<Option<f64>> {
@@ -300,6 +314,7 @@ impl HoleSpec {
             return Err(Error::InvalidInput("csink_diameter and csink_angle are for a countersunk hole".into()));
         }
         let mut thread = None;
+        let mut notes = Vec::new();
         let given = positive(&self.diameter, "diameter", env)?;
         let mut words = String::new();
         let diameter = match (&self.tapped, size) {
@@ -311,8 +326,17 @@ impl HoleSpec {
                 if !(pitch >= 0.1 && pitch < s.major / 2.0) {
                     return Err(Error::InvalidInput(format!("{}'s thread can't have a pitch of {pitch}", s.name)));
                 }
-                // A fine pitch takes a bigger drill: the major diameter less the pitch.
-                let drill = given.unwrap_or(if tapped.pitch.is_none() { s.tap_drill } else { s.major - pitch });
+                // A fine pitch takes a bigger drill. A pitch ISO 2306 doesn't list for the size is drilled at the
+                // major diameter less the pitch, as the ones it lists nearly all are.
+                let drill = match (given, s.drill(pitch)) {
+                    (Some(d), _) => d,
+                    (None, Some(d)) => d,
+                    (None, None) => {
+                        let d = s.major - pitch;
+                        notes.push(format!("ISO 2306 lists no tap drill for {}×{}: it's drilled at the major diameter less the pitch, {}", s.name, up_to::short(pitch), up_to::short(d)));
+                        d
+                    }
+                };
                 if drill >= s.major {
                     return Err(Error::InvalidInput(format!("a tapped {} hole has to be drilled under {}, and {drill} isn't", s.name, up_to::short(s.major))));
                 }
@@ -342,7 +366,7 @@ impl HoleSpec {
                     .or(size.map(|s| s.cbore))
                     .ok_or_else(|| Error::InvalidInput("a counterbore needs cbore_diameter and cbore_depth, or a size".into()))?;
                 let depth = positive(&self.cbore_depth, "counterbore depth", env)?
-                    .or(size.map(|s| s.major))
+                    .or(size.map(|s| s.major + s.allowance))
                     .ok_or_else(|| Error::InvalidInput("a counterbore needs cbore_diameter and cbore_depth, or a size".into()))?;
                 if d / 2.0 <= radius + MIN_FEATURE {
                     return Err(Error::InvalidInput(format!("a counterbore has to be wider than its hole, and ⌀{} isn't wider than ⌀{}", up_to::short(d), up_to::short(diameter))));
@@ -366,7 +390,7 @@ impl HoleSpec {
         };
         let tip = angle(&self.tip_angle, 118.0, "tip angle", 180.0, env)?;
         let tip = (tip < 180.0 - 1e-9).then(|| (tip / 2.0).to_radians());
-        Ok(Dims { radius, top, tip, thread, words })
+        Ok(Dims { radius, top, tip, thread, words, notes })
     }
 }
 
@@ -376,18 +400,28 @@ const AHEAD: f64 = 1e-6;
 /// Where the line through `q` along `d` is inside any of these bodies, as spans of distance from `q`, which can be
 /// behind it. `None` if that can't be told, as when the line runs along a free-form face.
 fn spans(indexes: &[Index], q: Vec3, d: Vec3, reach: f64) -> Option<Vec<(f64, f64)>> {
-    let mut all: Vec<(f64, f64)> = Vec::new();
+    Some(spans_square(indexes, q, d, reach)?.into_iter().map(|(a, b, _)| (a, b)).collect())
+}
+
+/// `spans`, each with how square to the line the face it goes in through is there: the cosine of the angle between
+/// them, 1 for a face square to the line.
+fn spans_square(indexes: &[Index], q: Vec3, d: Vec3, reach: f64) -> Option<Vec<(f64, f64, f64)>> {
+    let mut all: Vec<(f64, f64, f64)> = Vec::new();
     for index in indexes {
         let from = q - d * reach;
         let hits = index.ray_hits(from, d, reach * 2.0)?;
         // In and out in turn. Two crossings at one place, as on an edge between faces, count once.
-        let mut inside: Option<f64> = None;
+        let mut inside: Option<(f64, f64)> = None;
         for h in hits {
             let t = h.t - reach;
             match (h.entering, inside) {
-                (true, None) => inside = Some(t),
-                (false, Some(a)) => {
-                    all.push((a, t));
+                (true, None) => {
+                    let face = &index.body.faces[h.face];
+                    let n = face.surface.normal(from + d * h.t) * if face.flipped { -1.0 } else { 1.0 };
+                    inside = Some((t, -n.dot(d)));
+                }
+                (false, Some((a, square))) => {
+                    all.push((a, t, square));
                     inside = None;
                 }
                 _ => {}
@@ -396,11 +430,11 @@ fn spans(indexes: &[Index], q: Vec3, d: Vec3, reach: f64) -> Option<Vec<(f64, f6
     }
     all.sort_by(|a, b| a.0.total_cmp(&b.0));
     // Bodies that overlap make one span.
-    let mut out: Vec<(f64, f64)> = Vec::new();
-    for (a, b) in all {
+    let mut out: Vec<(f64, f64, f64)> = Vec::new();
+    for (a, b, square) in all {
         match out.last_mut() {
             Some(last) if a <= last.1 + TOL => last.1 = last.1.max(b),
-            _ => out.push((a, b)),
+            _ => out.push((a, b, square)),
         }
     }
     Some(out)
@@ -487,7 +521,7 @@ pub(super) fn drill(
         Top::Plain => dims.radius,
         Top::Cbore { radius, .. } | Top::Csink { radius, .. } => radius,
     };
-    let mut out = Drilled { tools: Vec::new(), callouts: Vec::new(), notes: Vec::new() };
+    let mut out = Drilled { tools: Vec::new(), callouts: Vec::new(), notes: dims.notes.clone() };
     let mut done: Vec<(u32, Vec3)> = Vec::new();
     for (n, xy) in points {
         let q = frame.point(xy[0], xy[1], 0.0);
@@ -511,7 +545,7 @@ pub(super) fn drill(
             }
         };
         let s = q + d * start;
-        let back = if from_sketch { 0.0 } else { top_radius };
+        let back = if from_sketch { 0.0 } else { clearance(&indexes, s, d, top_radius, reach + top_radius) };
         // How deep its full diameter goes from `s`.
         let (depth, through) = match end {
             HoleEnd::Blind(e) => {
@@ -540,6 +574,19 @@ pub(super) fn drill(
         // A hole starting at the sketch has to reach the part somewhere along its length.
         if from_sketch && !line.iter().any(|(a, b)| *b > AHEAD && *a < depth + tip_length - AHEAD) {
             return Err(Error::InvalidInput(format!("hole {n} at {} doesn't reach the part from the sketch", place(q))));
+        }
+        // A blind hole whose full diameter ends outside the part, along its axis, goes through, as asked: say so.
+        if !through {
+            let bottom = start + depth;
+            if !line.iter().any(|(a, b)| *a < bottom - AHEAD && *b > bottom + AHEAD) {
+                let out_at = line.iter().filter(|(a, b)| *a < bottom && *b > start + AHEAD).map(|(_, b)| *b).fold(start, f64::max) - start;
+                out.notes.push(format!(
+                    "hole {n} at {} is {} deep, and the part ends {} in along its axis, so it goes right through",
+                    place(s),
+                    up_to::short(depth),
+                    up_to::short(out_at)
+                ));
+            }
         }
         let pick = match dims.top {
             Top::Plain => None,
@@ -574,19 +621,70 @@ pub(super) fn drill(
     Ok(out)
 }
 
-/// How deep a hole from `s` has to go to get through the first wall it meets, from rays down its middle and round its
-/// edge. It ends half way to whatever's beyond, and no further than its radius past the wall.
+/// Rays round a hole's axis, in each ring, for finding the face it goes in through and the wall it goes through.
+const DIRECTIONS: usize = 24;
+/// Rings of rays out to a hole's top, for finding the face it goes in through.
+const RINGS: usize = 6;
+/// Going out from the axis, a face rising faster than this, tan 80 degrees, is something standing over the hole.
+const STEEP: f64 = 5.671_281_819_617_709;
+/// A face steeper than 80 degrees to the plane square to a hole's axis: cos 80 degrees.
+const STEEP_COS: f64 = 0.173_648_177_666_930_4;
+
+/// How far behind `s` a hole's top has to carry on to clear the face it goes in through, within `top` of its axis.
+/// Rays along the axis, in rings round it out to `top`, find where that face is. Going out from the axis, a face that
+/// rises steeper than 80 degrees, or that a ray meets rising steeper than that, is something standing over the hole,
+/// such as a wall beside it or one with a draft, and it and all beyond it on that side are left alone. A face falling
+/// away is followed however steep. A flat face square to the axis needs nothing. Any other is
+/// cleared with a little to spare, two hundredths of the top's radius and of the height cleared, as a ray between
+/// those cast could find the face a little higher.
+fn clearance(indexes: &[Index], s: Vec3, d: Vec3, top: f64, reach: f64) -> f64 {
+    let across = Frame::from_z(s, d);
+    let mut high: f64 = 0.0;
+    let mut flat = true;
+    for k in 0..DIRECTIONS {
+        let a = TAU * k as f64 / DIRECTIONS as f64;
+        // Where the face was last found on this side, and how far out: the axis meets it at `s`.
+        let (mut level, mut from) = (0.0f64, 0.0f64);
+        for j in 1..=RINGS {
+            let rho = top * j as f64 / RINGS as f64;
+            let p = across.point(rho * a.cos(), rho * a.sin(), 0.0);
+            // A ray along a free-form face can't be told about: the rays round it tell enough.
+            let Some(line) = spans_square(indexes, p, d, reach) else { continue };
+            // Where this ray goes into what goes on past the face found further in: none, if the part falls away.
+            let Some(&(enter, _, square)) = line.iter().find(|(_, b, _)| *b > level + AHEAD) else { continue };
+            // Something standing over the hole: it and all beyond it on this side are left alone. Compared with the
+            // last face found, which isn't always the ray before, so beyond a skipped one, a step would look gentler.
+            if enter < level && (square < STEEP_COS || level - enter > (rho - from) * STEEP) {
+                break;
+            }
+            if enter.abs() > 10.0 * TOL {
+                flat = false;
+            }
+            high = high.max(-enter);
+            level = enter;
+            from = rho;
+        }
+    }
+    if flat {
+        0.0
+    } else {
+        high + 0.02 * (high + top)
+    }
+}
+
+/// How deep a hole from `s` has to go to get through the first wall it meets, from rays down its middle and in two
+/// rings round it. It ends half way to whatever's beyond, and no further than its radius past the wall.
 fn through_first_wall(indexes: &[Index], s: Vec3, d: Vec3, radius: f64, reach: f64, n: u32) -> Result<f64> {
     let across = Frame::from_z(s, d);
     let mut exit: Option<f64> = None;
     let mut next = f64::INFINITY;
-    let rays = 12;
-    for k in 0..=rays {
+    for k in 0..=2 * DIRECTIONS {
         let p = if k == 0 {
             s
         } else {
-            let a = TAU * k as f64 / rays as f64;
-            across.point(0.98 * radius * a.cos(), 0.98 * radius * a.sin(), 0.0)
+            let a = TAU * k as f64 / DIRECTIONS as f64;
+            let rho = if k <= DIRECTIONS { 0.98 } else { 0.5 } * radius;
+            across.point(rho * a.cos(), rho * a.sin(), 0.0)
         };
         let line = spans(indexes, p, d, reach).ok_or_else(|| Error::InvalidInput(format!("hole {n} at {}: it can't be told where the wall it goes through ends", place(s))))?;
         let Some(i) = line.iter().position(|(_, b)| *b > AHEAD) else { continue };
@@ -621,11 +719,15 @@ fn cutter(dims: &Dims, s: Vec3, d: Vec3, back: f64, depth: f64, tip_length: f64,
             corners.push((v2(r, c), HoleFace::Bore.part()));
         }
         Top::Csink { radius, half } => {
-            // The cone carries on back, as the cutter's would.
-            corners.push((v2(radius + back * half.tan(), -back), HoleFace::Csink.part()));
+            // Behind where it starts, it carries on back at its widest, as a counterbore would: a cone carried on back
+            // would cut a slanted face ever wider.
+            corners.push((v2(radius, -back), HoleFace::Csink.part()));
+            corners.push((v2(radius, 0.0), HoleFace::Csink.part()));
             corners.push((v2(r, (radius - r) / half.tan()), HoleFace::Bore.part()));
         }
     }
+    // Nothing carried back leaves the first corners of the top in one place.
+    corners.dedup_by(|b, a| a.0.x == b.0.x && a.0.y == b.0.y);
     if tip_length > 0.0 {
         corners.push((v2(r, depth), HoleFace::Tip.part()));
         corners.push((v2(0.0, depth + tip_length), AXIS));

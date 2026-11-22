@@ -16,7 +16,7 @@
     {"id": 9, "name": "Mounting", "type": "hole", "plane": "f2:start", "points": [["-m / 2", 0], ["m / 2", 0]], "size": "M6", "tapped": true, "depth": 10}
   ],
   "always": {
-    "volume": "w * d * h - pi * (shaft / 2)^2 * d - d * (g * (h - bz) - ((g / 2) * sqrt((shaft / 2)^2 - (g / 2)^2) + (shaft / 2)^2 * asin(g / shaft) * pi / 180)) - pi * (5^2 * 5 + 2.75^2 * (w / 2 - g / 2 - 5)) - pi * 2.1^2 * (w / 2 - g / 2) - 2 * pi * 2.5^2 * (10 + 2.5 / tan(59) / 3)",
+    "volume": "w * d * h - pi * (shaft / 2)^2 * d - d * (g * (h - bz) - ((g / 2) * sqrt((shaft / 2)^2 - (g / 2)^2) + (shaft / 2)^2 * asin(g / shaft) * pi / 180)) - pi * (5^2 * 5.4 + 2.75^2 * (w / 2 - g / 2 - 5.4)) - pi * 2.1^2 * (w / 2 - g / 2) - 2 * pi * 2.5^2 * (10 + 2.5 / tan(59) / 3)",
     "genus": [2],
     "bounds": [["-w / 2", "-d / 2", 0], ["w / 2", "d / 2", "h"]]
   },

@@ -1,6 +1,8 @@
 //! A picture of the hole feature: the demo's hole plate five ways, M6 counterbored, M6 countersunk, M8 clearance, M8
 //! tapped 15 deep and M5 tapped through, each with two M5 tapped holes in its front face; or with `cut`, three of them cut
-//! through their front row of holes, so their profiles show. Prints each hole's callout. Usage: holes <out.png> [whole|cut] [azimuth elevation]
+//! through their front row of holes, so their profiles show; or with `steep`, the angled sensor mount among the real parts,
+//! whole, and cut through its counterbore down into its 52 degree ramp and through the one that reaches under its rib's
+//! foot. Prints each hole's callout. Usage: holes <out.png> [whole|cut|steep] [azimuth elevation]
 use coreshape::*;
 use coreshape_document::*;
 use coreshape_render::{render, Colors, Options, View};
@@ -45,11 +47,62 @@ fn plate(variant: usize, cut: bool) -> Vec<Body> {
     o.bodies.iter().map(|b| (*b.body).clone()).inspect(|b| { validate(b).unwrap(); }).collect()
 }
 
+/// The angled sensor mount, from its real part's script, whole or cut square to y at `cut` with the side toward -y kept.
+fn mount(cut: Option<f64>) -> Vec<Body> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/real_parts/p63_angled_sensor_mount.json");
+    let script = json::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut doc = Document::new();
+    if let Some(json::Value::Obj(items)) = script.get("parameters") {
+        for (k, v) in items {
+            doc.set_parameter(k, v.as_f64().unwrap()).unwrap();
+        }
+    }
+    for step in script.get("steps").and_then(json::Value::as_array).unwrap() {
+        // What a feature is, without the script's id and name for it.
+        let json::Value::Obj(items) = step else { panic!("a step that isn't an object") };
+        let op = json::Value::Obj(items.iter().filter(|(k, _)| !["id", "name", "note"].contains(&k.as_str())).cloned().collect());
+        doc.add(read_op(&op, &[]).unwrap()).unwrap();
+    }
+    if let Some(y) = cut {
+        let split = feature(&mut doc, &format!(r#"{{"type": "split", "plane": {{"point": [0, {y}, 0], "normal": [0, 1, 0]}}}}"#));
+        let gone = feature(&mut doc, r#"{"type": "delete_bodies"}"#);
+        doc.set_scope(gone, vec![BodyId::parse(&format!("f{}", split.0)).unwrap()]).unwrap();
+    }
+    let o = doc.rebuild(None);
+    if let Some(i) = o.failed {
+        panic!("the mount: {:?}", o.steps[i]);
+    }
+    if cut.is_none() {
+        for h in &o.holes {
+            println!("f{} hole {}: {}", h.feature.0, h.number, h.text);
+        }
+    }
+    o.bodies.iter().map(|b| (*b.body).clone()).inspect(|b| { validate(b).unwrap(); }).collect()
+}
+
 fn main() {
     let out = std::env::args().nth(1).expect("an output file");
+    let arg = |k: usize, default: f64| std::env::args().nth(k).and_then(|a| a.parse().ok()).unwrap_or(default);
+    if std::env::args().nth(2).as_deref() == Some("steep") {
+        // Whole, then cut through the ramp's counterbore at y = 8 and through the rib's at y = 0, one behind another.
+        let mut placed: Vec<Body> = Vec::new();
+        let mut groups = Vec::new();
+        for (k, cut) in [None, Some(8.0), Some(0.0)].into_iter().enumerate() {
+            for body in mount(cut) {
+                let moved = body.transformed(&Frame::translation(v3(0.0, 0.0, k as f64 * -50.0)));
+                groups.extend(std::iter::repeat_n(k as u32, moved.faces.len()));
+                placed.push(moved);
+            }
+        }
+        let list: Vec<&Body> = placed.iter().collect();
+        let all = Body::side_by_side(&list);
+        let options = Options { width: 1200, height: 1300, view: View::Orbit { azimuth: arg(3, 20.0), elevation: arg(4, 15.0) }, colors: Colors::ByGroup, highlight_faces: Vec::new(), highlight_edges: Vec::new(), face_names: Vec::new(), face_groups: groups };
+        std::fs::write(&out, render(&all, &options).unwrap().to_png()).unwrap();
+        println!("wrote {out}");
+        return;
+    }
     // Whole, or cut through the front row of holes.
     let cut = std::env::args().nth(2).as_deref() == Some("cut");
-    let arg = |k: usize, default: f64| std::env::args().nth(k).and_then(|a| a.parse().ok()).unwrap_or(default);
     let mut placed: Vec<Body> = Vec::new();
     let mut groups = Vec::new();
     let variants: Vec<usize> = if cut { vec![0, 1, 3] } else { (0..5).collect() };

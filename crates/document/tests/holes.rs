@@ -107,23 +107,25 @@ fn clearance_holes_take_their_sizes_from_the_tables() {
         doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "size": "M6", "fit": "{fit}", "end": "through_all"}}"#, at.0))).unwrap();
         near(vol(&ok(&mut doc)), BLOCK - PI * (d / 2.0f64).powi(2) * 20.0, fit);
     }
-    // A counterbore for an M6 socket head: 11 across, as deep as the head is high, 6.
+    // A counterbore for an M6 socket head: 11 across, DIN 974-1's series 1, and as deep as the head is high, 6, and
+    // DIN 974-1's allowance of 0.4.
     doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "size": "M6", "style": "counterbore", "end": "through_all"}}"#, at.0))).unwrap();
     let o = ok(&mut doc);
-    near(vol(&o), BLOCK - PI * (5.5f64.powi(2) * 6.0 + 3.3f64.powi(2) * 14.0), "an M6 counterbored hole");
-    assert_eq!(o.holes[0].text, "M6 clearance, ⌀6.6 through, counterbore ⌀11 6 deep");
+    near(vol(&o), BLOCK - PI * (5.5f64.powi(2) * 6.4 + 3.3f64.powi(2) * 13.6), "an M6 counterbored hole");
+    assert_eq!(o.holes[0].text, "M6 clearance, ⌀6.6 through, counterbore ⌀11 6.4 deep");
     let n = names(&o, h);
     for part in ["cbore", "cbore_floor", "bore"] {
         assert!(n.contains(&format!("f{}:{part}.{id}", h.0)), "{part} in {n:?}");
     }
-    // A countersink for an M6 countersunk head: 13.44 across at 90 degrees, so 3.42 deep to the hole's 6.6.
+    // A countersink for an M6 countersunk head, DIN 74's form F: 13.71 across at 90 degrees, so 3.555 deep to the
+    // hole's 6.6.
     doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "size": "M6", "style": "countersink", "end": "through_all"}}"#, at.0))).unwrap();
     let o = ok(&mut doc);
-    let (big, small) = (6.72, 3.3);
+    let (big, small) = (6.855, 3.3);
     let sink = big - small;
     let frustum = PI * sink * (big * big + big * small + small * small) / 3.0;
     near(vol(&o), BLOCK - frustum - PI * small * small * (20.0 - sink), "an M6 countersunk hole");
-    assert_eq!(o.holes[0].text, "M6 clearance, ⌀6.6 through, countersink ⌀13.44 × 90°");
+    assert_eq!(o.holes[0].text, "M6 clearance, ⌀6.6 through, countersink ⌀13.71 × 90°");
     assert!(names(&o, h).contains(&format!("f{}:csink.{id}", h.0)));
     // Dimensions given win over the tables.
     doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "size": "M6", "style": "counterbore", "cbore_diameter": 12, "cbore_depth": 4, "end": "through_all"}}"#, at.0))).unwrap();
@@ -146,12 +148,36 @@ fn a_tapped_hole_is_drilled_at_the_tap_drill_and_notes_its_thread() {
     let o = ok(&mut doc);
     near(vol(&o), BLOCK - PI * 3.5f64.powi(2) * 15.0 - cone(3.5, point_height(3.5, 118.0)), "an M8×1 tapped hole, drilled 7");
     assert_eq!(o.holes[0].text, "M8×1 tapped 10 deep, drill ⌀7 15 deep, 118° point");
+    // ISO 2306 rounds some fine pitches' drills to one that's made: M10×1.25 takes 8.8, not 8.75.
+    doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "size": "M10", "tapped": {{"pitch": 1.25}}, "depth": 15}}"#, at.0))).unwrap();
+    let o = ok(&mut doc);
+    near(vol(&o), BLOCK - PI * 4.4f64.powi(2) * 15.0 - cone(4.4, point_height(4.4, 118.0)), "an M10×1.25 tapped hole, drilled 8.8");
+    assert!(o.steps.iter().find(|s| s.id == h).unwrap().notes.is_empty());
+    // A pitch it doesn't list for the size is drilled at the major diameter less the pitch, and the step says so.
+    doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "size": "M6", "tapped": {{"pitch": 0.5}}, "depth": 15}}"#, at.0))).unwrap();
+    let o = ok(&mut doc);
+    near(vol(&o), BLOCK - PI * 2.75f64.powi(2) * 15.0 - cone(2.75, point_height(2.75, 118.0)), "an M6×0.5 tapped hole, drilled 5.5");
+    assert_eq!(o.steps.iter().find(|s| s.id == h).unwrap().notes, vec!["ISO 2306 lists no tap drill for M6×0.5: it's drilled at the major diameter less the pitch, 5.5".to_string()]);
     // Through, the thread goes all the way.
     doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "size": "M10", "tapped": true, "end": "through_all"}}"#, at.0))).unwrap();
     let o = ok(&mut doc);
     near(vol(&o), BLOCK - PI * 4.25f64.powi(2) * 20.0, "an M10 tapped hole through");
     assert_eq!(o.holes[0].thread.as_ref().unwrap().depth, None);
     assert_eq!(o.holes[0].text, "M10×1.5 tapped through, drill ⌀8.5 through");
+}
+
+#[test]
+fn a_blind_hole_deeper_than_the_part_says_it_goes_through() {
+    let (mut doc, at, _) = block_with_points(&[(20.0, 20.0)]);
+    let h = feature(&mut doc, &format!(r#"{{"type": "hole", "sketch": {}, "diameter": 6, "depth": 25}}"#, at.0));
+    let o = ok(&mut doc);
+    near(vol(&o), BLOCK - PI * 9.0 * 20.0, "a blind hole right through");
+    assert_eq!(o.steps.iter().find(|s| s.id == h).unwrap().notes, vec!["hole 1 at (20, 20, 20) is 25 deep, and the part ends 20 in along its axis, so it goes right through".to_string()]);
+    // As deep as the part, with a flat bottom, it goes through too; one short of it doesn't, though its point does.
+    doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "diameter": 6, "depth": 20, "tip_angle": 180}}"#, at.0))).unwrap();
+    assert_eq!(ok(&mut doc).steps.iter().find(|s| s.id == h).unwrap().notes.len(), 1);
+    doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "diameter": 6, "depth": 19}}"#, at.0))).unwrap();
+    assert!(ok(&mut doc).steps.iter().find(|s| s.id == h).unwrap().notes.is_empty());
 }
 
 #[test]
@@ -207,7 +233,8 @@ fn holes_on_a_face_follow_it() {
     let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 60.0, 40.0))]));
     let e = doc.with(Op::extrude(s, 0.0, "h", Mode::Add));
     feature(&mut doc, &format!(r#"{{"type": "hole", "plane": "f{}:end", "points": [[30, 20], ["10 + 5", 10]], "size": "M5", "style": "counterbore", "end": "through_all"}}"#, e.0));
-    let one = |h: f64| PI * (25.0 * 5.0 + 2.75f64.powi(2) * (h - 5.0));
+    // An M5 counterbore is 10 across and 5 and 0.4 deep.
+    let one = |h: f64| PI * (25.0 * 5.4 + 2.75f64.powi(2) * (h - 5.4));
     for h in [20.0, 30.0] {
         doc.set_parameter("h", h).unwrap();
         let o = ok(&mut doc);
@@ -245,6 +272,15 @@ fn up_to_next_goes_through_the_first_wall_only() {
     // Through all goes through both.
     doc.edit(h, op(&format!(r#"{{"type": "hole", "sketch": {}, "size": "M8", "end": "through_all"}}"#, at.0))).unwrap();
     near(vol(&ok(&mut doc)), 2.0 * plate - 2.0 * PI * 4.5f64.powi(2) * 10.0, "through both plates");
+    // A post 2 across standing 4 up from the lower plate, half way out under a hole 12 across: between the rays down the
+    // middle and round the edge, but the ring half way out finds it, and the hole stops half way to its top, clear of it.
+    let post = doc.with(Op::solid(Primitive::Cylinder { radius: 1.0.into(), height: 4.0.into() }, Placement::at([23.0.into(), 20.0.into(), 10.0.into()]), Mode::NewBody));
+    let wide = feature(&mut doc, &format!(r#"{{"type": "hole", "sketch": {}, "diameter": 12, "end": "up_to_next"}}"#, at.0));
+    doc.delete(h).unwrap();
+    let o = ok(&mut doc);
+    near(vol(&o), 2.0 * plate + PI * 4.0 - PI * 36.0 * 10.0, "a hole through the upper plate, clear of the post");
+    assert_eq!(o.holes.iter().find(|x| x.feature == wide).unwrap().text, "⌀12 through");
+    let _ = post;
 }
 
 #[test]
@@ -271,6 +307,113 @@ fn a_hole_opens_cleanly_on_a_round_face() {
     check.with(Op::solid(Primitive::Cylinder { radius: 6.0.into(), height: 10.0.into() }, up(6.0), Mode::Remove));
     check.with(Op::solid(Primitive::Cylinder { radius: 3.0.into(), height: 30.0.into() }, up(-15.0), Mode::Remove));
     near(vol(&o), vol(&ok(&mut check)), "a counterbored hole into a bar");
+}
+
+/// A wedge 40 along x and 40 deep, from y = 0 to -40, 5 high at x = 0 and rising at `degrees` to x = 40, turned `turn`
+/// degrees about the upright through its middle, (20, -20). Gives the height of its top in the middle.
+fn wedge(doc: &mut Document, degrees: f64, turn: f64) -> f64 {
+    let rise = 40.0 * degrees.to_radians().tan();
+    let (s, c) = turn.to_radians().sin_cos();
+    let origin = [(20.0 - 20.0 * c - 20.0 * s).into(), (-20.0 - 20.0 * s + 20.0 * c).into(), 0.0.into()];
+    let side = Placement::new(origin, [s.into(), (-c).into(), 0.0.into()], [c.into(), s.into(), 0.0.into()]);
+    let outline = vec![[0.0.into(), 0.0.into()], [40.0.into(), 0.0.into()], [40.0.into(), (5.0 + rise).into()], [0.0.into(), 5.0.into()]];
+    let s = doc.with(Op::sketch(side, vec![Region::new(Shape::polygon(outline))]));
+    doc.with(Op::extrude(s, 0.0, 40.0, Mode::Add));
+    5.0 + rise / 2.0
+}
+
+/// Upright, at (20, -20) and a height.
+fn upright(z: f64) -> Placement {
+    Placement::new([20.0.into(), (-20.0).into(), z.into()], [0.0.into(), 0.0.into(), 1.0.into()], [1.0.into(), 0.0.into(), 0.0.into()])
+}
+
+#[test]
+fn a_hole_clears_a_steep_face_it_goes_in_through() {
+    // A counterbore 12 across and 4 deep, and a countersink 14 across at 90 degrees, down into a face at 30, 60 and 75
+    // degrees: within its top's radius the face rises 3.5, 10.4 and 22.4 above where the axis meets it. All of that
+    // within the top comes away, as cylinders cut from the floor up and a cone below show. The wedge is turned so the
+    // way up the face is half way between two of the rays that find it, 15 degrees apart, where they find it lowest.
+    for degrees in [30.0, 60.0, 75.0] {
+        for countersink in [false, true] {
+            let mut doc = Document::new();
+            let z = wedge(&mut doc, degrees, 7.5);
+            let mut sketch = Sketch::new();
+            sketch.point(20.0, -20.0);
+            let at = doc.add(Op::ConstrainedSketch { plane: Placement::xy(300.0), sketch }).unwrap();
+            let style = if countersink { r#""style": "countersink", "csink_diameter": 14"# } else { r#""style": "counterbore", "cbore_diameter": 12, "cbore_depth": 4"# };
+            let h = feature(&mut doc, &format!(r#"{{"type": "hole", "sketch": {}, "diameter": 6, {style}, "end": "through_all"}}"#, at.0));
+            let o = ok(&mut doc);
+            assert!((o.holes[0].start - v3(20.0, -20.0, z)).norm() < 1e-9, "{:?}", o.holes[0]);
+            let mut check = Document::new();
+            wedge(&mut check, degrees, 7.5);
+            if countersink {
+                check.with(Op::solid(Primitive::Cylinder { radius: 7.0.into(), height: 400.0.into() }, upright(z), Mode::Remove));
+                check.with(Op::solid(Primitive::Cone { r0: 3.0.into(), r1: 7.0.into(), height: 4.0.into() }, upright(z - 4.0), Mode::Remove));
+            } else {
+                check.with(Op::solid(Primitive::Cylinder { radius: 6.0.into(), height: 400.0.into() }, upright(z - 4.0), Mode::Remove));
+            }
+            check.with(Op::solid(Primitive::Cylinder { radius: 3.0.into(), height: 400.0.into() }, upright(-10.0), Mode::Remove));
+            let want = vol(&ok(&mut check));
+            assert!((vol(&o) - want).abs() < 1e-7 * want, "{degrees} degrees, countersink {countersink}: {} against {want}", vol(&o));
+            // The top's wall is named for the hole, and nothing's left of the face inside it, so its end, carried back
+            // clear of the face, is nowhere on the part.
+            let part = if countersink { "csink" } else { "cbore" };
+            let n = names(&o, h);
+            assert!(n.contains(&format!("f{}:{part}.{}", h.0, o.holes[0].number)), "{n:?}");
+            assert!(!n.iter().any(|x| x.starts_with(&format!("f{}:top.", h.0))), "{degrees} degrees, countersink {countersink}: {n:?}");
+        }
+    }
+}
+
+#[test]
+fn a_counterbore_leaves_a_wall_beside_it_alone() {
+    // A plate 10 thick and a wall 20 high on it from x = 40. An M6 counterbore at x = 36 reaches 1.5 under the wall: it
+    // takes what's under the wall, below the plate's top, and nothing of the wall above it.
+    let mut doc = Document::new();
+    let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 60.0, 40.0))]));
+    let e = doc.with(Op::extrude(s, 0.0, 10.0, Mode::Add));
+    let w = doc.with(Op::sketch(Placement::xy(10.0), vec![Region::new(Shape::rect(40.0, 0.0, 20.0, 40.0))]));
+    doc.with(Op::extrude(w, 0.0, 20.0, Mode::Add));
+    let whole = 60.0 * 40.0 * 10.0 + 20.0 * 40.0 * 20.0;
+    let h = feature(&mut doc, &format!(r#"{{"type": "hole", "plane": "f{}:end", "points": [[36, 20]], "size": "M6", "style": "counterbore", "end": "through_all"}}"#, e.0));
+    let o = ok(&mut doc);
+    near(vol(&o), whole - PI * (5.5f64.powi(2) * 6.4 + 3.3f64.powi(2) * 3.6), "a counterbore under a wall's foot");
+    // Nothing's carried back over a flat face: the hole's top is level with it, and shows only under the wall, as the
+    // ceiling of what the counterbore takes from under it.
+    // The volume says the wall above the plate is whole.
+    assert!(names(&o, h).contains(&format!("f{}:top.0", h.0)), "{:?}", names(&o, h));
+    // The same against a wall with a draft, leaning back at 85 degrees to the plate: its foot is over the counterbore too,
+    // and it's still left alone. A face at 80 degrees or less is one the hole goes in through, as a wedge's is.
+    let mut doc = Document::new();
+    let s = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 60.0, 40.0))]));
+    let e = doc.with(Op::extrude(s, 0.0, 10.0, Mode::Add));
+    let side = Placement::new([0.0.into(), 0.0.into(), 0.0.into()], [0.0.into(), (-1.0).into(), 0.0.into()], [1.0.into(), 0.0.into(), 0.0.into()]);
+    let run = 20.0 / 85f64.to_radians().tan();
+    let lean = vec![[40.0.into(), 10.0.into()], [60.0.into(), 10.0.into()], [60.0.into(), 30.0.into()], [(40.0 + run).into(), 30.0.into()]];
+    let l = doc.with(Op::sketch(side, vec![Region::new(Shape::polygon(lean))]));
+    doc.with(Op::extrude(l, 0.0, 40.0, Mode::Add));
+    let whole = 60.0 * 40.0 * 10.0 + (20.0 + 20.0 - run) / 2.0 * 20.0 * 40.0;
+    feature(&mut doc, &format!(r#"{{"type": "hole", "plane": "f{}:end", "points": [[36, 20]], "size": "M6", "style": "counterbore", "end": "through_all"}}"#, e.0));
+    near(vol(&ok(&mut doc)), whole - PI * (5.5f64.powi(2) * 6.4 + 3.3f64.powi(2) * 3.6), "a counterbore under a leaning wall's foot");
+    // A round pocket 10 deep with a 5 degree draft, 9 across at its floor, and an M6 counterbore 11 across down its
+    // middle: all round, the rays a little way out from the pocket's foot meet the drafted wall only just above the
+    // floor, and are told from the floor by how steep the wall is. The counterbore undercuts the wall and leaves it be.
+    let (mut doc, at, _) = block_with_points(&[(30.0, 20.0)]);
+    let draft = 5f64.to_radians().tan();
+    doc.add(Op::solid(Primitive::Cone { r0: 4.5.into(), r1: (4.5 + 12.0 * draft).into(), height: 12.0.into() }, Placement::at([30.0.into(), 20.0.into(), 10.0.into()]), Mode::Remove)).unwrap();
+    let at = {
+        let mut sketch = Sketch::new();
+        sketch.point(30.0, 20.0);
+        doc.delete(at).unwrap();
+        doc.add(Op::ConstrainedSketch { plane: Placement::xy(40.0), sketch }).unwrap()
+    };
+    let h = feature(&mut doc, &format!(r#"{{"type": "hole", "sketch": {}, "size": "M6", "style": "counterbore", "end": "through_all"}}"#, at.0));
+    let o = ok(&mut doc);
+    let top = 4.5 + 10.0 * draft;
+    let pocket = PI * 10.0 * (4.5 * 4.5 + 4.5 * top + top * top) / 3.0;
+    near(vol(&o), BLOCK - pocket - PI * (5.5f64.powi(2) * 6.4 + 3.3f64.powi(2) * 3.6), "a counterbore under a drafted pocket's wall");
+    assert!((o.holes[0].start.z - 10.0).abs() < 1e-9, "{:?}", o.holes[0]);
+    assert!(names(&o, h).contains(&format!("f{}:top.1", h.0)), "{:?}", names(&o, h));
 }
 
 #[test]

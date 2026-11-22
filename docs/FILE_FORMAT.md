@@ -472,52 +472,62 @@ parts it acts on.
   with the face. Each hole goes in against the sketch's or the plane's normal, which for a face's plane is into the part, or along
   it with `opposite`.
 - **Where it starts.** Where its axis first meets the parts, going in, even if the sketch is above the part or inside it: then
-  it's where the axis comes out behind the sketch. Its top carries on back from there by its top radius, so it opens cleanly on a
-  curved or slanted face; anything standing over the hole within that is cut too. With `from_sketch` it starts at the sketch's
-  plane instead, and goes no further back; one that would then leave a sealed hollow inside a part is refused.
+  it's where the axis comes out behind the sketch. On a curved or slanted face, its top, at its widest, carries on back from
+  there as far as the face it goes in through stands proud within that width, and a fiftieth more, so it opens cleanly. On a flat
+  face square to it, nothing is carried back. Something standing over the hole is left alone, and all beyond it on that side:
+  a face that, going out from the axis, rises steeper than 80 degrees, such as a wall or a rib with a draft, which the hole
+  undercuts if it's wider than the floor at the wall's foot. A countersink carries on back as a cylinder at its
+  diameter, not as its cone, which would cut a slanted face ever wider. With `from_sketch` it starts at the sketch's plane
+  instead, and goes no further back; one that would then leave a sealed hollow inside a part is refused.
 - **What it's like.** `simple`, `counterbore` (`cbore_diameter`, `cbore_depth`) or `countersink` (`csink_diameter`, and
   `csink_angle`, default 90). `diameter` is the hole's own. A blind hole has a drill point, `tip_angle` degrees (default 118), or
   a flat bottom at 180. A `size` fills in whatever isn't given, from the tables below.
 - **Tapped.** `"tapped": true`, or `{"pitch": p, "depth": d}`, needs a `size`. It's drilled at the tap drill, and the thread
   isn't modelled: it's in the outcome's `holes`, with its size, pitch and depth, as a cosmetic thread. The pitch is the size's
-  coarse one by default, and a fine one is drilled at the major diameter less the pitch. The thread goes as deep as the hole by
-  default, or through.
+  coarse one by default. A fine one takes ISO 2306's drill for it, and one ISO 2306 doesn't list for the size is drilled at the
+  major diameter less the pitch, with a note saying so. The thread goes as deep as the hole by default, or through.
 - **How deep.** `"end": "blind"` with `depth`, measured from where the hole starts to the end of its full diameter, the drill
   point going on past it; `through_all`; or `up_to_next`, through the first wall it meets: as deep as rays down its middle and
-  round its edge find that wall's far side, and half way on to what's behind. Parts that touch are one wall. If what's behind
+  in two rings of 24 round it find that wall's far side, and half way on to what's behind. A blind hole deeper than the part
+  along its axis goes through, as asked, and the feature notes it. Parts that touch are one wall. If what's behind
   comes within the hole's width before the wall ends all round, as with a hole half over a step, it's refused.
 - **Names.** Holes are numbered by their point's entity id when the feature takes every point of a sketch, so that deleting
   one doesn't renumber the others, and otherwise by their place in `points`. Hole 7's faces are `bore.7` (its own diameter),
-  `cbore.7` and `cbore_floor.7`, `csink.7`, `tip.7` (a drill point), `floor.7` (a flat bottom) and `top.7` (what's left of
-  the part of the top carried back, only where something stands over the hole). Two points at the same place make one hole,
+  `cbore.7` and `cbore_floor.7`, `csink.7` (its cone, and the cylinder carried back from it), `tip.7` (a drill point),
+  `floor.7` (a flat bottom) and `top.7` (the end of the top carried back, which shows only where something stands over the
+  hole, as the ceiling of what the hole takes from under it). Two points at the same place make one hole,
   and the feature notes it.
 - **Callouts.** The outcome's `holes` list each hole: where it starts, which way it goes, and what a drawing would say, such
-  as `M6 clearance, ⌀6.6 through, counterbore ⌀11 6 deep` or `M6×1 tapped 12 deep, drill ⌀5 15 deep, 118° point`.
+  as `M6 clearance, ⌀6.6 through, counterbore ⌀11 6.4 deep` or `M6×1 tapped 12 deep, drill ⌀5 15 deep, 118° point`.
 
-| Size | Clearance, close / normal / loose | Tap drill (coarse pitch) | Counterbore ⌀ | Countersink ⌀ |
+| Size | Clearance, close / normal / loose | Tap drills (pitch) | Counterbore ⌀ × depth | Countersink ⌀ |
 |---|---|---|---|---|
-| M1.6 | 1.7 / 1.8 / 2 | 1.25 (0.35) | 3.5 | |
-| M2 | 2.2 / 2.4 / 2.6 | 1.6 (0.4) | 4.4 | |
-| M2.5 | 2.7 / 2.9 / 3.1 | 2.05 (0.45) | 5.5 | |
-| M3 | 3.2 / 3.4 / 3.6 | 2.5 (0.5) | 6.5 | 6.72 |
-| M4 | 4.3 / 4.5 / 4.8 | 3.3 (0.7) | 8 | 8.96 |
-| M5 | 5.3 / 5.5 / 5.8 | 4.2 (0.8) | 10 | 11.2 |
-| M6 | 6.4 / 6.6 / 7 | 5 (1) | 11 | 13.44 |
-| M8 | 8.4 / 9 / 10 | 6.8 (1.25) | 15 | 17.92 |
-| M10 | 10.5 / 11 / 12 | 8.5 (1.5) | 18 | 22.4 |
-| M12 | 13 / 13.5 / 14.5 | 10.2 (1.75) | 20 | 26.88 |
-| M14 | 15 / 15.5 / 16.5 | 12 (2) | 24 | |
-| M16 | 17 / 17.5 / 18.5 | 14 (2) | 26 | 33.6 |
-| M20 | 21 / 22 / 24 | 17.5 (2.5) | 33 | 40.32 |
-| M24 | 25 / 26 / 28 | 21 (3) | 40 | |
-| M30 | 31 / 33 / 35 | 26.5 (3.5) | 50 | |
-| M36 | 37 / 39 / 42 | 32 (4) | 58 | |
+| M1.6 | 1.7 / 1.8 / 2 | 1.25 (0.35) | 3.5 × 2 | |
+| M2 | 2.2 / 2.4 / 2.6 | 1.6 (0.4) | 4.4 × 2.4 | |
+| M2.5 | 2.7 / 2.9 / 3.1 | 2.05 (0.45), 2.15 (0.35) | 5.5 × 2.9 | |
+| M3 | 3.2 / 3.4 / 3.6 | 2.5 (0.5), 2.65 (0.35) | 6.5 × 3.4 | 6.94 |
+| M4 | 4.3 / 4.5 / 4.8 | 3.3 (0.7), 3.5 (0.5) | 8 × 4.4 | 9.18 |
+| M5 | 5.3 / 5.5 / 5.8 | 4.2 (0.8), 4.5 (0.5) | 10 × 5.4 | 11.47 |
+| M6 | 6.4 / 6.6 / 7 | 5 (1), 5.2 (0.75) | 11 × 6.4 | 13.71 |
+| M8 | 8.4 / 9 / 10 | 6.8 (1.25), 7 (1), 7.2 (0.75) | 15 × 8.6 | 18.25 |
+| M10 | 10.5 / 11 / 12 | 8.5 (1.5), 8.8 (1.25), 9 (1), 9.2 (0.75) | 18 × 10.6 | 22.73 |
+| M12 | 13 / 13.5 / 14.5 | 10.2 (1.75), 10.5 (1.5), 10.8 (1.25), 11 (1) | 20 × 12.6 | 27.21 |
+| M14 | 15 / 15.5 / 16.5 | 12 (2), 12.5 (1.5), 12.8 (1.25), 13 (1) | 24 × 14.6 | 31.19 |
+| M16 | 17 / 17.5 / 18.5 | 14 (2), 14.5 (1.5), 15 (1) | 26 × 16.6 | 33.99 |
+| M20 | 21 / 22 / 24 | 17.5 (2.5), 18 (2), 18.5 (1.5), 19 (1) | 33 × 20.6 | 40.71 |
+| M24 | 25 / 26 / 28 | 21 (3), 22 (2), 22.5 (1.5), 23 (1) | 40 × 24.8 | |
+| M30 | 31 / 33 / 35 | 26.5 (3.5), 27 (3), 28 (2), 28.5 (1.5), 29 (1) | 50 × 31 | |
+| M36 | 37 / 39 / 42 | 32 (4), 33 (3), 34 (2), 34.5 (1.5) | 58 × 37 | |
 
-Clearance holes are ISO 273's fine, medium and coarse series; pitches are ISO 261's coarse ones. A counterbore is for an
-ISO 4762 socket head cap screw, at DIN 974-1's diameter, and as deep as the head is high, which for ISO 4762 is the size, so
-the head sits flush. A countersink is 90°, at an ISO 10642 countersunk head's theoretical diameter, so the head sits flush;
-the tables have none where that standard has no head. These numbers are as standard tables are usually published, and only
-ISO 273's from M4 to M12 have been checked here against a published chart: check the rest before making parts.
+The first tap drill is for the coarse pitch, the default. Each column is from a standard, read on 2026-11-22 from a copy or a
+reproduction of it: clearance holes are ISO 273's fine, medium and coarse series; pitches and tap drills are ISO 2306's tables 1
+and 7; a counterbore is DIN 974-1:2008's series 1, for an ISO 4762 socket head cap screw with no washer; a countersink is
+DIN 74:2003's form F, 90°, for an ISO 10642 countersunk socket head. DIN 974-1 leaves a counterbore's depth to the designer and
+recommends the head's height, which for ISO 4762 is the size, and an allowance: 0.4 from M3 to M6, 0.6 from M8 to M20, 0.8
+at M24 and 1 at M36, as one table of depths gives them, and M5's also a second source; 0.4 below M3 and 1 at M30 are assumed.
+So a head sits just under the face, and a
+countersunk head too, as form F is a little wider than the head. There's no countersink where form F has none. Where each
+was read, and how sure each is: [KNOWN_LIMITS.md](KNOWN_LIMITS.md#holes).
 
 ## Sheets
 
