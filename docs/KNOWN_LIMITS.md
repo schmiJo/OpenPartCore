@@ -17,7 +17,6 @@ These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 - **Draft on spline and free-form faces,** and any draft that changes the topology, other than taking a fillet off and putting it back.
 - **Most of what could be done between sheets.** Sheets exist and can be made, cut, thickened and sewn: see [below](#sheet-bodies). What's not built is listed there.
 - **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
-- **Engineering drawings.** No sheets of projected views, hidden lines, section views, dimensions or title blocks, and no PDF or DXF. Sketching is built, and that's a different thing.
 - **Splitting a sheet along another sheet, and a free-form face carried on past its edges for a split.** See [Small features](#small-features).
 
 ## Fuzz results
@@ -868,6 +867,32 @@ Free-form surfaces got a good deal faster for the helix demos, in ways that help
 - **A free-form face's own cell boxes rule things out** in point and edge tests, each chart position along an edge is only worked out once, and the closest point on a traced curve searches its stored cubic, solving onto the surfaces only at the end. With the above, that took cutting a thread from 2.6 s to 0.4 s natively.
 - **A shell of free-form faces no longer integrates three times** to check a volume that the Boolean's own checks cover. That took the cup from 1.5 s to 0.3 s natively. A closed shell of analytic faces still checks it.
 - **A long tube gets long triangles.** The mesher stretches a free-form face's chart by how much it bends each way, which took the spring's screen mesh from 21,532 triangles to 7,948. The boundaries don't change, so neighbours still match.
+
+## Drawings
+
+Projected views, sections, center marks and lines, dimensions, a border and a title block, written as SVG, PDF, DXF or
+PNG by hand: see [FILE_FORMAT.md](FILE_FORMAT.md#drawings). Checked against where things have to be: a hole's hidden
+lines exactly at its sides, a cylinder's outline exactly at its radius, a section's hatching over exactly its cut area,
+and each format's structure.
+
+- **What hides what is worked out on a mesh,** a ten-thousandth of the part's size fine or a twentieth of a millimetre on
+  the sheet, whichever is finer, and a point counts as hidden when a triangle is in front of it by more than twice that.
+  The edges themselves are exact. Where a curved face turns away, its outline is traced on the mesh, where the surface's
+  true normal is square to the view, then moved onto the exact line on a cylinder or a sphere; on a cone, torus or
+  free-form face it stays as traced, within the mesh's fineness. A hidden line half under a seen one is drawn where it
+  isn't under it; one wholly under it isn't drawn.
+- **Round faces are cut in two by the kernel.** Where that cut is exactly where the face turns away from a view, as a
+  vertical cylinder's is from the front, the cut is drawn as its outline; anywhere else it isn't drawn at all.
+- **Layout** is a grid round the front view, with iso and sections in the columns to its right, 22 mm apart for
+  dimensions. It doesn't move views apart when their dimensions or labels collide, though diameters of circles round one
+  center go out in four directions, and a view can be placed by hand. No detail views, broken views or auxiliary views.
+- **Dimensions** are distances, diameters and radii, not angles, chamfers or ordinate dimensions, and a diameter or radius
+  needs its circle seen face on. Text is the reader's sans serif in SVG, PDF and DXF, so its width is only estimated for
+  centering, from the built-in Noto Sans's; the PNG draws it with Noto Sans itself.
+- **The PDF and DXF** are the simplest that work: PDF 1.4 with Helvetica, every reader's, in WinAnsi, so characters
+  outside Latin-1 become question marks, and R12 DXF, lines as LINEs, no polylines or blocks. Neither has been opened in a
+  CAD or PDF program here, only checked for its structure: each PDF object where its cross-reference table says, and each
+  DXF entity complete.
 
 ## Not tested
 

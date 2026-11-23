@@ -21,6 +21,21 @@ pub struct TabId(pub u32);
 pub enum TabContent {
     PartStudio(Document),
     Assembly(Assembly),
+    Drawing(DrawingTab),
+}
+
+/// What a drawing shows: a Part Studio's parts, one or all, or an assembly as it solves.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DrawingSource {
+    Part { studio: TabId, body: Option<BodyId> },
+    Assembly { tab: TabId },
+}
+
+/// A drawing tab: what it shows and the drawing itself, which is made again from it each time, so it follows the model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawingTab {
+    pub source: DrawingSource,
+    pub drawing: coreshape_drawing::Drawing,
 }
 
 #[derive(Clone)]
@@ -243,6 +258,7 @@ impl Project {
         match &self.tab(id)?.content {
             TabContent::PartStudio(doc) => Ok(doc),
             TabContent::Assembly(_) => Err(Error::InvalidInput(format!("tab {} is an assembly, not a Part Studio", id.0))),
+            TabContent::Drawing(_) => Err(Error::InvalidInput(format!("tab {} is a drawing, not a Part Studio", id.0))),
         }
     }
 
@@ -250,6 +266,7 @@ impl Project {
         match &mut self.tab_mut(id)?.content {
             TabContent::PartStudio(doc) => Ok(doc),
             TabContent::Assembly(_) => Err(Error::InvalidInput(format!("tab {} is an assembly, not a Part Studio", id.0))),
+            TabContent::Drawing(_) => Err(Error::InvalidInput(format!("tab {} is a drawing, not a Part Studio", id.0))),
         }
     }
 
@@ -257,6 +274,7 @@ impl Project {
         match &self.tab(id)?.content {
             TabContent::Assembly(a) => Ok(a),
             TabContent::PartStudio(_) => Err(Error::InvalidInput(format!("tab {} is a Part Studio, not an assembly", id.0))),
+            TabContent::Drawing(_) => Err(Error::InvalidInput(format!("tab {} is a drawing, not an assembly", id.0))),
         }
     }
 
@@ -264,7 +282,71 @@ impl Project {
         match &mut self.tab_mut(id)?.content {
             TabContent::Assembly(a) => Ok(a),
             TabContent::PartStudio(_) => Err(Error::InvalidInput(format!("tab {} is a Part Studio, not an assembly", id.0))),
+            TabContent::Drawing(_) => Err(Error::InvalidInput(format!("tab {} is a drawing, not an assembly", id.0))),
         }
+    }
+
+    pub fn drawing(&self, id: TabId) -> Result<&DrawingTab> {
+        match &self.tab(id)?.content {
+            TabContent::Drawing(d) => Ok(d),
+            _ => Err(Error::InvalidInput(format!("tab {} isn't a drawing", id.0))),
+        }
+    }
+
+    pub fn drawing_mut(&mut self, id: TabId) -> Result<&mut DrawingTab> {
+        match &mut self.tab_mut(id)?.content {
+            TabContent::Drawing(d) => Ok(d),
+            _ => Err(Error::InvalidInput(format!("tab {} isn't a drawing", id.0))),
+        }
+    }
+
+    /// Adds a drawing of a Part Studio's parts or an assembly. What it shows has to be here, as the right kind of tab.
+    pub fn add_drawing(&mut self, name: &str, source: DrawingSource, drawing: coreshape_drawing::Drawing) -> Result<TabId> {
+        match &source {
+            DrawingSource::Part { studio, .. } => {
+                self.studio(*studio)?;
+            }
+            DrawingSource::Assembly { tab } => {
+                self.assembly(*tab)?;
+            }
+        }
+        drawing.size()?;
+        Ok(self.add_tab(name, TabContent::Drawing(DrawingTab { source, drawing })))
+    }
+
+    /// What a drawing shows, as one body, made now.
+    pub fn drawing_body(&mut self, id: TabId) -> Result<Body> {
+        let source = self.drawing(id)?.source.clone();
+        match source {
+            DrawingSource::Part { studio, body } => {
+                let outcome = self.studio_mut(studio)?.rebuild(None);
+                match body {
+                    Some(b) => Ok(outcome.find_body(b).ok_or_else(|| Error::InvalidInput(format!("the drawing's part {} isn't in tab {} now", b.text(), studio.0)))?.body.as_ref().clone()),
+                    None => outcome.body.map(|b| b.as_ref().clone()).ok_or_else(|| Error::InvalidInput(format!("tab {} has no parts to draw", studio.0))),
+                }
+            }
+            DrawingSource::Assembly { tab } => self.solve(tab)?.whole().ok_or_else(|| Error::InvalidInput(format!("assembly {} has no parts to draw", tab.0))),
+        }
+    }
+
+    /// A drawing laid out on its sheet, from its source as it is now. A dimension's point given as a reference is looked up
+    /// in its Part Studio; a drawing of an assembly takes only places.
+    pub fn drawing_page(&mut self, id: TabId) -> Result<coreshape_drawing::Page> {
+        let body = self.drawing_body(id)?;
+        let tab = self.drawing(id)?.clone();
+        let studio = match tab.source {
+            DrawingSource::Part { studio, .. } => Some(studio),
+            DrawingSource::Assembly { .. } => None,
+        };
+        let cell = std::cell::RefCell::new(&mut *self);
+        let locate = |v: &Value| -> Result<Vec3> {
+            let Some(studio) = studio else {
+                return Err(Error::InvalidInput("a drawing of an assembly takes its dimensions' points as places, [x, y, z]".into()));
+            };
+            let r = coreshape_document::read_point_ref(v)?;
+            cell.borrow_mut().studio_mut(studio)?.locate_point(&r)
+        };
+        coreshape_drawing::page(&tab.drawing, &body, &locate)
     }
 
     pub fn add_studio(&mut self, name: &str) -> TabId {
@@ -293,6 +375,17 @@ impl Project {
                 });
                 if uses {
                     return Err(Error::InvalidInput(format!("tab {} can't be deleted while \"{}\" has instances from it", id.0, t.name)));
+                }
+            }
+        }
+        for t in &self.tabs {
+            if let TabContent::Drawing(d) = &t.content {
+                let uses = match &d.source {
+                    DrawingSource::Part { studio, .. } => *studio == id,
+                    DrawingSource::Assembly { tab } => *tab == id,
+                };
+                if uses {
+                    return Err(Error::InvalidInput(format!("tab {} can't be deleted while the drawing \"{}\" shows it", id.0, t.name)));
                 }
             }
         }
@@ -944,6 +1037,21 @@ impl Project {
                     items.push(("type", Value::str("assembly")));
                     items.push(("assembly", a.to_json()));
                 }
+                TabContent::Drawing(d) => {
+                    items.push(("type", Value::str("drawing")));
+                    let source = match &d.source {
+                        DrawingSource::Part { studio, body } => {
+                            let mut s = vec![("tab", Value::Num(studio.0 as f64))];
+                            if let Some(b) = body {
+                                s.push(("body", Value::str(b.text())));
+                            }
+                            Value::obj(s)
+                        }
+                        DrawingSource::Assembly { tab } => Value::obj(vec![("assembly", Value::Num(tab.0 as f64))]),
+                    };
+                    items.push(("source", source));
+                    items.push(("drawing", d.drawing.to_json()));
+                }
             }
             Value::obj(items)
         });
@@ -975,7 +1083,19 @@ impl Project {
             let content = match t.get("type").and_then(Value::as_str).unwrap_or("") {
                 "part_studio" => TabContent::PartStudio(Document::from_json(t.get("document").ok_or_else(|| Error::InvalidInput("a Part Studio needs a document".into()))?)?),
                 "assembly" => TabContent::Assembly(Assembly::from_json(t.get("assembly").ok_or_else(|| Error::InvalidInput("an assembly tab needs an assembly".into()))?)?),
-                other => return Err(Error::InvalidInput(format!("unknown kind of tab \"{other}\"; expected part_studio or assembly"))),
+                "drawing" => {
+                    let s = t.get("source").ok_or_else(|| Error::InvalidInput("a drawing tab needs a source".into()))?;
+                    let tab_id = |x: Option<&Value>| x.and_then(Value::as_f64).filter(|n| n.fract() == 0.0 && *n >= 0.0 && *n < 4e9).map(|n| TabId(n as u32)).ok_or_else(|| Error::InvalidInput("a drawing's source names a tab by its id".into()));
+                    let source = if s.get("assembly").is_some() {
+                        DrawingSource::Assembly { tab: tab_id(s.get("assembly"))? }
+                    } else {
+                        let body = s.get("body").and_then(Value::as_str).map(BodyId::parse).transpose()?;
+                        DrawingSource::Part { studio: tab_id(s.get("tab"))?, body }
+                    };
+                    let drawing = coreshape_drawing::Drawing::from_json(t.get("drawing").ok_or_else(|| Error::InvalidInput("a drawing tab needs a drawing".into()))?)?;
+                    TabContent::Drawing(DrawingTab { source, drawing })
+                }
+                other => return Err(Error::InvalidInput(format!("unknown kind of tab \"{other}\"; expected part_studio, assembly or drawing"))),
             };
             if tabs.iter().any(|x: &Tab| x.id == TabId(id)) {
                 return Err(Error::InvalidInput(format!("tab {id} appears twice")));
@@ -996,6 +1116,17 @@ impl Project {
                     if !tabs.iter().any(|x| x.id == want && is_right(&x.content)) {
                         return Err(Error::InvalidInput(format!("instance \"{}\" comes from tab {}, which isn't here as that kind of tab", i.name, want.0)));
                     }
+                }
+            }
+        }
+        for t in &tabs {
+            if let TabContent::Drawing(d) = &t.content {
+                let fine = match &d.source {
+                    DrawingSource::Part { studio, .. } => tabs.iter().any(|x| x.id == *studio && matches!(x.content, TabContent::PartStudio(_))),
+                    DrawingSource::Assembly { tab } => tabs.iter().any(|x| x.id == *tab && matches!(x.content, TabContent::Assembly(_))),
+                };
+                if !fine {
+                    return Err(Error::InvalidInput(format!("the drawing \"{}\" shows a tab that isn't here as that kind of tab", t.name)));
                 }
             }
         }

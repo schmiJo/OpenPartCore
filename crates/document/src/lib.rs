@@ -2848,6 +2848,16 @@ impl Document {
     }
 
     /// Every parameter's value, resolving references in dependency order.
+    /// Where a point a feature could name is, on the model as it stands: a place, a sketch's point or a part's corner,
+    /// for what isn't in the history, such as a drawing's dimension. It rebuilds first, which costs nothing if nothing
+    /// has changed.
+    pub fn locate_point(&mut self, r: &PointRef) -> Result<Vec3> {
+        let outcome = self.rebuild(None);
+        let held: Vec<Held> = outcome.bodies.iter().map(|b| Held { id: b.id, body: b.body.clone(), key: 0, name: b.name.clone(), copy_of: b.copy_of.clone() }).collect();
+        let env = self.environment()?;
+        Looker::new(self, &env, &held).point(r)
+    }
+
     pub fn environment(&self) -> Result<Env> {
         let mut env = Env::new();
         let mut remaining: Vec<&Parameter> = self.params.iter().collect();

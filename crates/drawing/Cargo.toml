@@ -1,0 +1,14 @@
+[package]
+name = "coreshape-drawing"
+description = "Engineering drawings of CoreShape parts and assemblies: projected views, hidden lines, sections, dimensions and title blocks, as SVG, PDF, DXF or PNG"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Only crates from this repository: the kernel for the geometry, the document for its JSON, the sketch for its font,
+# which a PNG draws text with, and the renderer for its PNG encoder. Every file format is written here.
+[dependencies]
+coreshape = { path = "../kernel" }
+coreshape-document = { path = "../document" }
+coreshape-sketch = { path = "../sketch" }
+coreshape-render = { path = "../render" }

@@ -7,3 +7,4 @@ edition = "2021"
 [dependencies]
 coreshape = { path = "../kernel" }
 coreshape-document = { path = "../document" }
+coreshape-drawing = { path = "../drawing" }

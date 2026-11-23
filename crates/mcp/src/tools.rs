@@ -1,6 +1,7 @@
 //! The tools themselves, and the state they work on.
 
 mod assembly;
+mod drawing;
 mod mesh;
 
 pub use mesh::{FlatMesh, InstanceMesh};
@@ -102,7 +103,7 @@ const TOOLS: &[(&str, &str, &str, &str)] = &[
 ];
 
 pub fn exists(name: &str) -> bool {
-    TOOLS.iter().chain(assembly::TOOLS).any(|t| t.0 == name)
+    TOOLS.iter().chain(assembly::TOOLS).chain(drawing::TOOLS).any(|t| t.0 == name)
 }
 
 pub fn list() -> Value {
@@ -110,6 +111,7 @@ pub fn list() -> Value {
         TOOLS
             .iter()
             .chain(assembly::TOOLS)
+            .chain(drawing::TOOLS)
             .map(|(name, description, properties, required)| {
                 Value::obj(vec![
                     ("name", Value::str(*name)),
@@ -541,7 +543,7 @@ impl Session {
                 Err(why) => Err(why.to_json().to_text()),
             },
             "sketch_arrangement" => Ok(vec![text(self.sketch_arg(args)?.arrangement().to_json().to_text())]),
-            other => self.call_assembly(other, args).unwrap_or_else(|| Err(format!("there is no tool named \"{other}\""))),
+            other => self.call_assembly(other, args).or_else(|| self.call_drawing(other, args)).unwrap_or_else(|| Err(format!("there is no tool named \"{other}\""))),
         }
     }
 

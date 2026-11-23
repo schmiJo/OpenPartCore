@@ -9,7 +9,7 @@ pub mod project;
 pub mod solver;
 
 pub use connector::{candidates, edge_candidates, Anchor, Candidate, EdgePoint, FacePoint};
-pub use project::{Bom, BomRow, Interference, Placed, Project, Solved, Tab, TabContent, TabId};
+pub use project::{Bom, BomRow, DrawingSource, DrawingTab, Interference, Placed, Project, Solved, Tab, TabContent, TabId};
 pub use solver::{Contact, Dof, Goal, Limit, MateKind, Touching};
 
 use coreshape::error::{Error, Result};

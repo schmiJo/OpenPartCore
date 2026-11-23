@@ -664,7 +664,11 @@ impl Session {
                 .tabs
                 .iter()
                 .map(|t| {
-                    let kind = if matches!(t.content, TabContent::PartStudio(_)) { "part_studio" } else { "assembly" };
+                    let kind = match t.content {
+                        TabContent::PartStudio(_) => "part_studio",
+                        TabContent::Assembly(_) => "assembly",
+                        TabContent::Drawing(_) => "drawing",
+                    };
                     let mut items = vec![("id", Value::Num(t.id.0 as f64)), ("name", Value::str(&t.name)), ("type", Value::str(kind))];
                     if t.id == self.active {
                         items.push(("selected", Value::Bool(true)));

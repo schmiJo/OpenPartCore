@@ -662,12 +662,55 @@ time, and stops where other mates stop them, as taking one mate to a value does.
 
 **A sub-assembly** is an instance of an assembly tab, and as in Onshape its mates go on working in the assembly above, so its parts can move there. Where they've got to is kept in that assembly's `moved`, by path, relative to the top-level instance they're in, so moving the instance takes them along, and how far its mates have turned there in `moved_turns`, by the sub-assembly's path and the mate's id. `fixed` counts only in the assembly it's set in. `locked` keeps the parts as their own tab solves them, moving as one. A connector reaches into a sub-assembly by a longer `instance` list, which has to go all the way down to a part.
 
+## Drawings
+
+A drawing is a tab of its own, as in Onshape, of a Part Studio's parts, one or all, or of an assembly as it solves. It's
+made again from its source each time it's shown or written, so it follows the model.
+
+```json
+{ "id": 3, "name": "Drawing 1", "type": "drawing", "source": {"tab": 1, "body": "f2"},
+  "drawing": { "sheet": "A3", "projection": "first_angle", "auto_dimensions": true, "next_id": 7,
+    "views": [ {"id": 1, "type": "front"}, {"id": 2, "type": "top"}, {"id": 3, "type": "right"}, {"id": 4, "type": "iso"},
+               {"id": 5, "type": "section", "point": [0, 20, 0], "normal": [0, -1, 0], "letter": "A"} ],
+    "dimensions": [ {"id": 6, "view": 1, "type": "distance", "a": [0, 0, 10], "b": {"faces": ["f1:end", "f1:side.1", "f1:side.2"]},
+                     "along": "horizontal", "offset": 12, "text": "<> wide"} ],
+    "title": {"title": "Plate", "material": "S235"} } }
+```
+
+`source` is `{"tab": id}` for all of a Part Studio's parts, `{"tab": id, "body": "f2"}` for one, or `{"assembly": id}`.
+`sheet` is `A4` to `A0` or `ANSI A` to `ANSI E`, landscape; `projection` `first_angle`, as in Europe, with the top view below
+the front and the view from the right to its left, or `third_angle`, the other way round; `scale` is a number, 0.5 for
+1:2, or left out for the largest standard scale at which the views fit above the title block.
+
+| View `type` | Looks |
+|---|---|
+| `front`, `back` | Along +y, or -y, z up |
+| `top`, `bottom` | Down, or up, y up or down |
+| `left`, `right` | From -x, or +x, z up |
+| `iso` | From (1, -1, 1), z up |
+| `section` | The part cut by the plane through `point` square to `normal`, the half `normal` points to taken away, seen from that side, its cut faces hatched at 45 degrees, labelled `SECTION A-A` by its `letter`, with its cutting line on a view that sees the plane edge on |
+
+A view can also have `at`, its middle on the sheet in millimetres from the bottom left, `scale`, times the sheet's, and
+`hidden`, which is on for the six views and off for iso and sections. Seen edges are thick, hidden ones dashed, edges
+where faces meet smoothly thin, and circles seen face on get center marks and axes seen side on center lines.
+
+A dimension's `type` is `distance`, between `a` and `b`, measured `horizontal`, `vertical` or `aligned` on the sheet as the
+view shows them, or `diameter` or `radius`, of the circle seen face on nearest `near`. A point is `[x, y, z]`, or, for a
+drawing of a part, anything a feature can name a point by (a corner as `vertices_list` gives it, or a sketch's point),
+which is looked up each time. `offset` is millimetres on the sheet from what's measured to the dimension line, 10 by
+default; `text` replaces the value, with `<>` in it standing for the value. A dimension that can't be drawn, as when its
+point has gone, is left off, and said. `auto_dimensions` adds each of the six views' overall width and height, and each
+whole circle's diameter that isn't dimensioned already.
+
+The title block says `title`, `number`, `part`, `material`, `author`, `date`, `company` and `revision`, with the scale,
+sheet and units, and the projection's symbol, as ISO 7200 lays them out.
+
 ## Rules a reader enforces
 
 - A feature may only refer to features before it, including through `bodies`, and `sketch` must name a sketch.
 - Parameters may refer to each other but not in a cycle.
 - A version other than this reader's is refused with a message saying so.
-- Everything an assembly refers to has to be there: its mates' connectors, its relations' mates, and its instances' tabs, as the right kind of tab. An id can't appear twice.
+- Everything an assembly refers to has to be there: its mates' connectors, its relations' mates, and its instances' tabs, as the right kind of tab. An id can't appear twice. A drawing's source has to be there too, as the right kind of tab, and a tab can't be deleted while a drawing shows it.
 
 ## Constrained sketches
 

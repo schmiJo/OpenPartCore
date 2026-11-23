@@ -1488,3 +1488,66 @@ fn the_rest_of_the_assembly_tools_work_through_the_protocol() {
     // The width mate's between-faces connector is offered by name.
     assert!(c.refused("mate_add", &format!(r#"{{"type":"width","a":{{"instance":{plate},"on":{{"between":["f1:end","f1:side.0"]}}}},"b":{{"instance":{pin},"on":{{"face":"f2:start"}}}}}}"#)).contains("parallel"));
 }
+
+#[test]
+fn a_drawing_is_made_changed_and_written_through_the_tools() {
+    let dir = folder("drawing");
+    let mut c = Client::start(&dir);
+    c.ok("parameter_set", r#"{"name":"w","value":60}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":"w","dy":40,"dz":10}}"#);
+    let hole = c.ok("feature_add", r#"{"feature":{"type":"hole","plane":"f1:end","points":[[20,20]],"size":"M6","end":"through_all"}}"#);
+    assert!(!hole.contains("failed"), "{hole}");
+    let (content, failed) = c.call("drawing_new", r#"{"name":"Plate drawing","sheet":"A4","title":{"title":"Plate","material":"S235"}}"#);
+    assert!(!failed, "{content:?}");
+    assert!(content.iter().any(|x| x.get("type").and_then(Value::as_str) == Some("image")));
+    let answer = parsed(content[0].get("text").and_then(Value::as_str).unwrap());
+    let tab = answer.get("tab").and_then(Value::as_f64).unwrap();
+    let views = answer.get("views").and_then(Value::as_array).unwrap().len();
+    assert_eq!(views, 4);
+    let tabs = parsed(&c.ok("tab_list", "{}"));
+    assert!(tabs.as_array().unwrap().iter().any(|t| t.get("type").and_then(Value::as_str) == Some("drawing")));
+    // A section through the hole, and a dimension from a corner of the part to another, which follows the part.
+    let (content, failed) = c.call("drawing_view_add", r#"{"type":"section","point":[20,20,0],"normal":[0,-1,0],"letter":"A"}"#);
+    assert!(!failed, "{content:?}");
+    let corners = parsed(&c.ok("vertices_list", "{}"));
+    let pick = |at: [f64; 3]| -> String {
+        let list = corners.as_array().unwrap();
+        let found = list.iter().find(|v| numbers(v.get("at").unwrap()).iter().zip(at).all(|(a, b)| (a - b).abs() < 1e-9)).unwrap_or_else(|| panic!("no corner at {at:?}"));
+        found.get("vertex").unwrap().to_text()
+    };
+    let (a, b) = (pick([0.0, 0.0, 10.0]), pick([60.0, 0.0, 10.0]));
+    let (content, failed) = c.call("drawing_dimension_add", &format!(r#"{{"view":1,"type":"distance","a":{a},"b":{b},"along":"horizontal","offset":12,"text":"<> wide"}}"#));
+    assert!(!failed, "{content:?}");
+    let svg = c.ok("drawing_export", r#"{"format":"svg"}"#);
+    assert!(svg.contains(">60 wide<"), "the dimension's text");
+    assert!(svg.contains("SECTION A-A") && svg.contains(">Plate<") && svg.contains(">S235<"));
+    // The part made wider, in its Part Studio: the drawing follows.
+    c.ok("tab_select", r#"{"tab":1}"#);
+    c.ok("parameter_set", r#"{"name":"w","value":75}"#);
+    let svg = c.ok("drawing_export", &format!(r#"{{"tab":{tab},"format":"svg"}}"#));
+    assert!(svg.contains(">75 wide<"), "the dimension followed");
+    // A diameter where the view sees no circle is refused, saying why, and not kept.
+    c.ok("tab_select", &format!(r#"{{"tab":{tab}}}"#));
+    assert!(c.refused("drawing_dimension_add", r#"{"view":1,"type":"diameter","near":[20,20,10]}"#).contains("no circle"));
+    // Written as files.
+    for (format, name) in [("pdf", "plate.pdf"), ("dxf", "plate.dxf"), ("svg", "plate.svg"), ("png", "plate.png")] {
+        let said = c.ok("drawing_export", &format!(r#"{{"format":"{format}","path":"{name}"}}"#));
+        assert!(said.starts_with("Wrote"), "{said}");
+        assert!(dir.join(name).metadata().unwrap().len() > 1000);
+    }
+    assert!(std::fs::read(dir.join("plate.pdf")).unwrap().starts_with(b"%PDF-1.4"));
+    // Edited, saved and opened again, it's the same drawing.
+    let (content, failed) = c.call("drawing_edit", r#"{"projection":"third_angle","scale":0.5,"title":{"author":"Test"}}"#);
+    assert!(!failed, "{content:?}");
+    let before = c.ok("drawing_export", r#"{"format":"svg"}"#);
+    assert!(before.contains(">1:2<"));
+    c.ok("document_save", r#"{"path":"drawn.coreshape"}"#);
+    c.ok("document_new", "{}");
+    c.ok("document_open", r#"{"path":"drawn.coreshape"}"#);
+    let after = c.ok("drawing_export", &format!(r#"{{"tab":{tab},"format":"svg"}}"#));
+    assert_eq!(after, before);
+    // The Part Studio can't be deleted while the drawing shows it, even with another to work on.
+    c.ok("tab_new", r#"{"type":"part_studio"}"#);
+    let why = c.refused("tab_delete", r#"{"tab":1}"#);
+    assert!(why.contains("drawing"), "{why}");
+}
