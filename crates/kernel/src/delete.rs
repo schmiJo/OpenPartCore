@@ -153,7 +153,7 @@ fn extended(edge: &Edge, s: &Surface, t: &Surface, a: Vec3, b: Vec3) -> Result<(
 
 /// Carries out a plan. Gives the new body, and for each of its faces the face it came from.
 fn apply(body: &Body, gone: &[bool], plan: &Plan) -> Result<(Body, Vec<usize>)> {
-    let size = body.aabb().diagonal().max(1.0);
+    let size = body.rough_size();
     let mut parent: Vec<usize> = (0..body.vertices.len()).collect();
     for run in &plan.collapse {
         let list = run.vertices(body);
@@ -438,7 +438,7 @@ fn one_plane(body: &Body, a: &Run, b: &Run, size: f64) -> bool {
 
 /// Plans for a connected group of faces, in the order to try them.
 fn plans_for(body: &Body, uses: &Uses, group: &[usize]) -> Result<Vec<Plan>> {
-    let size = body.aabb().diagonal().max(1.0);
+    let size = body.rough_size();
     let mut in_group = vec![None; body.faces.len()];
     for &f in group {
         in_group[f] = Some(0);

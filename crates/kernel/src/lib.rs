@@ -24,6 +24,7 @@ pub mod loft;
 pub mod mass;
 pub mod math;
 pub mod multi;
+pub mod par;
 pub mod patch;
 pub mod profile;
 pub mod progress;

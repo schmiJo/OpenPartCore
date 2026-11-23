@@ -478,7 +478,10 @@ impl<'a> Looker<'a> {
     fn one_surface(&self, key: &FaceKey) -> Result<(&Arc<Body>, usize)> {
         let (body, found) = self.faces(key)?;
         let first = &body.faces[found[0]];
-        let size = body.aabb().diagonal().max(1.0);
+        if found.len() == 1 {
+            return Ok((body, found[0]));
+        }
+        let size = body.rough_size();
         for &f in &found[1..] {
             let other = &body.faces[f];
             let same = std::mem::discriminant(&other.surface) == std::mem::discriminant(&first.surface)

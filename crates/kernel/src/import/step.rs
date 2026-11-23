@@ -3158,16 +3158,17 @@ fn each_of(file: &File, solids: &BTreeMap<usize, SolidShells>, surfaces: &BTreeM
     let count = |id: usize| if sheets { surfaces[&id].len() } else { 1 };
     let (structure, order) = structure_of(file, &placements, &ids, &count);
     let total = order.len();
-    let mut parts: Vec<Result<Arc<Body>>> = Vec::with_capacity(total);
     let mut entities = Vec::with_capacity(total);
-    let mut repaired: Vec<Vec<String>> = Vec::with_capacity(total);
     // A file often has one part many times over, each a copy of the others in entities of its own. Built once, it does for
-    // all of them, as the same entities can only make the same body.
+    // all of them, as the same entities can only make the same body. First which are copies, then each of the rest built,
+    // on every core at once, as each is built on its own.
     let mut seen: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    let mut twin_of: Vec<Option<usize>> = Vec::with_capacity(total);
+    let mut jobs: Vec<(usize, Vec<usize>, usize)> = Vec::new();
     for (k, (id, shell)) in order.iter().enumerate() {
-        crate::progress::report("solids", k, total);
         let shells: Vec<usize> = if sheets { vec![surfaces[id][*shell]] } else { std::iter::once(solids[id].0).chain(solids[id].1.iter().map(|v| v.0)).collect() };
-        let key = content_key(file, &shells) ^ u64::from(sheets);
+        let (key, size) = content_key_and_size(file, &shells);
+        let key = key ^ u64::from(sheets);
         entities.push(if sheets { shells[0] } else { *id });
         let others = seen.entry(key).or_default();
         let twin = others.iter().copied().find(|&j| {
@@ -3176,20 +3177,42 @@ fn each_of(file: &File, solids: &BTreeMap<usize, SolidShells>, surfaces: &BTreeM
             (sheets || solids[id].1.iter().map(|v| v.1).eq(solids[&entities[j]].1.iter().map(|v| v.1))) && same_content(file, &shells, &theirs)
         });
         others.push(k);
-        if let Some(j) = twin {
-            parts.push(parts[j].clone());
-            repaired.push(repaired[j].clone());
-            continue;
+        twin_of.push(twin);
+        if twin.is_none() {
+            jobs.push((k, shells, size));
         }
-        let mut fixes = Vec::new();
-        let built = if sheets {
-            sheet(file, feature, shells[0])
-        } else {
-            let (outer, voids) = &solids[id];
-            repaired_solid(file, feature, *outer, voids, &mut fixes)
-        };
-        parts.push(built.map(Arc::new));
-        repaired.push(fixes);
+    }
+    // The biggest first, so that the last to finish isn't a big one started late with every other core idle.
+    jobs.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+    let built = crate::par::map(
+        &jobs,
+        |(k, shells, _)| {
+            let mut fixes = Vec::new();
+            let made = if sheets {
+                sheet(file, feature, shells[0])
+            } else {
+                let (outer, voids) = &solids[&order[*k].0];
+                repaired_solid(file, feature, *outer, voids, &mut fixes)
+            };
+            (made.map(Arc::new), fixes)
+        },
+        |done| crate::progress::report("solids", done, jobs.len()),
+    );
+    let mut own: BTreeMap<usize, (Result<Arc<Body>>, Vec<String>)> = jobs.iter().map(|(k, _, _)| *k).zip(built).collect();
+    let mut parts: Vec<Result<Arc<Body>>> = Vec::with_capacity(total);
+    let mut repaired: Vec<Vec<String>> = Vec::with_capacity(total);
+    for k in 0..total {
+        match twin_of[k] {
+            Some(j) => {
+                parts.push(parts[j].clone());
+                repaired.push(repaired[j].clone());
+            }
+            None => {
+                let (made, fixes) = own.remove(&k).expect("each part not a copy was built");
+                parts.push(made);
+                repaired.push(fixes);
+            }
+        }
     }
     crate::progress::report("solids", total, total);
     let other_solids = others.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
@@ -3198,7 +3221,13 @@ fn each_of(file: &File, solids: &BTreeMap<usize, SolidShells>, surfaces: &BTreeM
 
 /// A hash of everything the entities from `roots` are made of, with each reference standing for where it was first met, so
 /// that copies of a part in entities of their own hash the same.
+#[cfg(test)]
 fn content_key(file: &File, roots: &[usize]) -> u64 {
+    content_key_and_size(file, roots).0
+}
+
+/// `content_key`, and how many entities it took in, which is roughly how much building it'll take.
+fn content_key_and_size(file: &File, roots: &[usize]) -> (u64, usize) {
     use std::hash::Hasher;
     let mut h = crate::hash::FixedHasher::default();
     let mut number: crate::hash::HashMap<usize, u64> = crate::hash::HashMap::default();
@@ -3266,7 +3295,7 @@ fn content_key(file: &File, roots: &[usize]) -> u64 {
             }
         }
     }
-    h.finish()
+    (h.finish(), number.len())
 }
 
 /// Whether the entities from `a` and from `b` are the same in everything but their numbers, matching one to one.

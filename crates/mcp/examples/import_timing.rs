@@ -38,6 +38,9 @@ fn main() {
     for line in words.lines().filter(|l| l.contains("left out") || l.contains("repaired") || l.contains("\"failed\"") || l.contains("error")) {
         println!("  {}", line.trim());
     }
+    if std::env::var("ONLY_ADD").is_ok() {
+        return;
+    }
     time(&mut session, "bodies_list", "bodies_list", Value::obj(vec![]));
     time(&mut session, "document_show, whole", "document_show", Value::obj(vec![]));
     time(&mut session, "document_show, big texts left out", "document_show", Value::obj(vec![("omit_texts_over", Value::Num(100_000.0))]));

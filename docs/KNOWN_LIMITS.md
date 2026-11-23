@@ -185,7 +185,7 @@ Checked further by `scripts/check_step_import.sh`, which has OpenCASCADE write 3
 
 - **All 2,218 come in, all valid.** OpenCASCADE reads the same 2,218, all valid. 2,194 agree with it to 1e-3 in volume and area, and most to far better. The other 24 are one small part used 24 times, with two spline faces, where OpenCASCADE's own fine mesh gives 0.371807 mm³ against its exact 0.370333, and this reads 0.371807. Its bounding boxes differ by over 1 mm on 17, all where its quick box is loose: its tight box and its mesh agree with this kernel's on those checked. A wheel part differs by 2e-4, all on one spline face, where this kernel's meshes go to its own exact volume as they get finer, 131,933, 131,962, 131,968 for 131,970.5, and OpenCASCADE's mesh area comes out above its own exact one.
 - **Reading it takes 29 s,** on this desktop with other work running: 1.5 s to parse and 27 s for the 273 different solids, as 438 more are copies, entity for entity. It took 184 s before, nearly all of it on solids with spline edges between a free-form face and another, as resampling each onto both surfaces searched the whole free-form surface for each point near it. It now steps from the point before, in a few Newton steps, and takes 4 points per knot span where it took 12. OpenCASCADE reads it in 32 s.
-- **Through the tools, as SchmiShape does it,** adding the feature takes 96 s, of which the summary is 67 s, measuring each different shape once, and a rebuild after that takes 0.3 s. The exact volume of the two joints is 36 s of it: their traced edges on free-form faces, 2,600 points each, cost the most. A rough volume would take 1 s each, and is 2e-5 out. A display mesh of all 2,218 bodies as one is 14 million triangles and takes 91 s, and of each of the 273 shapes once, to be drawn at each of its places, 0.95 million in 11 s: `NamedBody::copy_of` says which body is a copy of which. Thin tori used to be meshed as finely along as across, which took the rover's mesh to 26 million triangles.
+- **Through the tools, as SchmiShape does it,** adding the feature takes 96 s, of which the summary is 67 s, measuring each different shape once, and a rebuild after that takes 0.3 s. The exact volume of the two joints is 36 s of it: their traced edges on free-form faces, 2,600 points each, cost the most. A rough volume would take 1 s each, and is 2e-5 out. A display mesh of all 2,218 bodies as one is 14 million triangles and took 91 s, and of each of the 273 shapes once, to be drawn at each of its places, 0.95 million in 11 s, before the work on [big files](#big-parts-and-big-files): `NamedBody::copy_of` says which body is a copy of which. Thin tori used to be meshed as finely along as across, which took the rover's mesh to 26 million triangles.
 
 ## Several bodies
 
@@ -681,6 +681,80 @@ are no faster than before. 400 holes: 0.44 s at once, 7.9 s one by one, and 19.7
   list of a body with a zero-thickness pinch flips "Unorientable shape". The STEP writer emits faces
   in depth-first connected order, which passed from all 12 start faces tried (breadth-first 10 of 12,
   random about half). This is an observed property of that checker, not a rule from the standard.
+
+## Big parts and big files
+
+**Checked on 2026-11-23,** on this desktop's 12 cores with other work keeping the load at 21 to 25, so wall times are
+rough; before and after were run side by side under the same load.
+
+**A part of 200 features and more.** `crates/mcp/examples/big_part.rs` models a plate the way a person would: a base, then
+cells of a pocket, a boss with a tapped hole, a round on the boss and a chamfer round the pocket, then rounds on the base's
+corners. 28 cells make 199 features and 514 faces: modelled feature by feature in 3 s, rebuilt from the base's thickness in
+2.2 s, 0.013 s with nothing changed, and its display mesh in 0.03 s. That was already quick. 112 cells make 787 features and
+2,026 faces, where the time grew with the square of the size:
+
+| 787 features, 2,026 faces | Before | After |
+|---|---|---|
+| Modelled feature by feature, each with a rebuild | 110 to 122 s | 16 to 17 s |
+| Full rebuild after the base's thickness changes | 47 to 50 s | 13 to 16 s |
+| Rebuild with nothing changed | 0.27 s | 0.007 s |
+| All of it, in CPU time | 209 to 216 s | 40 to 48 s |
+
+What was slow, found by sampling stacks with gdb (perf isn't open to a user on this machine):
+
+- **Every rebuild worked out the whole body's box** to check whether a hole's face name picked faces on one surface, though
+  it picked one. That was nearly all of a rebuild with nothing changed, and so a floor under every edit.
+- **Every edge's box sampled 33 points,** with a sine and cosine each for a circle, and every face's box made its edges'
+  boxes again, whenever a body was indexed for a Boolean. Circles' and ellipses' boxes are now exact from where they turn,
+  and each edge's box is made once for all its faces.
+- **Faces on tori and spheres were bounded closely** for every face of the body each time, which takes a trace of their
+  boundary in their chart and 81 points on them. Now each face has a quick box, its edges' and the whole torus's or sphere's,
+  and is only bounded closely when that comes near what's being cut. The body's box comes out the same.
+- **A hole's check for a hollow** worked out every shell's volume, where a body of one shell is one solid.
+- **A Boolean looked for new vertices on edges** by trying every vertex of both bodies against every edge of both. Only
+  where the bodies' boxes overlap can that find anything, so only there is it looked for.
+- **Smaller ones:** boundary points for every face when merging faces back, where only a few pairs are tried and a plane's
+  never need them; 16 chart points per edge for a winding check where a line on a plane needs one; a box round the whole
+  body only for a tolerance's scale, now `Body::rough_aabb`, which is never smaller and quick.
+
+**What's left:** every Boolean still checks the whole result: it's validated, its faces are merged where they can be, and
+points are tried against both bodies. That's about 20 ms a feature at 2,000 faces, and a chamfer or round does two
+Booleans. Making Booleans work only where the bodies meet would change that, and is a bigger piece of work.
+
+**Many cores.** `coreshape::par` shares independent pieces of work among the cores, with the standard library's threads and
+nothing more. In WebAssembly there are no threads and it does them one after another. Work inside work already shared out
+isn't shared again. `COSHAPE_THREADS` caps the threads, and 1 turns it off. It's used for: each distinct solid of a STEP
+file, built biggest first; a body's mass properties, face by face, with each traced edge's points worked out once, when the
+body has free-form faces or traced edges, or 256 faces or more; a mesh, face by face, with 32 faces or more; and the MCP
+summary measuring the bodies it hasn't measured yet. The answers are the same to the last bit with one thread or twelve:
+the rover's joint below gives 109383.92009300229 both ways, and the same 141,194 triangles.
+
+**The rover,** 114 MB, 2,218 uses of 711 parts, 273 distinct shapes, through the tools as SchmiShape brings it in:
+
+| | Before | After |
+|---|---|---|
+| Adding the feature | 113 to 142 s | 44 s |
+| Of that: reading the file | 2.5 s | 2.5 s |
+| Building the solids | about 40 s | 13 s |
+| Measuring every shape for the summary | about 96 s | 26 s |
+| A display mesh of all 2,218 as one body | 125 s | 46 s |
+| One joint's exact volume | 27 s | 5.9 s |
+| One joint's mesh | 6.5 s | 2.0 s |
+
+The solids are held up by the two joints, which take 11 to 12 s each to build, as one solid is built on one core. 73% of
+that is finding the nearest point of a free-form surface, with the certainty that search is built for. Searching its leaves
+nearest first was tried and made no difference worth having, so it was taken out again.
+
+**Numbers that moved.** As circles' boxes are exact now, a body's box is a little smaller where curved edges set it. A mesh
+made `for_size` its box is then a little finer, as the rover's joint went from 137,616 triangles to 141,194, and the point
+volume integrals are taken about moves, as the joint's volume went from 109383.92010227745 to 109383.92009300229, 8.5e-11
+apart, well inside its estimated error. Every test passes as before, and every fuzz count is the same but the blend fuzz's,
+which sizes each fillet or chamfer by its body's box: with the boxes a little smaller its 200 cases changed a little, and
+53 blended and 91 were refused, where 54 and 90 were before, with none wrong either time. Run side by side under the same
+load, the Boolean fuzz takes the same time as before, 37 s for 2000 cases of each kind: the fuzz times in the checks went
+up with how busy the machine was that night. Programs that run threads of their own, as the fuzzers do, turn the
+kernel's off with `coreshape::par::set_threads(1)`, and however many share work out at once, there are never more helper
+threads than cores.
 
 ## Slider speed
 

@@ -106,6 +106,8 @@ fn run(seed: u64) -> Tried {
 }
 
 fn main() {
+    // Its own threads keep every core busy: the kernel's sharing out on top of that would only crowd them.
+    coreshape::par::set_threads(1);
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("one") {
         let seed = args[2].parse().unwrap();

@@ -1896,7 +1896,7 @@ fn project_edge(body: &Body, e: usize, frame: &Frame) -> Result<coreshape_sketch
     };
     let flat_dir = |d: Vec3| v2(d.dot(frame.x), d.dot(frame.y));
     let (a, b) = (body.vertices[edge.v0], body.vertices[edge.v1]);
-    let tiny = 1e-9 * body.aabb().diagonal().max(1.0);
+    let tiny = 1e-9 * body.rough_size();
     let gap = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).hypot(p[1] - q[1]);
     // The ends are where the vertices are, so that they meet projected vertices exactly.
     let (start, end) = (flat(a), flat(b));

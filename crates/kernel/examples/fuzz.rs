@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 fn main() {
+    // Its own threads keep every core busy: the kernel's sharing out on top of that would only crowd them.
+    coreshape::par::set_threads(1);
     std::panic::set_hook(Box::new(|_| {}));
     let args: Vec<String> = std::env::args().collect();
     let cases: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(500);

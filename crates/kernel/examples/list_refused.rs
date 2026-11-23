@@ -2,6 +2,8 @@
 use coreshape::fuzz::*;
 
 fn main() {
+    // Its own threads keep every core busy: the kernel's sharing out on top of that would only crowd them.
+    coreshape::par::set_threads(1);
     let args: Vec<String> = std::env::args().collect();
     let category = if args[1] == "gen" { Category::GeneralPrimitives } else { Category::AlignedPrimitives };
     let cases: u64 = args[2].parse().unwrap();

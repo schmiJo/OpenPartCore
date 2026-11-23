@@ -311,7 +311,7 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
         for (i, e) in bodies[s].edges.iter().enumerate() {
             let bx = index[s].edge_boxes[i].inflated(2.0 * TOL);
             for g in 0..bodies[other].faces.len() {
-                if !bx.overlaps(&index[other].face_boxes[g]) {
+                if !index[other].face_box_overlaps(g, &bx) {
                     continue;
                 }
                 let surf = &bodies[other].faces[g].surface;
@@ -339,11 +339,23 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
         }
     }
 
-    // A new vertex on one edge may lie on other edges too, of either body.
+    // A new vertex on one edge may lie on other edges too, of either body. Only where the bodies' boxes overlap can a
+    // vertex be on the other body's edges, or be new, so only the vertices and edges there are looked at: a small
+    // tool against a big part looks at a few of each, not every vertex against every edge.
+    let room = 4.0 * MERGE;
+    let overlap = Aabb {
+        min: index[0].bounds.min.max(index[1].bounds.min) - Vec3::splat(room),
+        max: index[0].bounds.max.min(index[1].bounds.max) + Vec3::splat(room),
+    };
+    let near: [Vec<usize>; 2] = [0, 1].map(|s| (0..bodies[s].edges.len()).filter(|&i| index[s].edge_boxes[i].inflated(2.0 * MERGE).overlaps(&overlap)).collect());
     for v in 0..arr.vertices.len() {
         let p = arr.vertices[v];
+        if !overlap.contains(p) {
+            continue;
+        }
         for s in 0..2 {
-            for (i, e) in bodies[s].edges.iter().enumerate() {
+            for &i in &near[s] {
+                let e = &bodies[s].edges[i];
                 if index[s].edge_boxes[i].inflated(2.0 * MERGE).contains(p) && e.curve.could_be_within(p, e.t0, e.t1, MERGE) {
                     let (t, d) = e.curve.closest(p, e.t0, e.t1);
                     if d <= MERGE {
@@ -406,10 +418,15 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
 
     // Step 4: intersect faces.
     let mut extras: [Vec<Vec<usize>>; 2] = [vec![Vec::new(); a.faces.len()], vec![Vec::new(); b.faces.len()]];
+    let near_b = index[1].bounds.inflated(4.0 * TOL);
     for fa in 0..a.faces.len() {
+        // Each face's quick box first, so a face far from the other body is never bounded closely.
+        if !index[0].face_box_overlaps(fa, &near_b) {
+            continue;
+        }
+        let ba = index[0].face_box(fa).inflated(4.0 * TOL);
         for fb in 0..b.faces.len() {
-            let (ba, bb) = (&index[0].face_boxes[fa], &index[1].face_boxes[fb]);
-            if !ba.inflated(2.0 * TOL).overlaps(&bb.inflated(2.0 * TOL)) {
+            if !index[1].face_box_overlaps(fb, &ba) {
                 continue;
             }
             intersect_faces(a, b, &index, fa, fb, &mut arr, &boundaries, &mut extras)?;
@@ -538,7 +555,7 @@ fn sheet_reaches_through(pieces: &[Piece], selected: &[(usize, bool)], arr: &Arr
 /// were found.
 fn verify_trim(sheet: &Body, solid: &Index, result: &Body, side: Keep) -> Result<()> {
     let out = Index::new(result);
-    let on_result = |p: Vec3| (0..result.faces.len()).any(|f| out.face_boxes[f].inflated(4.0 * TOL).contains(p) && out.locate_on_face(f, p, 4.0 * TOL) != FaceLoc::Outside);
+    let on_result = |p: Vec3| (0..result.faces.len()).any(|f| out.face_box_holds(f, p, 4.0 * TOL) && out.locate_on_face(f, p, 4.0 * TOL) != FaceLoc::Outside);
     let of_sheet = Index::new(sheet);
     for f in 0..sheet.faces.len() {
         let face = &sheet.faces[f];
@@ -649,7 +666,7 @@ fn intersect_faces(
     extras: &mut [Vec<Vec<usize>>; 2],
 ) -> Result<()> {
     let (face_a, face_b) = (&a.faces[fa], &b.faces[fb]);
-    let (ba, bb) = (&index[0].face_boxes[fa], &index[1].face_boxes[fb]);
+    let (ba, bb) = (&index[0].face_box(fa), &index[1].face_box(fb));
     let mut region = Aabb {
         min: v3(ba.min.x.max(bb.min.x), ba.min.y.max(bb.min.y), ba.min.z.max(bb.min.z)),
         max: v3(ba.max.x.min(bb.max.x), ba.max.y.min(bb.max.y), ba.max.z.min(bb.max.z)),
@@ -948,7 +965,7 @@ fn classify_piece(piece: &Piece, bodies: [&Body; 2], index: &[Index; 2], arr: &A
     let other = 1 - piece.source;
     // A face entirely outside the other body's bounding box needs no testing. In a
     // chain of local operations this is most faces.
-    if !index[piece.source].face_boxes[piece.face].inflated(4.0 * TOL).overlaps(&index[other].bounds) {
+    if !index[piece.source].face_box_overlaps(piece.face, &index[other].bounds.inflated(4.0 * TOL)) {
         return Ok(Class::Out);
     }
     let size = index[0].bounds.diagonal().max(index[1].bounds.diagonal());

@@ -599,15 +599,44 @@ pub fn mass_properties(body: &Body) -> MassProps {
     if body.sheet {
         return sheet_properties(body, reference);
     }
-    for face in &body.faces {
-        let (v, a) = face_integrals(body, face, reference);
+    let numeric = body.faces.iter().any(|f| matches!(f.surface, Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. }))
+        || body.edges.iter().any(|e| matches!(e.curve, Curve::Sampled(_)));
+    // Each face's integrals on their own, and with a numeric face, at a coarser rule too, for how far off they can be.
+    // Faces taken numerically can take a while, so with a few of them, or many faces, they're shared among the cores.
+    // Added up in the faces' order, as before, so the sum comes out the same to the last bit.
+    let roughly = ROUGHLY.with(|r| r.get());
+    let faces: Vec<usize> = (0..body.faces.len()).collect();
+    let shared = !crate::par::inside() && crate::par::threads() > 1 && ((numeric && faces.len() >= 8) || faces.len() >= 256);
+    // A traced edge's nodes are the costliest part, and both faces beside it want them: with the work shared, each is
+    // worked out once, on whichever core is free, at both rules, and every core is given them all.
+    let traced: Vec<usize> = if shared && !roughly { (0..body.edges.len()).filter(|&i| matches!(body.edges[i].curve, Curve::Sampled(_))).collect() } else { Vec::new() };
+    let nodes: Vec<(usize, TracedNodes, TracedNodes)> = crate::par::map(&traced, |&i| (i, traced_nodes_of(&body.edges[i], gauss_24()), traced_nodes_of(&body.edges[i], gauss_12())), |_| {});
+    let key_of = |edge: usize, rule: &[(f64, f64)]| (body as *const Body as usize, edge, rule.len());
+    let face = |f: &usize| {
+        ROUGHLY.with(|r| r.set(roughly));
+        if let Some((first, _, _)) = nodes.first() {
+            let known = TRACED.with(|t| t.borrow().contains_key(&key_of(*first, gauss_24())));
+            if !known {
+                TRACED.with(|t| {
+                    let mut t = t.borrow_mut();
+                    for (i, fine, coarse) in &nodes {
+                        t.insert(key_of(*i, gauss_24()), fine.clone());
+                        t.insert(key_of(*i, gauss_12()), coarse.clone());
+                    }
+                });
+            }
+        }
+        let (v, a) = face_integrals(body, &body.faces[*f], reference);
+        let coarse = if numeric { face_integrals_with(body, &body.faces[*f], reference, gauss_12()).0 } else { 0.0 };
+        (v, a, coarse)
+    };
+    let each: Vec<(f64, f64, f64)> = if shared { crate::par::map(&faces, face, |_| {}) } else { faces.iter().map(face).collect() };
+    for (v, a, _) in &each {
         out.volume += v;
         out.area += a;
     }
-    let numeric = body.faces.iter().any(|f| matches!(f.surface, Surface::Extruded { .. } | Surface::Revolved { .. } | Surface::Free { .. }))
-        || body.edges.iter().any(|e| matches!(e.curve, Curve::Sampled(_)));
     if numeric {
-        let coarse: f64 = body.faces.iter().map(|f| face_integrals_with(body, f, reference, gauss_12()).0).sum();
+        let coarse: f64 = each.iter().map(|e| e.2).sum();
         // What's left at the coarser rule, plus what rounding can leave behind in a sum of this size.
         out.volume_error = (coarse - out.volume).abs() + 1e-13 * out.volume.abs();
     }

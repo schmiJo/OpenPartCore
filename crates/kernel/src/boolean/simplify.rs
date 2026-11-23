@@ -84,7 +84,7 @@ pub(crate) fn within_half_turn(surface: &Surface, points: &[Vec3]) -> bool {
 }
 
 fn merge_faces(body: Body) -> Result<Body> {
-    let size = body.aabb().diagonal();
+    let size = body.rough_aabb().diagonal();
     let n = body.faces.len();
     let uses = body.edge_uses();
     let mut parent: Vec<usize> = (0..n).collect();
@@ -96,7 +96,8 @@ fn merge_faces(body: Body) -> Result<Body> {
         }
         r
     }
-    let mut points: Vec<Vec<Vec3>> = body.faces.iter().map(|f| boundary_points(&body, f)).collect();
+    // Points round each face, for whether two would fit as one: only worked out for faces that might merge.
+    let mut points: Vec<Option<Vec<Vec3>>> = vec![None; n];
     for (ei, list) in uses.iter().enumerate() {
         let [a, b] = list.as_slice() else {
             continue;
@@ -113,13 +114,23 @@ fn merge_faces(body: Body) -> Result<Body> {
         if fa.outward_normal(mid).dot(fb.outward_normal(mid)) <= 0.0 {
             continue;
         }
-        let mut joined = points[ra].clone();
-        joined.extend_from_slice(&points[rb]);
+        // A surface that doesn't go round fits any two of its faces as one, with no points to look at.
+        if matches!(fa.surface, Surface::Plane(_) | Surface::Extruded { .. } | Surface::Free { .. }) {
+            parent[ra] = rb;
+            continue;
+        }
+        for r in [ra, rb] {
+            if points[r].is_none() {
+                points[r] = Some(boundary_points(&body, &body.faces[r]));
+            }
+        }
+        let mut joined = points[ra].clone().unwrap_or_default();
+        joined.extend_from_slice(points[rb].as_deref().unwrap_or_default());
         if !within_half_turn(&fa.surface, &joined) {
             continue;
         }
         parent[ra] = rb;
-        points[rb] = joined;
+        points[rb] = Some(joined);
     }
 
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::default();

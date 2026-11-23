@@ -140,7 +140,7 @@ fn heal(body: &Body, stuck: &Stuck, closes: &dyn Fn(usize, bool) -> bool) -> Opt
 }
 
 fn ssi_size(body: &Body) -> f64 {
-    body.aabb().diagonal().max(1.0)
+    body.rough_size()
 }
 
 /// Tries a change, deleting what doesn't survive it and trying again. `attempt` gets the body as it now stands, with the
@@ -719,7 +719,7 @@ fn with_surfaces(body: &Body, surfaces: &[Surface], tangent_map: TangentMap<'_>)
     // What each edge is between.
     let mut tangent = vec![false; body.edges.len()];
     let mut same = vec![false; body.edges.len()];
-    let size = body.aabb().diagonal().max(1.0);
+    let size = body.rough_size();
     for (e, edge) in body.edges.iter().enumerate() {
         if uses[e].len() != 2 {
             return Err(Error::Unsupported("an edge used by other than two faces can't be moved".into()).into());

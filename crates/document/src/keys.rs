@@ -239,7 +239,7 @@ impl Pieces {
             .collect();
         let n = body.faces.len();
         let uses = body.edge_uses();
-        let tolerance = 1e-7 * body.aabb().diagonal().max(1.0);
+        let tolerance = 1e-7 * body.rough_size();
         let mut parent: Vec<usize> = (0..n).collect();
         fn root(parent: &mut [usize], mut x: usize) -> usize {
             while parent[x] != x {
@@ -417,7 +417,7 @@ impl Chains {
     fn of(body: &Body, pieces: &Pieces) -> Chains {
         let uses = body.edge_uses();
         let n = body.edges.len();
-        let tolerance = 1e-7 * body.aabb().diagonal().max(1.0);
+        let tolerance = 1e-7 * body.rough_size();
         let pair = |e: usize| match uses[e].as_slice() {
             [x, y] => {
                 let (p, q) = (pieces.piece_of[x.0], pieces.piece_of[y.0]);

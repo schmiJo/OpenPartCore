@@ -312,13 +312,20 @@ pub fn tessellate(body: &Body, params: &TessParams) -> Result<Mesh> {
     for _attempt in 0..8 {
         // Every face that fails gets its more samples at once, or a part with many thin faces runs out of tries.
         let mut crossed = false;
-        for f in 0..body.faces.len() {
-            if pieces[f].is_some() {
-                continue;
-            }
+        // Each face meshes on its own from its edges' polylines, so with many to do, they're shared among the cores, and
+        // what comes of each is taken in the faces' order, as one after another would.
+        let todo: Vec<usize> = (0..body.faces.len()).filter(|&f| pieces[f].is_none()).collect();
+        let mesh_of = |f: &usize| {
             let mut piece = Mesh::default();
-            match tessellate_face(body, f, &mut polylines, params, &mut piece) {
-                Ok(()) => pieces[f] = Some(piece),
+            tessellate_face(body, *f, &polylines, params, &mut piece).map(|()| piece)
+        };
+        // A face on a plane, a cylinder or the like meshes in microseconds, so it takes many before sharing them out pays.
+        let slow = todo.iter().filter(|&&f| matches!(body.faces[f].surface, Surface::Free { .. } | Surface::Revolved { .. } | Surface::Extruded { .. })).count();
+        let shared = todo.len() >= 256 || (slow >= 16 && todo.len() >= 32);
+        let made: Vec<Result<Mesh>> = if shared { crate::par::map(&todo, mesh_of, |_| {}) } else { todo.iter().map(mesh_of).collect() };
+        for (&f, result) in todo.iter().zip(made) {
+            match result {
+                Ok(piece) => pieces[f] = Some(piece),
                 Err(e) => {
                     crossed = true;
                     last_error = Some(e);
@@ -488,7 +495,7 @@ fn steps_needed(surface: &Surface, chart: &crate::surface::Chart, lo: Vec2, hi: 
 fn tessellate_face(
     body: &Body,
     f: usize,
-    polylines: &mut [Vec<Vec3>],
+    polylines: &[Vec<Vec3>],
     params: &TessParams,
     mesh: &mut Mesh,
 ) -> Result<()> {

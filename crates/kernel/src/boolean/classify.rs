@@ -34,11 +34,17 @@ pub struct RayHit {
 pub struct Index<'a> {
     pub body: &'a Body,
     pub edge_boxes: Vec<Aabb>,
-    pub face_boxes: Vec<Aabb>,
+    /// A box round each face that's quick to make: its edges', or for a face that can bulge past them on a sphere or
+    /// a torus, the whole sphere's or torus's. Never smaller than its box.
+    quick_boxes: Vec<Aabb>,
+    /// Each face's box, as `Body::face_aabb` makes it, worked out the first time it's wanted: a face on a sphere or
+    /// a torus takes work to bound, and most faces of a big body are never near what it's being cut by.
+    face_boxes: Vec<std::cell::OnceCell<Aabb>>,
     /// Chart bounds of each loop of each face. A face can have hundreds of holes, and a
     /// point outside a closed loop's bounds gets no winding from it and is near none of
-    /// its edges, so most loops can be skipped without touching their edges.
-    pub loop_boxes: Vec<Vec<(Vec2, Vec2)>>,
+    /// its edges, so most loops can be skipped without touching their edges. Worked out for a
+    /// face when a point is first looked for on it, as most faces of a big body never are.
+    loop_boxes: Vec<std::cell::OnceCell<Vec<(Vec2, Vec2)>>>,
     pub bounds: Aabb,
     /// Chart positions already worked out along edges, by face, edge and parameter.
     chart_points: std::cell::RefCell<crate::hash::HashMap<(u32, u32, u64), Vec2>>,
@@ -132,21 +138,64 @@ pub(crate) fn edge_winding(surface: &Surface, chart: &Chart, e: &Edge, reversed:
 impl<'a> Index<'a> {
     pub fn new(body: &'a Body) -> Index<'a> {
         let edge_boxes: Vec<Aabb> = body.edges.iter().map(|e| e.aabb(&body.vertices)).collect();
-        let face_boxes: Vec<Aabb> = (0..body.faces.len()).map(|f| body.face_aabb(f)).collect();
-        let mut bounds = Aabb::EMPTY;
-        for b in &face_boxes {
-            bounds.union(b);
+        let face_boxes: Vec<std::cell::OnceCell<Aabb>> = (0..body.faces.len()).map(|_| std::cell::OnceCell::new()).collect();
+        let mut quick_boxes: Vec<Aabb> = Vec::with_capacity(body.faces.len());
+        // Faces that can't bulge past their edges are bounded by them, as `face_aabb` bounds them. The rest are known
+        // to be within their sphere or torus, or, on other surfaces, are bounded now.
+        let mut bulging = Vec::new();
+        for (f, face) in body.faces.iter().enumerate() {
+            match &face.surface {
+                Surface::Sphere { frame, radius } => {
+                    let mut quick = Aabb { min: frame.origin - Vec3::splat(*radius), max: frame.origin + Vec3::splat(*radius) };
+                    for c in face.loops.iter().flatten() {
+                        quick.union(&edge_boxes[c.edge]);
+                    }
+                    quick_boxes.push(quick);
+                    bulging.push(f);
+                }
+                Surface::Torus { frame, major, minor } => {
+                    // The tube's middle circle, widened by the tube.
+                    let mut quick = crate::topo::conic_box(frame, *major, *major, 0.0, std::f64::consts::TAU).inflated(minor.abs());
+                    for c in face.loops.iter().flatten() {
+                        quick.union(&edge_boxes[c.edge]);
+                    }
+                    quick_boxes.push(quick);
+                    bulging.push(f);
+                }
+                Surface::Revolved { .. } | Surface::Free { .. } => {
+                    let tight = body.face_aabb_with(f, &edge_boxes);
+                    let _ = face_boxes[f].set(tight);
+                    quick_boxes.push(tight);
+                }
+                _ => {
+                    let tight = body.face_aabb_with(f, &edge_boxes);
+                    let _ = face_boxes[f].set(tight);
+                    quick_boxes.push(tight);
+                }
+            }
         }
-        let loop_boxes = (0..body.faces.len())
-            .map(|f| (0..body.faces[f].loops.len()).map(|l| loop_bounds(body, f, l)).collect())
-            .collect();
+        // The body's box: the union of its faces' boxes. A face whose quick box is already within the rest adds
+        // nothing to it, so its own box isn't needed for that.
+        let mut bounds = Aabb::EMPTY;
+        for (f, b) in quick_boxes.iter().enumerate() {
+            if face_boxes[f].get().is_some() {
+                bounds.union(b);
+            }
+        }
+        for &f in &bulging {
+            let quick = &quick_boxes[f];
+            if !(bounds.contains(quick.min) && bounds.contains(quick.max)) {
+                bounds.union(face_boxes[f].get_or_init(|| body.face_aabb_with(f, &edge_boxes)));
+            }
+        }
+        let loop_boxes = (0..body.faces.len()).map(|_| std::cell::OnceCell::new()).collect();
         let on_patch = body
             .faces
             .iter()
-            .zip(&face_boxes)
-            .map(|(face, b)| match &face.surface {
+            .enumerate()
+            .map(|(f, face)| match &face.surface {
                 Surface::Free { frame, patch } => {
-                    let room = 1e-6 * b.diagonal().max(1.0);
+                    let room = 1e-6 * face_boxes[f].get().map_or(1.0, |b| b.diagonal()).max(1.0);
                     let inside = |q: Vec3| {
                         let l = frame.to_local(q);
                         patch.boxes_hold(l, room)
@@ -156,20 +205,36 @@ impl<'a> Index<'a> {
                 _ => false,
             })
             .collect();
-        Index { body, edge_boxes, face_boxes, loop_boxes, bounds, chart_points: Default::default(), on_patch }
+        Index { body, edge_boxes, quick_boxes, face_boxes, loop_boxes, bounds, chart_points: Default::default(), on_patch }
+    }
+
+    /// A face's box, as `Body::face_aabb` makes it.
+    pub fn face_box(&self, f: usize) -> Aabb {
+        *self.face_boxes[f].get_or_init(|| self.body.face_aabb_with(f, &self.edge_boxes))
+    }
+
+    /// Whether a face's box overlaps this one, without bounding the face when its quick box already says not.
+    pub fn face_box_overlaps(&self, f: usize, b: &Aabb) -> bool {
+        self.quick_boxes[f].overlaps(b) && self.face_box(f).overlaps(b)
+    }
+
+    /// Whether a face's box, made larger by `room`, holds a point, without bounding the face when its quick box says not.
+    pub fn face_box_holds(&self, f: usize, p: Vec3, room: f64) -> bool {
+        self.quick_boxes[f].inflated(room).contains(p) && self.face_box(f).inflated(room).contains(p)
     }
 
     /// Locates a point relative to a face. A point farther than `tol` from the
     /// surface is outside.
     pub fn locate_on_face(&self, f: usize, p: Vec3, tol: f64) -> FaceLoc {
         let face = &self.body.faces[f];
-        if face.surface.sdf(p).abs() > tol || !self.face_boxes[f].inflated(tol).contains(p) {
+        if face.surface.sdf(p).abs() > tol || !self.face_box_holds(f, p, tol) {
             return FaceLoc::Outside;
         }
         let target = face.surface.to_chart(&face.chart, p);
         let near = 16.0 * tol;
+        let boxes = self.loop_boxes[f].get_or_init(|| (0..face.loops.len()).map(|l| loop_bounds(self.body, f, l)).collect());
         let in_box = |l: usize| {
-            let (lo, hi) = self.loop_boxes[f][l];
+            let (lo, hi) = boxes[l];
             target.x >= lo.x - near && target.x <= hi.x + near && target.y >= lo.y - near && target.y <= hi.y + near
         };
         // Outside the outer loop's bounds means outside the face.
@@ -239,7 +304,7 @@ impl<'a> Index<'a> {
 
     pub fn locate_in_body(&self, p: Vec3) -> BodyLoc {
         for f in 0..self.body.faces.len() {
-            if self.face_boxes[f].inflated(TOL * 2.0).contains(p)
+            if self.face_box_holds(f, p, TOL * 2.0)
                 && self.could_hold(f, p)
                 && self.body.faces[f].surface.sdf(p).abs() <= TOL * 1.5
                 && self.locate_on_face(f, p, TOL * 1.5) != FaceLoc::Outside
@@ -292,7 +357,7 @@ impl<'a> Index<'a> {
     pub fn ray_hits(&self, p: Vec3, d: Vec3, reach: f64) -> Option<Vec<RayHit>> {
         let mut out = Vec::new();
         for f in 0..self.body.faces.len() {
-            if !ray_hits_box(p, d, &self.face_boxes[f].inflated(TOL * 2.0)) {
+            if !ray_hits_box(p, d, &self.quick_boxes[f].inflated(TOL * 2.0)) || !ray_hits_box(p, d, &self.face_box(f).inflated(TOL * 2.0)) {
                 continue;
             }
             let face = &self.body.faces[f];
@@ -314,7 +379,7 @@ impl<'a> Index<'a> {
     fn cast_ray(&self, p: Vec3, d: Vec3, reach: f64) -> Option<bool> {
         let mut inside = false;
         for f in 0..self.body.faces.len() {
-            if !ray_hits_box(p, d, &self.face_boxes[f].inflated(TOL * 2.0)) {
+            if !ray_hits_box(p, d, &self.quick_boxes[f].inflated(TOL * 2.0)) || !ray_hits_box(p, d, &self.face_box(f).inflated(TOL * 2.0)) {
                 continue;
             }
             let surface = &self.body.faces[f].surface;

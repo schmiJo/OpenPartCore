@@ -290,7 +290,7 @@ fn same_curve(a: &Curve, b: &Curve) -> bool {
 /// is split at seams, and picking one piece of a rim means picking the whole rim.
 fn build_runs(body: &Body, selected: &[usize]) -> Result<Vec<Run>> {
     let uses = body.edge_uses();
-    let size = body.aabb().diagonal();
+    let size = body.rough_aabb().diagonal();
     let faces_of = |e: usize| -> Result<[usize; 2]> {
         match uses[e].as_slice() {
             [a, b] => Ok([a.0, b.0]),

@@ -288,6 +288,19 @@ pub struct Session {
 }
 
 /// What a summary says of one body.
+/// A body's volume, its check, and the points of a mesh of it, worked out once.
+fn measure(body: &Body) -> Facts {
+    let props = mass_properties(body);
+    let points = match tessellate(body, &TessParams::for_size(body.aabb().diagonal())) {
+        Ok(m) => m.positions,
+        Err(_) => {
+            let b = body.aabb();
+            (0..8).map(|k| coreshape::v3([b.min.x, b.max.x][k & 1], [b.min.y, b.max.y][(k >> 1) & 1], [b.min.z, b.max.z][k >> 2])).collect()
+        }
+    };
+    Facts { props, check: validate(body), points }
+}
+
 struct Facts {
     props: coreshape::MassProps,
     check: Result<coreshape::Report, Vec<String>>,
@@ -627,17 +640,48 @@ impl Session {
         if let Some((_, f)) = self.facts.borrow().get(&key) {
             return f.clone();
         }
-        let props = mass_properties(body);
-        let points = match tessellate(body, &TessParams::for_size(body.aabb().diagonal())) {
-            Ok(m) => m.positions,
-            Err(_) => {
-                let b = body.aabb();
-                (0..8).map(|k| coreshape::v3([b.min.x, b.max.x][k & 1], [b.min.y, b.max.y][(k >> 1) & 1], [b.min.z, b.max.z][k >> 2])).collect()
-            }
-        };
-        let facts = Arc::new(Facts { props, check: validate(body), points });
+        let facts = Arc::new(measure(body));
         self.facts.borrow_mut().insert(key, (body.clone(), facts.clone()));
         facts
+    }
+
+    /// Measures every shape among these bodies that isn't measured yet, on every core at once, saying how far it's got.
+    fn measure_new(&self, bodies: &[NamedBody]) {
+        let mut todo: Vec<Arc<Body>> = Vec::new();
+        {
+            let known = self.facts.borrow();
+            let mut seen = std::collections::HashSet::new();
+            for b in bodies {
+                let shape = b.copy_of.as_ref().map_or(&b.body, |c| &c.body);
+                let key = Arc::as_ptr(shape) as usize;
+                if !known.contains_key(&key) && seen.insert(key) {
+                    todo.push(shape.clone());
+                }
+            }
+        }
+        // A body with many traced edges or free-form faces takes long enough that it's measured on its own, sharing its
+        // faces among the cores, before the rest are shared out a body to a core.
+        let heavy = |b: &Body| {
+            let traced = b.edges.iter().filter(|e| matches!(e.curve, Curve::Sampled(_))).count();
+            let free = b.faces.iter().filter(|f| matches!(f.surface, Surface::Free { .. })).count();
+            traced >= 32 || free >= 32 || b.faces.len() >= 500
+        };
+        let (big, small): (Vec<Arc<Body>>, Vec<Arc<Body>>) = todo.into_iter().partition(|b| heavy(b));
+        let n = big.len() + small.len();
+        let mut done = 0;
+        let mut made: Vec<(Arc<Body>, Facts)> = Vec::with_capacity(n);
+        for b in big {
+            let facts = measure(&b);
+            made.push((b, facts));
+            done += 1;
+            coreshape::progress::report("measuring", done, n);
+        }
+        let rest = coreshape::par::map(&small, |b| measure(b), |k| coreshape::progress::report("measuring", done + k, n));
+        made.extend(small.into_iter().zip(rest));
+        let mut known = self.facts.borrow_mut();
+        for (body, facts) in made {
+            known.insert(Arc::as_ptr(&body) as usize, (body, Arc::new(facts)));
+        }
     }
 
     /// One of the bodies' facts and bounds. A copy of another body is measured as that one, once for all its copies, and
@@ -781,17 +825,8 @@ impl Session {
                 // Body by body, as the outcome's body is them all side by side, and one that hasn't changed needn't be
                 // measured again. One body is the whole.
                 // Hundreds of parts can take a while the first time, so it says how far it's got.
-                let n = o.bodies.len();
-                let measured: Vec<(Arc<Facts>, coreshape::Aabb)> = o
-                    .bodies
-                    .iter()
-                    .enumerate()
-                    .map(|(i, b)| {
-                        coreshape::progress::report("measuring", i, n);
-                        self.measured(b)
-                    })
-                    .collect();
-                coreshape::progress::report("measuring", n, n);
+                self.measure_new(&o.bodies);
+                let measured: Vec<(Arc<Facts>, coreshape::Aabb)> = o.bodies.iter().map(|b| self.measured(b)).collect();
                 self.keep_facts_of(&o.bodies);
                 let (mut volume, mut area) = (0.0, 0.0);
                 let mut bounds: Option<coreshape::Aabb> = None;

@@ -107,8 +107,19 @@ impl Edge {
         let mut b = Aabb::EMPTY;
         b.add(vertices[self.v0]);
         b.add(vertices[self.v1]);
-        if let Curve::Line { .. } = self.curve {
-            return b;
+        match &self.curve {
+            Curve::Line { .. } => return b,
+            // A circle or an ellipse reaches its extremes along each axis where it can be worked out, so its box is
+            // exact, which matters as boxes are made for every edge whenever a body is indexed.
+            Curve::Circle { frame, radius } => {
+                b.union(&conic_box(frame, *radius, *radius, self.t0, self.t1));
+                return b;
+            }
+            Curve::Ellipse { frame, major, minor } => {
+                b.union(&conic_box(frame, *major, *minor, self.t0, self.t1));
+                return b;
+            }
+            _ => {}
         }
         let n = 32;
         let dt = (self.t1 - self.t0) / n as f64;
@@ -116,6 +127,39 @@ impl Edge {
             b.add(self.curve.eval(self.t0 + dt * i as f64));
         }
         b.inflated(self.curve.speed_bound() * dt / 2.0)
+    }
+}
+
+/// The box of `origin + x a cos t + y b sin t` for `t` from `t0` to `t1`: its ends, and along each axis, wherever
+/// between them it turns, where `a cos t + b sin t` along that axis is at its most or least. A little room for
+/// rounding.
+pub(crate) fn conic_box(frame: &Frame, a: f64, b: f64, t0: f64, t1: f64) -> Aabb {
+    let mut lo = [0.0f64; 3];
+    let mut hi = [0.0f64; 3];
+    let (x, y) = ([frame.x.x, frame.x.y, frame.x.z], [frame.y.x, frame.y.y, frame.y.z]);
+    for i in 0..3 {
+        let (p, q) = (a * x[i], b * y[i]);
+        let f = |t: f64| p * t.cos() + q * t.sin();
+        let (mut low, mut high) = (f(t0).min(f(t1)), f(t0).max(f(t1)));
+        // `p cos t + q sin t` is at its most at atan2(q, p), and its least half a turn on.
+        let peak = q.atan2(p);
+        let amplitude = p.hypot(q);
+        let first = ((t0 - peak) / std::f64::consts::PI).ceil() as i64;
+        let last = ((t1 - peak) / std::f64::consts::PI).floor() as i64;
+        for k in first..=last.min(first + 4) {
+            if k.rem_euclid(2) == 0 {
+                high = high.max(amplitude);
+            } else {
+                low = low.min(-amplitude);
+            }
+        }
+        lo[i] = low;
+        hi[i] = high;
+    }
+    let room = 1e-12 * (a.abs() + b.abs()) + 1e-12 * frame.origin.norm();
+    Aabb {
+        min: frame.origin + Vec3 { x: lo[0], y: lo[1], z: lo[2] } - Vec3::splat(room),
+        max: frame.origin + Vec3 { x: hi[0], y: hi[1], z: hi[2] } + Vec3::splat(room),
     }
 }
 
@@ -275,6 +319,10 @@ impl Body {
         } else {
             self
         };
+        // One closed shell faces out, as there's nothing round it for it to be a hollow in.
+        if body.shells.len() == 1 {
+            return 1;
+        }
         (0..body.shells.len()).filter(|&s| body.sheet || crate::mass::shell_facing(body, s) >= 0.0).count()
     }
 
@@ -536,11 +584,20 @@ impl Body {
 
     /// Conservative bounding box of one face.
     pub fn face_aabb(&self, f: usize) -> Aabb {
+        self.face_aabb_from(f, |e| self.edges[e].aabb(&self.vertices))
+    }
+
+    /// `face_aabb`, from boxes of every edge already made, as an index makes them once for all the faces.
+    pub fn face_aabb_with(&self, f: usize, edge_boxes: &[Aabb]) -> Aabb {
+        self.face_aabb_from(f, |e| edge_boxes[e])
+    }
+
+    fn face_aabb_from(&self, f: usize, edge_box: impl Fn(usize) -> Aabb) -> Aabb {
         let face = &self.faces[f];
         let mut b = Aabb::EMPTY;
         for lp in &face.loops {
             for c in lp {
-                b.union(&self.edges[c.edge].aabb(&self.vertices));
+                b.union(&edge_box(c.edge));
             }
         }
         // A ruled surface reaches its extremes on the boundary. Spheres and tori
@@ -599,5 +656,37 @@ impl Body {
             b.union(&self.face_aabb(f));
         }
         b
+    }
+
+    /// A box round the body that's quick to make and never smaller than `aabb`, for its size, as tolerances are scaled
+    /// by: its edges' boxes, and for a face on a sphere or a torus, which can bulge past its edges, the whole sphere's
+    /// or torus's. Other faces that can bulge are bounded as `aabb` bounds them.
+    pub fn rough_aabb(&self) -> Aabb {
+        let mut b = Aabb::EMPTY;
+        for e in &self.edges {
+            b.union(&e.aabb(&self.vertices));
+        }
+        for p in &self.vertices {
+            b.add(*p);
+        }
+        for (f, face) in self.faces.iter().enumerate() {
+            match &face.surface {
+                Surface::Sphere { frame, radius } => b.union(&Aabb { min: frame.origin - Vec3::splat(*radius), max: frame.origin + Vec3::splat(*radius) }),
+                Surface::Torus { frame, major, minor } => {
+                    // Its tube's middle circle, widened by the tube.
+                    let mut ring = conic_box(frame, *major, *major, 0.0, std::f64::consts::TAU);
+                    ring = ring.inflated(minor.abs());
+                    b.union(&ring);
+                }
+                Surface::Revolved { .. } | Surface::Free { .. } => b.union(&self.face_aabb(f)),
+                _ => {}
+            }
+        }
+        b
+    }
+
+    /// The diagonal of `rough_aabb`, at least 1: a size for scaling tolerances by.
+    pub fn rough_size(&self) -> f64 {
+        self.rough_aabb().diagonal().max(1.0)
     }
 }

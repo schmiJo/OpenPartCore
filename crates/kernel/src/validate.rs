@@ -11,6 +11,8 @@
 //! topology holds for it in its open form, and the geometry is the same.
 
 use crate::math::*;
+use crate::curve::Curve;
+use crate::surface::Surface;
 use crate::topo::{Body, Coedge, Face};
 use crate::hash::HashMap;
 
@@ -365,10 +367,12 @@ fn check_windings(body: &Body, errors: &mut Vec<String>) {
             .loops
             .iter()
             .map(|lp| {
-                let mut pts = Vec::new();
+                let mut pts = Vec::with_capacity(16 * lp.len());
                 for &c in lp {
-                    for k in 0..16 {
-                        pts.push(face.surface.to_chart(&face.chart, body.coedge_point(c, k as f64 / 16.0)));
+                    // A plane's chart is flat, so a line on it is a line there too, and its start is all it adds.
+                    let samples = if matches!(face.surface, Surface::Plane(_)) && matches!(body.edges[c.edge].curve, Curve::Line { .. }) { 1 } else { 16 };
+                    for k in 0..samples {
+                        pts.push(face.surface.to_chart(&face.chart, body.coedge_point(c, k as f64 / samples as f64)));
                     }
                 }
                 pts
