@@ -21,7 +21,7 @@ pub(super) const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("connector_add", "Adds a mate connector to an instance. Found from a face or an edge, it follows when the part changes. Its z is the primary axis: out of a flat face, or along an axis.", r#"{"instance": {"description": "An instance's id, or a list of ids to reach into a sub-assembly."}, "on": {"type": "object", "description": "From connector_candidates, or {\"frame\": {origin, z, x}} in the part's coordinates."}, "offset": {"type": "array"}, "rotation": {"type": "number", "description": "Degrees about its z."}, "flip": {"type": "boolean"}, "quarter_turns": {"type": "integer"}}"#, r#"["instance", "on"]"#),
     ("connector_edit", "Changes a mate connector, then solves.", r#"{"id": {"type": "integer"}, "on": {"type": "object"}, "offset": {"type": "array"}, "rotation": {"type": "number"}, "flip": {"type": "boolean"}, "quarter_turns": {"type": "integer"}}"#, r#"["id"]"#),
     ("connector_delete", "Deletes a mate connector no mate is using.", r#"{"id": {"type": "integer"}}"#, r#"["id"]"#),
-    ("mate_add", "Mates two connectors, and solves, with the first end doing the moving if there's a choice. Their z axes end up pointing the same way, so two faces, whose z axes both point out, need flip to lie against each other. An end can be a connector's id, or {instance, on} to make one for this mate alone. fastened leaves nothing free, revolute a turn about z, slider a slide along z, cylindrical both, pin_slot a turn and a slide along x, planar a turn and slides in x and y, ball any turn, parallel a turn about z and any slide.", r#"{"type": {"type": "string", "enum": ["fastened", "revolute", "slider", "cylindrical", "pin_slot", "planar", "ball", "parallel"]}, "a": {}, "b": {}, "name": {"type": "string"}, "offset": {"type": "array", "description": "From a to b, along a's axes."}, "rotation": {"type": "number", "description": "Degrees about a's z."}, "flip": {"type": "boolean"}, "quarter_turns": {"type": "integer"}, "limits": {"type": "array", "description": "Each {dof, min, max}. dof is x, y, z or angle. Millimetres, and degrees."}}"#, r#"["type", "a", "b"]"#),
+    ("mate_add", "Mates two connectors, and solves, with the first end doing the moving if there's a choice. Their z axes end up pointing the same way, so two faces, whose z axes both point out, need flip to lie against each other. An end can be a connector's id, or {instance, on} to make one for this mate alone. fastened leaves nothing free, revolute a turn about z, slider a slide along z, cylindrical both, pin_slot a turn and a slide along x, planar a turn and slides in x and y, ball any turn, parallel a turn about z and any slide. tangent keeps two faces touching, each connector on one: flat, cylindrical or spherical, the other part outside a flat face and round faces outside each other, or with flip the other side, or one inside the other. width keeps b's origin on a's xy plane, which with each end {\"between\": [face, face]}, midway between two parallel faces, centers a tab in a slot.", r#"{"type": {"type": "string", "enum": ["fastened", "revolute", "slider", "cylindrical", "pin_slot", "planar", "ball", "parallel", "tangent", "width"]}, "a": {}, "b": {}, "name": {"type": "string"}, "offset": {"type": "array", "description": "From a to b, along a's axes."}, "rotation": {"type": "number", "description": "Degrees about a's z."}, "flip": {"type": "boolean"}, "quarter_turns": {"type": "integer"}, "limits": {"type": "array", "description": "Each {dof, min, max}. dof is x, y, z or angle. Millimetres, and degrees."}}"#, r#"["type", "a", "b"]"#),
     ("mate_edit", "Changes a mate, then solves.", r#"{"id": {"type": "integer"}, "type": {"type": "string"}, "name": {"type": "string"}, "offset": {"type": "array"}, "rotation": {"type": "number"}, "flip": {"type": "boolean"}, "quarter_turns": {"type": "integer"}, "limits": {"type": "array"}, "suppressed": {"type": "boolean"}}"#, r#"["id"]"#),
     ("mate_delete", "Deletes a mate, with any relations on it and the connectors made only for it. Then solves.", r#"{"id": {"type": "integer"}}"#, r#"["id"]"#),
     ("mate_set_value", "Takes a mate to a value, a little at a time so that a mechanism stays on its branch, stopping where other mates stop it. Nothing holds it there afterward.", r#"{"id": {"type": "integer"}, "dof": {"type": "string", "enum": ["x", "y", "z", "angle"]}, "value": {"type": "number", "description": "Millimetres, or degrees with their turns."}}"#, r#"["id", "dof", "value"]"#),
@@ -33,6 +33,13 @@ pub(super) const TOOLS: &[(&str, &str, &str, &str)] = &[
     ("assembly_drag", "Moves an instance toward where it's wanted, as far as its mates let it. Either a point on it, in its part's coordinates, to a place in the assembly, or its whole pose.", r#"{"instance": {"description": "An instance's id, or a list of ids to reach into a sub-assembly."}, "point": {"type": "array"}, "to": {"type": "array"}, "pose": {"type": "object"}}"#, r#"["instance"]"#),
     ("interference_check", "Which parts in the assembly are in the same place as each other, with the volume they share, and any pair it couldn't tell about. Parts that only touch don't count.", r#"{"tab": {"type": "integer"}}"#, "[]"),
     ("bom", "A bill of materials: each part, how many times it's used however deep, and its volume and area.", r#"{"tab": {"type": "integer"}}"#, "[]"),
+    ("pattern_add", "Copies instances in a row or round an axis, as Onshape's assembly pattern does: linear, spacing apart along the axis, or circular, degrees apart round it, count in all with the instances themselves the first. The axis is {\"point\": [x, y, z], \"direction\": [x, y, z]} in the assembly, or {\"connector\": id}, whose z axis follows its part. The copies follow the instances wherever they're mated, and can't be mated themselves. Then solves.", r#"{"of": {"type": "array", "description": "Top-level instance ids."}, "type": {"type": "string", "enum": ["linear", "circular"]}, "axis": {"type": "object"}, "spacing": {"type": "number"}, "degrees": {"type": "number"}, "count": {"type": "integer"}}"#, r#"["of", "type", "axis", "count"]"#),
+    ("replicate_add", "Puts a copy of instances at each more place like the connector they're mated at, as Onshape's replicate puts a bolt in every hole of one size. By default the places are every other face of the connector's instance like the connector's face: a cylinder of the same radius and the same way, a ball of the same radius, or a flat face facing the same way. Or give them in \"at\", each an \"on\" as connector_add takes. The copies follow that part. Then solves.", r#"{"of": {"type": "array", "description": "Top-level instance ids."}, "connector": {"type": "integer"}, "at": {"type": "array"}}"#, r#"["of", "connector"]"#),
+    ("explode_add", "Adds an exploded view: steps, one after another, each moving some instances by \"shift\" [x, y, z] in the assembly, and turning them by {\"point\", \"axis\", \"degrees\"}. It only moves what's shown: render with \"explode\" to see it, or assembly_explode for where everything goes.", r#"{"name": {"type": "string"}, "steps": {"type": "array", "description": "Each {instances: [ids or paths], shift: [x, y, z], turn: {point, axis, degrees}}."}}"#, r#"["steps"]"#),
+    ("assembly_explode", "Where every part is in an exploded view, amount of the way through its steps, from 0 to 1, 1 by default. The assembly itself stays where it is.", r#"{"id": {"type": "integer"}, "amount": {"type": "number"}}"#, r#"["id"]"#),
+    ("position_save", "Keeps every top-level mate's values as they are now, as a named position to go back to.", r#"{"name": {"type": "string"}}"#, "[]"),
+    ("position_go", "Takes the mates back to a named position, all together and a little at a time, stopping where other mates stop them.", r#"{"id": {"type": "integer"}}"#, r#"["id"]"#),
+    ("assembly_item_delete", "Deletes a pattern, replicate, exploded view or named position. Then solves.", r#"{"id": {"type": "integer"}}"#, r#"["id"]"#),
     ("assembly_import_step", "Brings in a STEP file as a new Part Studio of its distinct parts and a new assembly of their uses, each fixed where the file has it, and selects the assembly.", r#"{"path": {"type": "string"}, "text": {"type": "string"}, "name": {"type": "string"}}"#, "[]"),
 ];
 
@@ -116,6 +123,26 @@ fn read_limits(args: &Value) -> R<Option<Vec<MateLimit>>> {
         out.push(MateLimit { dof, min, max });
     }
     Ok(Some(out))
+}
+
+fn ids_of(args: &Value, key: &str) -> R<Vec<u32>> {
+    let list = args.get(key).and_then(Value::as_array).ok_or_else(|| format!("\"{key}\" must be a list of instance ids"))?;
+    list.iter()
+        .map(|x| x.as_f64().filter(|n| n.fract() == 0.0 && *n >= 0.0 && *n < 4e9).map(|n| n as u32).ok_or_else(|| format!("\"{key}\" must be a list of instance ids")))
+        .collect()
+}
+
+fn number_of(args: &Value, key: &str) -> R<f64> {
+    args.get(key).and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| format!("\"{key}\" must be a number"))
+}
+
+fn read_pattern_axis(v: &Value) -> R<PatternAxis> {
+    if v.get("connector").is_some() {
+        return Ok(PatternAxis::Connector(number_id(v, "connector")?));
+    }
+    let point = v.get("point").map_or(Ok(Vec3::ZERO), |p| read_vec3(p).map_err(|_| "an axis's \"point\" must be three numbers".to_string()))?;
+    let direction = read_vec3(v.get("direction").ok_or("an axis needs a \"direction\", or a \"connector\"")?).map_err(|_| "an axis's \"direction\" must be three numbers".to_string())?;
+    Ok(PatternAxis::Given { point, direction })
 }
 
 fn set_flag(args: &Value, key: &str, slot: &mut bool) -> R<()> {
@@ -495,6 +522,80 @@ impl Session {
             }
             "assembly_solve" => {
                 let tab = self.tab_arg(args)?;
+                self.solved_answer(tab, &[], None)
+            }
+            "pattern_add" => {
+                let (tab, a) = self.asm(args)?;
+                let of = ids_of(args, "of")?;
+                let axis = read_pattern_axis(args.get("axis").ok_or("\"axis\" is needed: {\"point\", \"direction\"} or {\"connector\": id}")?)?;
+                let count = number_id(args, "count")?;
+                let kind = match string_arg(args, "type")? {
+                    "linear" => PatternKind::Linear { spacing: number_of(args, "spacing")? },
+                    "circular" => PatternKind::Circular { degrees: number_of(args, "degrees")? },
+                    other => return Err(format!("unknown pattern \"{other}\"; expected linear or circular")),
+                };
+                let id = a.add_pattern(of, axis, kind, count).map_err(e)?;
+                self.solved_answer(tab, &[], Some(vec![("id", Value::Num(id as f64))]))
+            }
+            "replicate_add" => {
+                let (tab, a) = self.asm(args)?;
+                let of = ids_of(args, "of")?;
+                let connector = number_id(args, "connector")?;
+                let at = match args.get("at") {
+                    None => Vec::new(),
+                    Some(list) => list.as_array().ok_or("\"at\" must be a list of places")?.iter().map(Anchor::from_json).collect::<Result<Vec<_>, _>>().map_err(e)?,
+                };
+                let id = a.add_replicate(of, connector, at).map_err(e)?;
+                self.solved_answer(tab, &[], Some(vec![("id", Value::Num(id as f64))]))
+            }
+            "explode_add" => {
+                let (tab, a) = self.asm(args)?;
+                let name = args.get("name").map(|n| n.as_str().map(str::to_string).ok_or("\"name\" must be text")).transpose()?;
+                let list = args.get("steps").and_then(Value::as_array).ok_or("\"steps\" must be a list")?;
+                let mut steps = Vec::with_capacity(list.len());
+                for step in list {
+                    let instances = step.get("instances").and_then(Value::as_array).ok_or("each step needs \"instances\"")?.iter().map(|p| path_of(Some(p), "instances")).collect::<R<Vec<_>>>()?;
+                    let shift = step.get("shift").map_or(Ok(Vec3::ZERO), |v| read_vec3(v).map_err(|_| "\"shift\" must be three numbers".to_string()))?;
+                    let turn = match step.get("turn") {
+                        None => None,
+                        Some(t) => {
+                            let point = t.get("point").map_or(Ok(Vec3::ZERO), |v| read_vec3(v).map_err(|_| "a turn's \"point\" must be three numbers".to_string()))?;
+                            let axis = read_vec3(t.get("axis").ok_or("a turn needs an \"axis\"")?).map_err(|_| "a turn's \"axis\" must be three numbers".to_string())?;
+                            Some((point, axis, number_of(t, "degrees")?))
+                        }
+                    };
+                    steps.push(ExplodeStep { instances, shift, turn });
+                }
+                let id = a.add_explode(name, steps).map_err(e)?;
+                Ok(vec![text(Value::obj(vec![("id", Value::Num(id as f64)), ("tab", Value::Num(tab.0 as f64))]).to_pretty())])
+            }
+            "assembly_explode" => {
+                let tab = self.tab_arg(args)?;
+                let id = number_id(args, "id")?;
+                let amount = match args.get("amount") {
+                    None => 1.0,
+                    Some(v) => v.as_f64().filter(|x| (0.0..=1.0).contains(x)).ok_or("\"amount\" must be from 0 to 1")?,
+                };
+                let solved = self.with_project(|p| p.exploded(tab, id, amount)).map_err(e)?;
+                let state = self.state(tab, &solved);
+                Ok(vec![text(state.to_pretty())])
+            }
+            "position_save" => {
+                let tab = self.tab_arg(args)?;
+                let name = args.get("name").map(|n| n.as_str().map(str::to_string).ok_or("\"name\" must be text")).transpose()?;
+                let id = self.with_project(|p| p.save_position(tab, name)).map_err(e)?;
+                self.solved_answer(tab, &[], Some(vec![("id", Value::Num(id as f64))]))
+            }
+            "position_go" => {
+                let tab = self.tab_arg(args)?;
+                let id = number_id(args, "id")?;
+                let solved = self.with_project(|p| p.go_to_position(tab, id)).map_err(e)?;
+                let state = self.state(tab, &solved);
+                Ok(vec![text(state.to_pretty())])
+            }
+            "assembly_item_delete" => {
+                let (tab, a) = self.asm(args)?;
+                a.delete_item(number_id(args, "id")?).map_err(e)?;
                 self.solved_answer(tab, &[], None)
             }
             "assembly_drag" => {

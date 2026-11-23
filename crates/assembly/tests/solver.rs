@@ -6,7 +6,7 @@ use coreshape_assembly::solver::*;
 use std::f64::consts::FRAC_PI_2;
 
 fn joint(a: usize, b: usize, kind: MateKind) -> Joint {
-    Joint { a, b, on_a: Frame::WORLD, on_b: Frame::WORLD, kind, limits: Vec::new(), turned: 0.0 }
+    Joint { a, b, on_a: Frame::WORLD, on_b: Frame::WORLD, kind, limits: Vec::new(), turned: 0.0, contact: None }
 }
 
 /// Something fixed at the origin, and something free, a long way off and turned.
@@ -15,7 +15,8 @@ fn pair(kind: MateKind) -> Problem {
     Problem { poses: vec![Frame::WORLD, away], fixed: vec![true, false], joints: vec![joint(0, 1, kind)], ..Problem::default() }
 }
 
-const ALL: [MateKind; 8] = [MateKind::Fastened, MateKind::Revolute, MateKind::Slider, MateKind::Cylindrical, MateKind::PinSlot, MateKind::Planar, MateKind::Ball, MateKind::Parallel];
+// A tangent mate takes its shapes from faces, so it's tested on parts, in assembly_more.rs.
+const ALL: [MateKind; 9] = [MateKind::Fastened, MateKind::Revolute, MateKind::Slider, MateKind::Cylindrical, MateKind::PinSlot, MateKind::Planar, MateKind::Ball, MateKind::Parallel, MateKind::Width];
 
 #[test]
 fn each_mate_leaves_the_freedom_onshape_says_it_does() {
@@ -55,6 +56,8 @@ fn each_mate_brings_together_what_it_should() {
             MateKind::Planar => assert!(close(f.origin.z, 0.0) && flat(&f), "{f:?}"),
             MateKind::Ball => assert!(f.origin.norm() < tol, "{f:?}"),
             MateKind::Parallel => assert!(flat(&f), "{f:?}"),
+            MateKind::Width => assert!(close(f.origin.z, 0.0), "{f:?}"),
+            MateKind::Tangent => {}
         }
     }
 }

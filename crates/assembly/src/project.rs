@@ -1,7 +1,7 @@
 //! A project: tabs of Part Studios and assemblies, as an Onshape document has. This is where an assembly meets its parts.
 
-use crate::solver::{self, Coupling, Dof, Drive, Goal, Joint, Limit, Problem, Report};
-use crate::{Assembly, Connector, Mate, RelationKind, Source};
+use crate::solver::{self, Contact, Coupling, Dof, Drive, Goal, Joint, Limit, MateKind, Problem, Report, Touching};
+use crate::{Anchor, Assembly, Connector, Mate, PatternAxis, PatternKind, Position, RelationKind, Source};
 use coreshape::error::{Error, Result};
 use coreshape::math::*;
 use coreshape::topo::Body;
@@ -139,6 +139,71 @@ struct Flat {
     problems: Vec<String>,
     /// The tabs of locked sub-assemblies, solved once each.
     solved_tabs: Vec<TabId>,
+    /// Copies from patterns and replicates, placed once the rest is solved.
+    copies: Vec<CopyPlan>,
+}
+
+/// A copy of a part from a pattern or a replicate: the part, and how it's placed from what it copies. Its place is
+/// `local`, or with `thing` the move `local` makes in that thing's own coordinates, done to where `seed` is.
+#[derive(Clone)]
+struct CopyPlan {
+    template: Placed,
+    seed: usize,
+    thing: Option<usize>,
+    local: Frame,
+}
+
+/// Where each copy goes, given where everything else is.
+fn place_copies(copies: &[CopyPlan], poses: &[Frame]) -> Vec<Placed> {
+    copies
+        .iter()
+        .map(|c| {
+            let step = match c.thing {
+                None => c.local,
+                Some(j) => poses[j].compose(&c.local).compose(&poses[j].inverse()),
+            };
+            Placed { at: step.compose(&poses[c.seed]), ..c.template.clone() }
+        })
+        .collect()
+}
+
+/// The faces of a part like the one an anchor is on, as replicate looks for them: a cylinder of the same radius with its
+/// axis the same way, a ball of the same radius, or a flat face facing the same way. Each once, by its key, with the
+/// anchor's own place on it, and not the anchor's own face.
+fn like_faces(body: &Body, anchor: &Anchor) -> Result<Vec<Anchor>> {
+    let Anchor::Face { key, point } = anchor else {
+        return Err(Error::InvalidInput("a replicate that finds its own places needs its connector on a face".into()));
+    };
+    let own = coreshape_document::find_one(body, key)?[0];
+    let keys = coreshape_document::face_keys(body);
+    let same = |a: f64, b: f64| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0);
+    let normal = |f: usize, s: &coreshape::Surface| match s {
+        coreshape::Surface::Plane(frame) => {
+            if body.faces[f].flipped {
+                -frame.z
+            } else {
+                frame.z
+            }
+        }
+        _ => Vec3::ZERO,
+    };
+    let base = &body.faces[own].surface;
+    let mut out: Vec<Anchor> = Vec::new();
+    let mut seen = vec![keys[own].text()];
+    for (f, face) in body.faces.iter().enumerate() {
+        let alike = match (base, &face.surface) {
+            (coreshape::Surface::Cylinder { frame: a, radius: ra }, coreshape::Surface::Cylinder { frame: b, radius: rb }) => same(*ra, *rb) && a.z.cross(b.z).norm() < 1e-9,
+            (coreshape::Surface::Sphere { radius: ra, .. }, coreshape::Surface::Sphere { radius: rb, .. }) => same(*ra, *rb),
+            (coreshape::Surface::Plane(_), coreshape::Surface::Plane(_)) => normal(own, base).dot(normal(f, &face.surface)) > 1.0 - 1e-9,
+            _ => false,
+        };
+        let text = keys[f].text();
+        if alike && !seen.contains(&text) {
+            seen.push(text);
+            out.push(Anchor::Face { key: keys[f].clone(), point: *point });
+        }
+    }
+    Ok(out)
 }
 
 /// Where a walk down the instances has got to.
@@ -248,6 +313,7 @@ impl Project {
         let mut outcomes = BTreeMap::new();
         let walk = Walk { top: &top, prefix: Vec::new(), parent: Frame::WORLD, top_at: Frame::WORLD, locked: None };
         self.flatten_into(&top, &walk, &mut flat, &mut outcomes)?;
+        plan_copies(&top, &mut flat);
         Ok(flat)
     }
 
@@ -373,6 +439,19 @@ impl Project {
                 }
             };
             let mut joint = mate_joint(mate, a, b, fa, fb);
+            if mate.kind == MateKind::Tangent {
+                match tangent_joint(mate, a, b, ca, cb, flat) {
+                    Ok(j) => joint = j,
+                    Err(why) => {
+                        if is_top {
+                            flat.failing.push((mate.id, why.to_string()));
+                        } else {
+                            flat.problems.push(format!("mate \"{}\" in a sub-assembly: {why}", mate.name));
+                        }
+                        continue;
+                    }
+                }
+            }
             // How far a sub-assembly's mate has turned here is kept here, and its own tab's says nothing about that.
             if let Some(turned) = walk.top.moved_turns.get(&(prefix.to_vec(), mate.id)) {
                 joint.turned = *turned;
@@ -397,6 +476,13 @@ impl Project {
             flat.couplings.push(Coupling { a, b, ratio, offset: relation.offset });
             flat.coupling_relations.push(relation.id);
         }
+    }
+
+    /// Adds what a solve found's copies to it, once the rest is where it goes.
+    fn with_copies(flat: &mut Flat) {
+        let poses: Vec<Frame> = flat.placed.iter().map(|p| p.at).collect();
+        let copies = place_copies(&flat.copies, &poses);
+        flat.placed.extend(copies);
     }
 
     fn problem_of(flat: &Flat) -> Problem {
@@ -456,6 +542,7 @@ impl Project {
 
     fn finish(&mut self, id: TabId, mut flat: Flat, problem: &Problem, report: Report, remaining: Option<f64>) -> Result<Solved> {
         self.write_back(id, &mut flat, problem)?;
+        Self::with_copies(&mut flat);
         let mut failing = std::mem::take(&mut flat.failing);
         for j in &report.failing {
             let (mate, prefix) = &flat.joint_mates[*j];
@@ -487,7 +574,122 @@ impl Project {
 
     /// The parts of an assembly and where they are now, without solving anything.
     pub fn placed(&mut self, id: TabId) -> Result<Vec<Placed>> {
-        Ok(self.flatten(id)?.placed)
+        let mut flat = self.flatten(id)?;
+        Self::with_copies(&mut flat);
+        Ok(flat.placed)
+    }
+
+    /// The assembly solved, and shown exploded: each of the view's steps moving what it moves, in turn, and `amount`, from
+    /// 0 to 1, how far through them. Only what's shown moves: the assembly keeps its places.
+    pub fn exploded(&mut self, id: TabId, view: u32, amount: f64) -> Result<Solved> {
+        let x = self.assembly(id)?.explodes.iter().find(|x| x.id == view).cloned().ok_or_else(|| Error::InvalidInput(format!("there's no exploded view {view}")))?;
+        if !amount.is_finite() {
+            return Err(Error::InvalidInput("how far to explode is a number from 0 to 1".into()));
+        }
+        let mut solved = self.solve(id)?;
+        let n = x.steps.len() as f64;
+        for (k, step) in x.steps.iter().enumerate() {
+            let share = (amount.clamp(0.0, 1.0) * n - k as f64).clamp(0.0, 1.0);
+            if share == 0.0 {
+                continue;
+            }
+            let mut moved = Frame::translation(step.shift * share);
+            if let Some((point, axis, degrees)) = step.turn {
+                moved = moved.compose(&Frame::rotation(point, axis.normalized(), (degrees * share).to_radians()));
+            }
+            for p in &mut solved.placed {
+                if step.instances.iter().any(|path| p.path.starts_with(path)) {
+                    p.at = moved.compose(&p.at);
+                }
+            }
+        }
+        Ok(solved)
+    }
+
+    /// Keeps where every top-level mate is now as a named position, to go back to.
+    pub fn save_position(&mut self, id: TabId, name: Option<String>) -> Result<u32> {
+        let solved = self.solve(id)?;
+        let a = self.assembly_mut(id)?;
+        let pid = a.fresh_id();
+        let n = a.positions.len() + 1;
+        a.positions.push(Position { id: pid, name: name.unwrap_or_else(|| format!("Position {n}")), values: solved.values.clone() });
+        Ok(pid)
+    }
+
+    /// Takes the mates back to a named position, all together, a little at a time so that a mechanism stays on its branch.
+    pub fn go_to_position(&mut self, id: TabId, position: u32) -> Result<Solved> {
+        let p = self.assembly(id)?.positions.iter().find(|p| p.id == position).cloned().ok_or_else(|| Error::InvalidInput(format!("there's no named position {position}")))?;
+        self.set_mate_values(id, &p.values)
+    }
+
+    /// Takes several mates' motions to values together, as `set_mate_value` takes one: in steps, stopping where the other
+    /// mates stop them. A value for a mate that isn't working here is left out, and said.
+    pub fn set_mate_values(&mut self, id: TabId, wanted: &[(u32, Dof, f64)]) -> Result<Solved> {
+        let mut flat = self.flatten(id)?;
+        let mut targets: Vec<(usize, Dof, f64)> = Vec::new();
+        for &(mate, dof, value) in wanted {
+            let joint = flat.joint_mates.iter().position(|(m, p)| *m == mate && p.is_empty());
+            match joint {
+                Some(j) if flat.joints[j].kind.values().contains(&dof) => targets.push((j, dof, if dof == Dof::Angle { value.to_radians() } else { value })),
+                _ => flat.problems.push(format!("mate {mate} isn't here to take along {} any more", crate::dof_name(dof))),
+            }
+        }
+        let mut problem = Self::problem_of(&flat);
+        let first = solver::solve(&mut problem);
+        if targets.iter().any(|t| first.failing.contains(&t.0)) || targets.is_empty() {
+            return self.finish(id, flat, &problem, first, None);
+        }
+        let starts: Vec<f64> = targets.iter().map(|t| solver::joint_value(&problem, t.0, t.1)).collect();
+        let size = solver::problem_size(&problem);
+        let count = targets
+            .iter()
+            .zip(&starts)
+            .map(|(t, s)| {
+                let span = (t.2 - s).abs();
+                if t.1 == Dof::Angle {
+                    (span / (TAU / 24.0)).ceil()
+                } else {
+                    (span / (size / 24.0).max(1e-9)).ceil()
+                }
+            })
+            .fold(1.0, f64::max)
+            .clamp(1.0, 2000.0) as usize;
+        let (known, known_relations) = (first.failing.clone(), first.failing_couplings.clone());
+        let holds = |step: &Report| step.failing.iter().all(|f| known.contains(f)) && step.failing_couplings.iter().all(|f| known_relations.contains(f));
+        let drives_at = |share: f64| -> Vec<Drive> { targets.iter().zip(&starts).map(|(t, s)| Drive { joint: t.0, dof: t.1, value: s + (t.2 - s) * share }).collect() };
+        let mut report = first;
+        let mut reached = 0.0;
+        for k in 1..=count {
+            let share = k as f64 / count as f64;
+            let before = problem.clone();
+            problem.drives = drives_at(share);
+            let step = solver::solve(&mut problem);
+            problem.drives.clear();
+            if holds(&step) {
+                report = step;
+                reached = share;
+                continue;
+            }
+            problem = before;
+            let (mut good, mut bad) = (reached, share);
+            for _ in 0..STOP_HALVINGS {
+                let middle = (good + bad) / 2.0;
+                let before = problem.clone();
+                problem.drives = drives_at(middle);
+                let step = solver::solve(&mut problem);
+                problem.drives.clear();
+                if holds(&step) {
+                    report = step;
+                    good = middle;
+                } else {
+                    problem = before;
+                    bad = middle;
+                }
+            }
+            break;
+        }
+        problem.drives.clear();
+        self.finish(id, flat, &problem, report, None)
     }
 
     /// Solves an assembly, moving instances as little as it can to meet the mates, and saving where they end up.
@@ -825,5 +1027,105 @@ fn mate_joint(mate: &Mate, a: usize, b: usize, fa: Frame, fb: Frame) -> Joint {
             Limit { dof: l.dof, min: l.min * k, max: l.max * k }
         })
         .collect();
-    Joint { a, b, on_a, on_b, kind: mate.kind, limits, turned: mate.turned }
+    Joint { a, b, on_a, on_b, kind: mate.kind, limits, turned: mate.turned, contact: None }
+}
+
+/// A tangent mate as a joint: the shapes of the faces its connectors are on, put in order, planes first. The other part
+/// goes on the outside of a flat face, the side its normal points to, and round faces go outside each other; `flip`
+/// takes the other side of the plane, or one inside the other. That's fixed by the mate, and not by where things are,
+/// so that solving again never changes it.
+fn tangent_joint(mate: &Mate, a: usize, b: usize, ca: &Connector, cb: &Connector, flat: &Flat) -> Result<Joint> {
+    let (fa, ta) = ca.anchor.touching(&flat.placed[a].body)?;
+    let (fb, tb) = cb.anchor.touching(&flat.placed[b].body)?;
+    let (a, b, fa, fb, ta, tb) = if ta.rank() > tb.rank() { (b, a, fb, fa, tb, ta) } else { (a, b, fa, fb, ta, tb) };
+    let side = if mate.flip { -1.0 } else { 1.0 };
+    // Two planes touch facing each other: the second turned over, so that lining up their z axes does that.
+    let fb = if matches!((ta, tb), (Touching::Plane, Touching::Plane)) { fb.compose(&Frame::rotation(Vec3::ZERO, Vec3::X, PI)) } else { fb };
+    Ok(Joint { a, b, on_a: fa, on_b: fb, kind: MateKind::Tangent, limits: Vec::new(), turned: 0.0, contact: Some(Contact { a: ta, b: tb, side }) })
+}
+
+/// The copies an assembly's patterns and replicates make, of what's flattened, to place once it's solved.
+fn plan_copies(top: &Assembly, flat: &mut Flat) {
+    let index_of = |flat: &Flat, path: &[u32]| flat.placed.iter().position(|p| p.path == path);
+    let seeds = |flat: &Flat, of: &[u32]| -> Vec<usize> { (0..flat.placed.len()).filter(|&i| of.contains(&flat.placed[i].path[0])).collect() };
+    let mut plans = Vec::new();
+    for p in top.patterns.iter().filter(|p| !p.suppressed) {
+        let axis = match &p.axis {
+            PatternAxis::Given { point, direction } => Some((Frame::new(*point, direction.normalized(), direction.normalized().any_perpendicular()), None)),
+            PatternAxis::Connector(c) => top.connector(*c).and_then(|c| {
+                let j = index_of(flat, &c.instance)?;
+                connector_frame(c, &flat.placed[j].body).ok().map(|f| (f, Some(j)))
+            }),
+        };
+        let Some((frame, thing)) = axis else {
+            flat.problems.push(format!("pattern \"{}\": its axis isn't there", p.name));
+            continue;
+        };
+        for k in 1..p.count {
+            let step = match p.kind {
+                PatternKind::Linear { spacing } => Frame::translation(v3(0.0, 0.0, spacing * k as f64)),
+                PatternKind::Circular { degrees } => Frame::rotation(Vec3::ZERO, Vec3::Z, (degrees * k as f64).to_radians()),
+            };
+            let local = frame.compose(&step).compose(&frame.inverse());
+            for s in seeds(flat, &p.of) {
+                plans.push(copy_plan(&flat.placed[s], s, p.id, k, &p.name, thing, local));
+            }
+        }
+    }
+    for r in top.replicates.iter().filter(|r| !r.suppressed) {
+        let Some(c) = top.connector(r.connector) else { continue };
+        let Some(j) = index_of(flat, &c.instance) else {
+            flat.problems.push(format!("replicate \"{}\": the instance its connector is on isn't there", r.name));
+            continue;
+        };
+        let body = flat.placed[j].body.clone();
+        let from = match connector_frame(c, &body) {
+            Ok(f) => f,
+            Err(why) => {
+                flat.problems.push(format!("replicate \"{}\": {why}", r.name));
+                continue;
+            }
+        };
+        let anchors = if r.at.is_empty() {
+            match like_faces(&body, &c.anchor) {
+                Ok(list) => list,
+                Err(why) => {
+                    flat.problems.push(format!("replicate \"{}\": {why}", r.name));
+                    continue;
+                }
+            }
+        } else {
+            r.at.clone()
+        };
+        let mut k = 0;
+        for anchor in anchors {
+            let place = Connector { anchor, ..c.clone() };
+            let to = match connector_frame(&place, &body) {
+                Ok(f) => f,
+                Err(why) => {
+                    flat.problems.push(format!("replicate \"{}\": {why}", r.name));
+                    continue;
+                }
+            };
+            // The same place as the connector's own isn't another.
+            if to.origin.dist(from.origin) < 1e-9 * body.aabb().diagonal().max(1.0) {
+                continue;
+            }
+            // Pointing the way the connector does, as a hole found from the other end would point the other way.
+            let to = if to.z.dot(from.z) < 0.0 { to.compose(&Frame::rotation(Vec3::ZERO, Vec3::X, PI)) } else { to };
+            let local = to.compose(&from.inverse());
+            k += 1;
+            for s in seeds(flat, &r.of) {
+                plans.push(copy_plan(&flat.placed[s], s, r.id, k, &r.name, Some(j), local));
+            }
+        }
+    }
+    flat.copies = plans;
+}
+
+fn copy_plan(seed: &Placed, at: usize, record: u32, k: u32, label: &str, thing: Option<usize>, local: Frame) -> CopyPlan {
+    let mut template = seed.clone();
+    template.path = [record, k].into_iter().chain(seed.path.iter().copied()).collect();
+    template.name = format!("{} <{label} {}>", seed.name.split(" <").next().unwrap_or(&seed.name), k + 1);
+    CopyPlan { template, seed: at, thing, local }
 }

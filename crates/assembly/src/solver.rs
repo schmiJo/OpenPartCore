@@ -25,6 +25,12 @@ pub enum MateKind {
     Ball,
     /// Rotation about z, and translation along any axis.
     Parallel,
+    /// Two faces kept touching: a plane, a cylinder or a ball against another, whatever else they do. The shapes come
+    /// from the faces the connectors are on.
+    Tangent,
+    /// The second connector's origin kept on the first's xy plane: with connectors midway between two faces each, a tab
+    /// centered in a slot.
+    Width,
 }
 
 impl MateKind {
@@ -36,13 +42,16 @@ impl MateKind {
             MateKind::Cylindrical | MateKind::PinSlot => 2,
             MateKind::Planar | MateKind::Ball => 3,
             MateKind::Parallel => 4,
+            // As for a plane against a cylinder, the usual case; a ball against a plane leaves 5, two cylinders 3.
+            MateKind::Tangent => 4,
+            MateKind::Width => 5,
         }
     }
 
     /// The motions a value can be read for, as limits and drives want them.
     pub fn values(self) -> &'static [Dof] {
         match self {
-            MateKind::Fastened | MateKind::Ball | MateKind::Parallel => &[],
+            MateKind::Fastened | MateKind::Ball | MateKind::Parallel | MateKind::Tangent | MateKind::Width => &[],
             MateKind::Revolute => &[Dof::Angle],
             MateKind::Slider => &[Dof::Z],
             MateKind::Cylindrical => &[Dof::Z, Dof::Angle],
@@ -69,6 +78,35 @@ pub struct Limit {
     pub max: f64,
 }
 
+/// What a tangent mate keeps touching, in one end's own frame: a plane through its origin square to z, a cylinder of
+/// that radius round z, or a ball of that radius about its origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Touching {
+    Plane,
+    Cylinder(f64),
+    Ball(f64),
+}
+
+impl Touching {
+    /// Planes first, then cylinders, then balls: a tangent mate's ends are put in this order.
+    pub fn rank(self) -> u8 {
+        match self {
+            Touching::Plane => 0,
+            Touching::Cylinder(_) => 1,
+            Touching::Ball(_) => 2,
+        }
+    }
+}
+
+/// How a tangent mate's ends touch. `side` is which side of the first end's plane the second is on, 1 for the side its
+/// normal points to and -1 for the other, or for two round ones, 1 for outside each other and -1 for one inside the other.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Contact {
+    pub a: Touching,
+    pub b: Touching,
+    pub side: f64,
+}
+
 /// A mate between two things, with its frames in their own coordinates. Any offset or flip is already in those frames.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Joint {
@@ -80,6 +118,8 @@ pub struct Joint {
     pub limits: Vec<Limit>,
     /// The angle it was last at, in radians, turns and all, so that a limit or a gear can tell one turn from the next.
     pub turned: f64,
+    /// For a tangent mate, the shapes that touch, with `on_a` and `on_b` the frames they're described in.
+    pub contact: Option<Contact>,
 }
 
 /// One motion tied to another: `b = ratio * a + offset`. A gear, a rack and pinion, a screw, or a linear relation.
@@ -431,8 +471,8 @@ fn joint_rows(rig: &Rig, joint: &Joint, out: &mut Vec<Row>) {
             along(fa.y);
             along(fa.z);
         }
-        MateKind::Planar => along(fa.z),
-        MateKind::Parallel => {}
+        MateKind::Planar | MateKind::Width => along(fa.z),
+        MateKind::Parallel | MateKind::Tangent => {}
     }
     let scale = rig.size;
     // The rows of a rotation, each saying how far off it is about a direction fixed in `a`.
@@ -452,7 +492,67 @@ fn joint_rows(rig: &Rig, joint: &Joint, out: &mut Vec<Row>) {
             about(w, fa.x);
             about(w, fa.y);
         }
-        MateKind::Ball => {}
+        MateKind::Ball | MateKind::Width => {}
+        MateKind::Tangent => {
+            if let Some(c) = joint.contact {
+                tangent_rows(rig, &fa, ca, &fb, cb, &c, out);
+            }
+        }
+    }
+}
+
+/// The equations that keep two shapes touching. A plane against anything keeps the other's center or axis its radius
+/// off the plane, on the side the contact says, and a cylinder's axis level with the plane. Round against round keeps their
+/// centers or axes the radii apart, or for one inside the other, their difference, and two cylinders' axes parallel.
+fn tangent_rows(rig: &Rig, fa: &Frame, ca: usize, fb: &Frame, cb: usize, c: &Contact, out: &mut Vec<Row>) {
+    let scale = rig.size;
+    let aimed = |mut row: Row, want: f64| {
+        row.value -= want;
+        row
+    };
+    let apart = |ra: f64, rb: f64| if c.side > 0.0 { ra + rb } else { (ra - rb).abs() };
+    // How far `b`'s origin is from `a`'s axis, or from its origin, as a row along the way it's off.
+    let off = |axis: Option<Vec3>| -> Row {
+        let d = fb.origin - fa.origin;
+        let flat = match axis {
+            Some(z) => d - z * d.dot(z),
+            None => d,
+        };
+        let u = if flat.norm() > 1e-12 * scale.max(1.0) { flat.normalized() } else { axis.map_or(fa.x, |z| z.any_perpendicular()) };
+        along_row(rig, fa, ca, fb, cb, u)
+    };
+    // Rows turning `b`'s z onto `a`'s, either way along it.
+    let parallel = |out: &mut Vec<Row>, same: bool| {
+        let target = if same || fa.z.dot(fb.z) >= 0.0 { fb.z } else { -fb.z };
+        let w = rotation_onto(fa.z, target, fa.x);
+        for axis in [fa.x, fa.y] {
+            out.push(Row { value: -w.dot(axis) * scale, parts: vec![(cb, Vec3::ZERO, axis * scale), (ca, Vec3::ZERO, -axis * scale)] });
+        }
+    };
+    match (c.a, c.b) {
+        (Touching::Plane, Touching::Plane) => {
+            out.push(aimed(along_row(rig, fa, ca, fb, cb, fa.z), 0.0));
+            parallel(out, true);
+        }
+        (Touching::Plane, Touching::Cylinder(r)) => {
+            out.push(aimed(along_row(rig, fa, ca, fb, cb, fa.z), c.side * r));
+            // The axis turned down onto the plane, toward where it points along it, or where its x does if it stands
+            // straight up, which a dot product alone couldn't say: its slope is nothing there.
+            let flat = |v: Vec3| v - fa.z * v.dot(fa.z);
+            let toward = if flat(fb.z).norm() > 1e-6 { flat(fb.z).normalized() } else if flat(fb.x).norm() > 1e-6 { flat(fb.x).normalized() } else { fa.x };
+            let w = rotation_onto(toward, fb.z, fa.z.cross(toward));
+            let axis = fa.z.cross(toward).normalized();
+            out.push(Row { value: -w.dot(axis) * scale, parts: vec![(cb, Vec3::ZERO, axis * scale), (ca, Vec3::ZERO, -axis * scale)] });
+        }
+        (Touching::Plane, Touching::Ball(r)) => out.push(aimed(along_row(rig, fa, ca, fb, cb, fa.z), c.side * r)),
+        (Touching::Cylinder(ra), Touching::Cylinder(rb)) => {
+            parallel(out, false);
+            out.push(aimed(off(Some(fa.z)), apart(ra, rb)));
+        }
+        (Touching::Cylinder(ra), Touching::Ball(rb)) => out.push(aimed(off(Some(fa.z)), apart(ra, rb))),
+        (Touching::Ball(ra), Touching::Ball(rb)) => out.push(aimed(off(None), apart(ra, rb))),
+        // The ends are put in order before this.
+        _ => {}
     }
 }
 

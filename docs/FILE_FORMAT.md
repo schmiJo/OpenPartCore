@@ -596,6 +596,13 @@ An assembly never changes a part. It holds uses of parts and where they are, so 
 | Mate | `id`, `name`, `type`, `a` and `b` as connectors' ids, and `offset`, `rotation`, `flip`, `quarter_turns`, `limits`, `suppressed`, `turned` if set |
 | Group | `id`, `name`, `instances` as lists of ids, `suppressed` if true |
 | Relation | `id`, `type`, `a` and `b` as mates' ids, its amount, and `reverse`, `offset`, `suppressed` if set |
+| Pattern | `id`, `name`, `of` as top-level instances' ids, `type` `linear` with `spacing` or `circular` with `degrees`, `count` in all, the instances first, `axis` as `{"point", "direction"}` or `{"connector": id}`, and `suppressed` if true |
+| Replicate | `id`, `name`, `of` as top-level instances' ids, `connector` they're placed at, `at` as a list of more `on` places on that connector's instance, or left out for every face like the connector's, and `suppressed` if true |
+| Exploded view | `id`, `name`, `steps`, each `{"instances": [ids or paths], "shift": [x, y, z], "turn": {"point", "axis", "degrees"}}`, under `explodes` |
+| Named position | `id`, `name`, `values`, each `{"mate": id, "dof", "value"}` in millimetres and degrees, under `positions` |
+
+Patterns, replicates, exploded views and named positions are written only when there are some, so other assemblies save as
+they did.
 
 **A connector's `on`** is what it's found from, so it follows the part:
 
@@ -604,6 +611,7 @@ An assembly never changes a part. It holds uses of parts and where they are, so 
 | `{"face": "f1:end"}` | The centroid of a flat face, with z straight out of it, or the middle of a round face's axis, with z along it. `"point"` can also be `axis_start`, `axis_end` or `apex` |
 | `{"face": "f1:end", "near": [x, y, z]}` | The nearest of the face's corners, edge middles and arc centers |
 | `{"edge": ["f1:end", "f1:side.0"], "point": "middle"}` | On the edge between two faces: `middle`, `start`, `end`, or `center` for a round one. Its z runs along a straight edge, and along the axis of a round one |
+| `{"between": ["f1:side.0", "f1:side.2"]}` | Midway between two parallel flat faces: the first's centroid moved halfway to the second's plane, z along the first's normal. For a width mate, across a slot and across a tab |
 | `{"frame": {"origin", "z", "x"}}` | Just a place, in the part's own coordinates, which follows nothing |
 
 If what it's found from has gone, that mate fails, says which face, and the rest of the assembly still solves. The first of a key's faces is used if it covers several.
@@ -620,6 +628,8 @@ If what it's found from has gone, that mate fails, says which face, and the rest
 | `planar` | Turn about z, slide along x and y |
 | `ball` | Any turn |
 | `parallel` | Turn about z, any slide |
+| `tangent` | Whatever keeps two faces touching: each connector on a face, flat, cylindrical or spherical. The other part goes outside a flat face, on the side its normal points, and round faces go outside each other; `flip` takes the other side, or one inside the other. A cylinder lies level on a plane, and two cylinders keep their axes parallel |
+| `width` | Everything but `b`'s origin leaving `a`'s xy plane: with both ends `between` two faces, a tab centered in a slot |
 
 Two faces' z axes both point out of them, so two faces need `flip` to lie against each other. `offset` is from `a` to `b` along `a`'s axes, `rotation` is about `a`'s z, and `flip` and `quarter_turns` act on `b`. `limits` is a list of `{"dof": "x", "y", "z" or "angle", "min", "max"}`, in millimetres and degrees. `turned` is how far it has turned in radians, with its turns, kept so that the next turn can be told from this one.
 
@@ -633,6 +643,22 @@ Two faces' z axes both point out of them, so two faces need `flip` to lie agains
 | `linear` | Two that slide | `ratio` |
 
 `offset` is set when it's added, from where they are, so that adding it moves nothing.
+
+**A pattern or a replicate** makes copies of instances. Each copy's path is the pattern's or replicate's id, which copy it
+is from 1, and the instance's own path, so `[12, 2, 4]` is pattern 12's second copy of instance 4. Copies are placed after
+the rest is solved, from wherever their instances are, so they follow them and their mates, and they can't be mated
+themselves. A pattern's axis given as a connector follows that connector's part. A replicate places each copy on its
+place as the instances are placed on the connector, turned to point the way the connector does, and without `at` finds
+its places itself: every other face of the connector's instance like the connector's own, a cylinder of the same radius
+and the same way, a ball of the same radius, or a flat face facing the same way. Each place is found from its face's key,
+so the copies follow the part when it changes.
+
+**An exploded view** only moves what's shown. Its steps go one after another, each moving the instances it lists,
+everything under them included, by its shift and turn, in the assembly's coordinates; shown part of the way through, each
+step moves its share.
+
+**A named position** keeps each top-level mate's values. Going back to one takes all of them there together, a little at a
+time, and stops where other mates stop them, as taking one mate to a value does.
 
 **A sub-assembly** is an instance of an assembly tab, and as in Onshape its mates go on working in the assembly above, so its parts can move there. Where they've got to is kept in that assembly's `moved`, by path, relative to the top-level instance they're in, so moving the instance takes them along, and how far its mates have turned there in `moved_turns`, by the sub-assembly's path and the mate's id. `fixed` counts only in the assembly it's set in. `locked` keeps the parts as their own tab solves them, moving as one. A connector reaches into a sub-assembly by a longer `instance` list, which has to go all the way down to a part.
 

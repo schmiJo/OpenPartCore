@@ -7,6 +7,7 @@ use coreshape::topo::Body;
 use coreshape::{Curve, Surface};
 use coreshape_document::json::Value;
 use coreshape_document::{find_faces, find_one, FaceKey};
+use crate::solver::Touching;
 
 /// A place on a face.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,6 +42,9 @@ pub enum Anchor {
     Face { key: FaceKey, point: FacePoint },
     /// The edge between two faces.
     Edge { faces: [FaceKey; 2], point: EdgePoint },
+    /// Midway between two parallel flat faces, as across a slot or a tab: on the first face's middle, moved halfway to
+    /// the second's plane, with z along the first's normal. A width mate takes two of these.
+    Between { faces: [FaceKey; 2] },
 }
 
 /// A place on offer, ready to use.
@@ -222,6 +226,34 @@ impl Anchor {
                 let edge = edge.ok_or_else(|| Error::InvalidInput(format!("there's no edge between {} and {} on this part", faces[0].text(), faces[1].text())))?;
                 edge_frame(body, edge, *point)
             }
+            Anchor::Between { faces } => {
+                let (a, b) = (find_one(body, &faces[0])?[0], find_one(body, &faces[1])?[0]);
+                let (Surface::Plane(pa), Surface::Plane(pb)) = (&body.faces[a].surface, &body.faces[b].surface) else {
+                    return Err(Error::InvalidInput(format!("midway between two faces takes two flat ones, and {} and {} aren't both flat", faces[0].text(), faces[1].text())));
+                };
+                if pa.z.cross(pb.z).norm() > 1e-9 {
+                    return Err(Error::InvalidInput(format!("midway between two faces takes two parallel ones, and {} and {} aren't", faces[0].text(), faces[1].text())));
+                }
+                let first = face_frame(body, a, FacePoint::Centroid)?;
+                let gap = (pb.origin - first.origin).dot(first.z);
+                Ok(Frame { origin: first.origin + first.z * (gap / 2.0), ..first })
+            }
+        }
+    }
+
+    /// What a tangent mate keeps touching on the face this is on, with the frame it's described in, in the part's own
+    /// coordinates: a flat face's plane, facing out, a cylinder's axis, or a ball's center.
+    pub fn touching(&self, body: &Body) -> Result<(Frame, Touching)> {
+        let Anchor::Face { key, .. } = self else {
+            return Err(Error::InvalidInput("a tangent mate's connectors have to be on faces, to say what touches".into()));
+        };
+        let face = find_one(body, key)?[0];
+        let f = &body.faces[face];
+        match &f.surface {
+            Surface::Plane(_) => Ok((face_frame(body, face, FacePoint::Centroid)?, Touching::Plane)),
+            Surface::Cylinder { frame, radius } => Ok((*frame, Touching::Cylinder(*radius))),
+            Surface::Sphere { frame, radius } => Ok((*frame, Touching::Ball(*radius))),
+            other => Err(Error::InvalidInput(format!("a tangent mate works on flat, cylindrical and spherical faces, and {} is {}", key.text(), other.name()))),
         }
     }
 
@@ -245,6 +277,7 @@ impl Anchor {
                 }
                 Value::obj(items)
             }
+            Anchor::Between { faces } => Value::obj(vec![("between", Value::Arr(vec![Value::str(faces[0].text()), Value::str(faces[1].text())]))]),
             Anchor::Edge { faces, point } => Value::obj(vec![
                 ("edge", Value::Arr(vec![Value::str(faces[0].text()), Value::str(faces[1].text())])),
                 (
@@ -280,6 +313,11 @@ impl Anchor {
             };
             return Ok(Anchor::Face { key, point });
         }
+        if let Some(between) = v.get("between") {
+            let names = between.as_array().filter(|l| l.len() == 2).ok_or_else(|| Error::InvalidInput("\"between\" must be the names of two faces".into()))?;
+            let key = |n: &Value| FaceKey::parse(n.as_str().ok_or_else(|| Error::InvalidInput("\"between\" must be the names of two faces".into()))?);
+            return Ok(Anchor::Between { faces: [key(&names[0])?, key(&names[1])?] });
+        }
         if let Some(edge) = v.get("edge") {
             let names = edge.as_array().filter(|l| l.len() == 2).ok_or_else(|| Error::InvalidInput("\"edge\" must be the names of its two faces".into()))?;
             let key = |n: &Value| FaceKey::parse(n.as_str().ok_or_else(|| Error::InvalidInput("\"edge\" must be the names of its two faces".into()))?);
@@ -292,7 +330,7 @@ impl Anchor {
             };
             return Ok(Anchor::Edge { faces: [key(&names[0])?, key(&names[1])?], point });
         }
-        Err(Error::InvalidInput("a connector's place needs \"frame\", \"face\" or \"edge\"".into()))
+        Err(Error::InvalidInput("a connector's place needs \"frame\", \"face\", \"edge\" or \"between\"".into()))
     }
 }
 

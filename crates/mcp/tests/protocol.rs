@@ -1450,3 +1450,41 @@ fn a_volume_that_cant_be_measured_closely_says_so() {
     let moved = c.ok("feature_add", r#"{"feature":{"type":"offset","distance":0.25}}"#);
     assert!(!moved.contains("only good to within"), "{moved}");
 }
+
+#[test]
+fn the_rest_of_the_assembly_tools_work_through_the_protocol() {
+    let mut c = Client::start(&folder("assembly_rest"));
+    let (plate, pin) = plate_and_pin(&mut c);
+    // The pin lies on the plate's top by a tangent mate: on the outside of the top, though it starts inside the plate,
+    // its axis 3 above the top at 10.
+    let answer = parsed(&c.ok("mate_add", &format!(r#"{{"type":"tangent","a":{{"instance":{plate},"on":{{"face":"f1:end"}}}},"b":{{"instance":{pin},"on":{{"face":"f2:side.0"}}}}}}"#)));
+    assert!(answer.get("failing").is_none(), "{}", answer.to_text());
+    let tangent = id_of(&answer);
+    let state = parsed(&c.ok("assembly_solve", "{}"));
+    assert!((origin_of(&state, "Pin")[2] - 13.0).abs() < 1e-6, "{}", state.to_text());
+    c.ok("mate_delete", &format!(r#"{{"id":{tangent}}}"#));
+    // A row of three, and a ring of four of the plate, both following the pin and plate.
+    let row = id_of(&parsed(&c.ok("pattern_add", &format!(r#"{{"of":[{pin}],"type":"linear","axis":{{"direction":[1,0,0]}},"spacing":8,"count":3}}"#))));
+    let state = parsed(&c.ok("assembly_solve", "{}"));
+    assert_eq!(state.get("instances").and_then(Value::as_array).unwrap().len(), 4, "{}", state.to_text());
+    c.ok("pattern_add", &format!(r#"{{"of":[{plate}],"type":"circular","axis":{{"point":[0,0,0],"direction":[0,0,1]}},"degrees":90,"count":4}}"#));
+    let bom = parsed(&c.ok("bom", "{}"));
+    let counts: Vec<f64> = bom.as_array().unwrap().iter().map(|r| r.get("count").and_then(Value::as_f64).unwrap()).collect();
+    assert_eq!(counts, vec![4.0, 3.0]);
+    // An exploded view: the pins lifted, only as shown.
+    let view = id_of(&parsed(&c.ok("explode_add", &format!(r#"{{"steps":[{{"instances":[{pin},[{row}]],"shift":[0,0,30]}}]}}"#))));
+    let apart = parsed(&c.ok("assembly_explode", &format!(r#"{{"id":{view},"amount":0.5}}"#)));
+    let still = parsed(&c.ok("assembly_solve", "{}"));
+    assert!((origin_of(&apart, "Pin")[2] - origin_of(&still, "Pin")[2] - 15.0).abs() < 1e-9);
+    let (content, failed) = c.call("render", &format!(r#"{{"width":160,"height":120,"explode":{{"id":{view}}}}}"#));
+    assert!(!failed && content.iter().any(|x| x.get("type").and_then(Value::as_str) == Some("image")));
+    // A named position, saved and gone back to, and the items deleted.
+    let at = id_of(&parsed(&c.ok("position_save", r#"{"name":"Start"}"#)));
+    c.ok("position_go", &format!(r#"{{"id":{at}}}"#));
+    for id in [view, row, at] {
+        c.ok("assembly_item_delete", &format!(r#"{{"id":{id}}}"#));
+    }
+    assert!(c.refused("assembly_item_delete", &format!(r#"{{"id":{row}}}"#)).contains("no pattern"));
+    // The width mate's between-faces connector is offered by name.
+    assert!(c.refused("mate_add", &format!(r#"{{"type":"width","a":{{"instance":{plate},"on":{{"between":["f1:end","f1:side.0"]}}}},"b":{{"instance":{pin},"on":{{"face":"f2:start"}}}}}}"#)).contains("parallel"));
+}

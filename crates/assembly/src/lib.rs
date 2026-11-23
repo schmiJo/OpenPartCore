@@ -10,7 +10,7 @@ pub mod solver;
 
 pub use connector::{candidates, edge_candidates, Anchor, Candidate, EdgePoint, FacePoint};
 pub use project::{Bom, BomRow, Interference, Placed, Project, Solved, Tab, TabContent, TabId};
-pub use solver::{Dof, Goal, Limit, MateKind};
+pub use solver::{Contact, Dof, Goal, Limit, MateKind, Touching};
 
 use coreshape::error::{Error, Result};
 use coreshape::math::*;
@@ -126,6 +126,80 @@ pub struct Relation {
     pub suppressed: bool,
 }
 
+/// Where an assembly pattern goes: an axis given in the assembly's coordinates, or a connector's z axis through its
+/// origin, which follows its part.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatternAxis {
+    Given { point: Vec3, direction: Vec3 },
+    Connector(u32),
+}
+
+/// How an assembly pattern spreads its copies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PatternKind {
+    /// Along the axis, `spacing` apart.
+    Linear { spacing: f64 },
+    /// Round the axis, `degrees` apart.
+    Circular { degrees: f64 },
+}
+
+/// Copies of instances, each the last moved by the pattern's step, as Onshape's assembly patterns are. They're placed
+/// from the instances wherever those are mated to, and can't be mated themselves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pattern {
+    pub id: u32,
+    pub name: String,
+    /// Top-level instances, by id.
+    pub of: Vec<u32>,
+    pub axis: PatternAxis,
+    pub kind: PatternKind,
+    /// How many in all, the instances themselves the first.
+    pub count: u32,
+    pub suppressed: bool,
+}
+
+/// Copies of instances at more places like the one they're mated at, as Onshape's replicate puts a bolt in every hole of
+/// one size. Each copy sits on its place as the instances sit on the connector, and follows wherever that part goes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Replicate {
+    pub id: u32,
+    pub name: String,
+    /// Top-level instances, by id.
+    pub of: Vec<u32>,
+    /// The connector they're placed at, on another instance.
+    pub connector: u32,
+    /// The other places, on that same instance. Empty means every other face of that instance like the connector's
+    /// face: a cylinder of the same radius, square to a flat face facing the same way, or a ball of the same radius.
+    pub at: Vec<Anchor>,
+    pub suppressed: bool,
+}
+
+/// One step of an exploded view: some instances moved, and turned, in the assembly's coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExplodeStep {
+    /// By paths: an instance's id, or a list of ids into a sub-assembly, which takes everything in it along.
+    pub instances: Vec<Vec<u32>>,
+    pub shift: Vec3,
+    /// About an axis through a point, in degrees.
+    pub turn: Option<(Vec3, Vec3, f64)>,
+}
+
+/// An exploded view: steps taken one after another, which only move what's shown, and not the assembly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Explode {
+    pub id: u32,
+    pub name: String,
+    pub steps: Vec<ExplodeStep>,
+}
+
+/// A named position, as Onshape keeps them: each top-level mate's values, to go back to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Position {
+    pub id: u32,
+    pub name: String,
+    pub values: Vec<(u32, Dof, f64)>,
+}
+
 /// An assembly: all plain data.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Assembly {
@@ -142,6 +216,10 @@ pub struct Assembly {
     /// How far a sub-assembly's mates have turned here, in radians with their turns, by the path of the sub-assembly and
     /// the mate's id, so that the next turn can be told from this one, as `Mate::turned` is for this assembly's own.
     pub moved_turns: BTreeMap<(Vec<u32>, u32), f64>,
+    pub patterns: Vec<Pattern>,
+    pub replicates: Vec<Replicate>,
+    pub explodes: Vec<Explode>,
+    pub positions: Vec<Position>,
     /// Whatever an app wants kept with it.
     pub app: Option<Value>,
 }
@@ -269,6 +347,91 @@ impl Assembly {
         Ok(())
     }
 
+    fn check_top_level(&self, of: &[u32], what: &str) -> Result<()> {
+        if of.is_empty() {
+            return Err(Error::InvalidInput(format!("{what} needs at least one instance to copy")));
+        }
+        for id in of {
+            if self.instance(*id).is_none() {
+                return Err(Error::InvalidInput(format!("there's no instance {id} here for {what} to copy")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds a pattern of instances.
+    pub fn add_pattern(&mut self, of: Vec<u32>, axis: PatternAxis, kind: PatternKind, count: u32) -> Result<u32> {
+        self.check_top_level(&of, "a pattern")?;
+        if !(2..=1000).contains(&count) {
+            return Err(Error::InvalidInput(format!("a pattern has 2 to 1000 in it, the first included, not {count}")));
+        }
+        match &axis {
+            PatternAxis::Given { direction, .. } if !(direction.norm() > 1e-12) => return Err(Error::InvalidInput("a pattern's direction can't be nothing".into())),
+            PatternAxis::Connector(c) if self.connector(*c).is_none() => return Err(Error::InvalidInput(format!("there's no connector {c}"))),
+            _ => {}
+        }
+        let size = match kind {
+            PatternKind::Linear { spacing } => spacing,
+            PatternKind::Circular { degrees } => degrees,
+        };
+        if !size.is_finite() || size == 0.0 {
+            return Err(Error::InvalidInput("a pattern's spacing or angle has to be a number other than 0".into()));
+        }
+        let id = self.fresh_id();
+        let n = self.patterns.len() + 1;
+        self.patterns.push(Pattern { id, name: format!("Pattern {n}"), of, axis, kind, count, suppressed: false });
+        Ok(id)
+    }
+
+    /// Adds a replicate: copies of instances at more places like the connector they're placed at.
+    pub fn add_replicate(&mut self, of: Vec<u32>, connector: u32, at: Vec<Anchor>) -> Result<u32> {
+        self.check_top_level(&of, "a replicate")?;
+        let c = self.connector(connector).ok_or_else(|| Error::InvalidInput(format!("there's no connector {connector}")))?;
+        if c.instance.len() != 1 || of.contains(&c.instance[0]) {
+            return Err(Error::InvalidInput("a replicate's connector has to be on a top-level instance other than those it copies".into()));
+        }
+        let id = self.fresh_id();
+        let n = self.replicates.len() + 1;
+        self.replicates.push(Replicate { id, name: format!("Replicate {n}"), of, connector, at, suppressed: false });
+        Ok(id)
+    }
+
+    /// Adds an exploded view.
+    pub fn add_explode(&mut self, name: Option<String>, steps: Vec<ExplodeStep>) -> Result<u32> {
+        for step in &steps {
+            if step.instances.is_empty() {
+                return Err(Error::InvalidInput("each step of an exploded view moves at least one instance".into()));
+            }
+            for path in &step.instances {
+                if !path.first().is_some_and(|p| self.instance(*p).is_some() || self.patterns.iter().any(|q| q.id == *p) || self.replicates.iter().any(|q| q.id == *p)) {
+                    return Err(Error::InvalidInput(format!("there's no instance {path:?} for an exploded view to move")));
+                }
+            }
+            if let Some((_, axis, _)) = step.turn {
+                if !(axis.norm() > 1e-12) {
+                    return Err(Error::InvalidInput("an exploded view's turn needs an axis".into()));
+                }
+            }
+        }
+        let id = self.fresh_id();
+        let n = self.explodes.len() + 1;
+        self.explodes.push(Explode { id, name: name.unwrap_or_else(|| format!("Exploded view {n}")), steps });
+        Ok(id)
+    }
+
+    /// Removes a pattern, replicate, exploded view or named position by id.
+    pub fn delete_item(&mut self, id: u32) -> Result<()> {
+        let before = self.patterns.len() + self.replicates.len() + self.explodes.len() + self.positions.len();
+        self.patterns.retain(|x| x.id != id);
+        self.replicates.retain(|x| x.id != id);
+        self.explodes.retain(|x| x.id != id);
+        self.positions.retain(|x| x.id != id);
+        if self.patterns.len() + self.replicates.len() + self.explodes.len() + self.positions.len() == before {
+            return Err(Error::InvalidInput(format!("there's no pattern, replicate, exploded view or named position {id}")));
+        }
+        Ok(())
+    }
+
     /// Deletes an instance, with its connectors and whatever mates and groups use it.
     pub fn delete_instance(&mut self, id: u32) -> Result<()> {
         let at = self.instances.iter().position(|i| i.id == id).ok_or_else(|| Error::InvalidInput(format!("there's no instance {id}")))?;
@@ -278,11 +441,29 @@ impl Assembly {
         for m in mates {
             self.delete_mate(m)?;
         }
+        for p in &mut self.positions {
+            p.values.retain(|(m, _, _)| self.mates.iter().any(|x| x.id == *m));
+        }
         self.connectors.retain(|c| !on_it.contains(&c.id));
         for g in &mut self.groups {
             g.instances.retain(|p| p.first() != Some(&id));
         }
         self.groups.retain(|g| g.instances.len() >= 2);
+        // What copies it, or copies onto a place on it, goes with it.
+        for p in &mut self.patterns {
+            p.of.retain(|i| *i != id);
+        }
+        self.patterns.retain(|p| !p.of.is_empty() && !matches!(p.axis, PatternAxis::Connector(c) if on_it.contains(&c)));
+        for r in &mut self.replicates {
+            r.of.retain(|i| *i != id);
+        }
+        self.replicates.retain(|r| !r.of.is_empty() && !on_it.contains(&r.connector));
+        for x in &mut self.explodes {
+            for step in &mut x.steps {
+                step.instances.retain(|p| p.first() != Some(&id));
+            }
+            x.steps.retain(|s| !s.instances.is_empty());
+        }
         self.moved.retain(|p, _| p.first() != Some(&id));
         self.moved_turns.retain(|(p, _), _| p.first() != Some(&id));
         Ok(())
@@ -300,6 +481,8 @@ pub fn kind_label(kind: MateKind) -> &'static str {
         MateKind::Planar => "Planar",
         MateKind::Ball => "Ball",
         MateKind::Parallel => "Parallel",
+        MateKind::Tangent => "Tangent",
+        MateKind::Width => "Width",
     }
 }
 
@@ -313,6 +496,8 @@ pub fn kind_name(kind: MateKind) -> &'static str {
         MateKind::Planar => "planar",
         MateKind::Ball => "ball",
         MateKind::Parallel => "parallel",
+        MateKind::Tangent => "tangent",
+        MateKind::Width => "width",
     }
 }
 
@@ -326,7 +511,9 @@ pub fn read_kind(name: &str) -> Result<MateKind> {
         "planar" => MateKind::Planar,
         "ball" => MateKind::Ball,
         "parallel" => MateKind::Parallel,
-        other => return Err(Error::InvalidInput(format!("unknown mate \"{other}\"; expected fastened, revolute, slider, cylindrical, pin_slot, planar, ball or parallel"))),
+        "tangent" => MateKind::Tangent,
+        "width" => MateKind::Width,
+        other => return Err(Error::InvalidInput(format!("unknown mate \"{other}\"; expected fastened, revolute, slider, cylindrical, pin_slot, planar, ball, parallel, tangent or width"))),
     })
 }
 
@@ -546,6 +733,63 @@ impl Assembly {
             ("groups", Value::Arr(groups.collect())),
             ("relations", Value::Arr(relations.collect())),
         ];
+        if !self.patterns.is_empty() {
+            let list = self.patterns.iter().map(|p| {
+                let mut items = vec![("id", num(p.id as f64)), ("name", Value::str(&p.name)), ("of", Value::Arr(p.of.iter().map(|i| num(*i as f64)).collect()))];
+                match &p.axis {
+                    PatternAxis::Given { point, direction } => items.push(("axis", Value::obj(vec![("point", vec3_value(*point)), ("direction", vec3_value(*direction))]))),
+                    PatternAxis::Connector(c) => items.push(("axis", Value::obj(vec![("connector", num(*c as f64))]))),
+                }
+                match p.kind {
+                    PatternKind::Linear { spacing } => items.extend([("type", Value::str("linear")), ("spacing", num(spacing))]),
+                    PatternKind::Circular { degrees } => items.extend([("type", Value::str("circular")), ("degrees", num(degrees))]),
+                }
+                items.push(("count", num(p.count as f64)));
+                if p.suppressed {
+                    items.push(("suppressed", Value::Bool(true)));
+                }
+                Value::obj(items)
+            });
+            items.push(("patterns", Value::Arr(list.collect())));
+        }
+        if !self.replicates.is_empty() {
+            let list = self.replicates.iter().map(|r| {
+                let mut items = vec![
+                    ("id", num(r.id as f64)),
+                    ("name", Value::str(&r.name)),
+                    ("of", Value::Arr(r.of.iter().map(|i| num(*i as f64)).collect())),
+                    ("connector", num(r.connector as f64)),
+                ];
+                if !r.at.is_empty() {
+                    items.push(("at", Value::Arr(r.at.iter().map(Anchor::to_json).collect())));
+                }
+                if r.suppressed {
+                    items.push(("suppressed", Value::Bool(true)));
+                }
+                Value::obj(items)
+            });
+            items.push(("replicates", Value::Arr(list.collect())));
+        }
+        if !self.explodes.is_empty() {
+            let list = self.explodes.iter().map(|x| {
+                let steps = x.steps.iter().map(|step| {
+                    let mut items = vec![("instances", Value::Arr(step.instances.iter().map(|p| path_value(p)).collect())), ("shift", vec3_value(step.shift))];
+                    if let Some((point, axis, degrees)) = step.turn {
+                        items.push(("turn", Value::obj(vec![("point", vec3_value(point)), ("axis", vec3_value(axis)), ("degrees", num(degrees))])));
+                    }
+                    Value::obj(items)
+                });
+                Value::obj(vec![("id", num(x.id as f64)), ("name", Value::str(&x.name)), ("steps", Value::Arr(steps.collect()))])
+            });
+            items.push(("explodes", Value::Arr(list.collect())));
+        }
+        if !self.positions.is_empty() {
+            let list = self.positions.iter().map(|p| {
+                let values = p.values.iter().map(|(m, d, v)| Value::obj(vec![("mate", num(*m as f64)), ("dof", Value::str(dof_name(*d))), ("value", num(*v))]));
+                Value::obj(vec![("id", num(p.id as f64)), ("name", Value::str(&p.name)), ("values", Value::Arr(values.collect()))])
+            });
+            items.push(("positions", Value::Arr(list.collect())));
+        }
         if !self.moved.is_empty() {
             let moved = self.moved.iter().map(|(p, f)| Value::obj(vec![("path", path_value(p)), ("at", frame_value(f))])).collect();
             items.push(("moved", Value::Arr(moved)));
@@ -561,7 +805,7 @@ impl Assembly {
     }
 
     pub fn from_json(v: &Value) -> Result<Assembly> {
-        known(v, &["next_id", "instances", "connectors", "mates", "groups", "relations", "moved", "moved_turns", "app"])?;
+        known(v, &["next_id", "instances", "connectors", "mates", "groups", "relations", "moved", "moved_turns", "patterns", "replicates", "explodes", "positions", "app"])?;
         let mut out = Assembly::new();
         out.app = v.get("app").cloned();
         let list = |key: &str| v.get(key).and_then(Value::as_array).unwrap_or(&[]);
@@ -646,8 +890,84 @@ impl Assembly {
             known(entry, &["path", "mate", "turned"])?;
             out.moved_turns.insert((read_path(entry.get("path"), "a moved mate's path")?, read_id(entry.get("mate"), "a moved mate's id")?), read_number(entry, "turned", 0.0)?);
         }
+        let ids_of = |x: &Value, what: &str| -> Result<Vec<u32>> { x.get("of").and_then(Value::as_array).unwrap_or(&[]).iter().map(|i| read_id(Some(i), what)).collect() };
+        for p in list("patterns") {
+            known(p, &["id", "name", "of", "axis", "type", "spacing", "degrees", "count", "suppressed"])?;
+            let a = p.get("axis").ok_or_else(|| bad("a pattern's axis"))?;
+            let axis = if a.get("connector").is_some() {
+                known(a, &["connector"])?;
+                PatternAxis::Connector(read_id(a.get("connector"), "a pattern's connector")?)
+            } else {
+                known(a, &["point", "direction"])?;
+                PatternAxis::Given { point: a.get("point").map_or(Ok(Vec3::ZERO), read_vec3)?, direction: read_vec3(a.get("direction").ok_or_else(|| bad("a pattern's direction"))?)? }
+            };
+            let kind = match p.get("type").and_then(Value::as_str).unwrap_or("") {
+                "linear" => PatternKind::Linear { spacing: read_number(p, "spacing", f64::NAN)? },
+                "circular" => PatternKind::Circular { degrees: read_number(p, "degrees", f64::NAN)? },
+                other => return Err(Error::InvalidInput(format!("unknown pattern \"{other}\"; expected linear or circular"))),
+            };
+            let count = read_number(p, "count", 0.0)?;
+            out.patterns.push(Pattern {
+                id: read_id(p.get("id"), "a pattern's id")?,
+                name: p.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                of: ids_of(p, "a pattern's instance")?,
+                axis,
+                kind,
+                count: if count >= 0.0 && count < 1e6 { count as u32 } else { 0 },
+                suppressed: read_flag(p, "suppressed")?,
+            });
+        }
+        for r in list("replicates") {
+            known(r, &["id", "name", "of", "connector", "at", "suppressed"])?;
+            out.replicates.push(Replicate {
+                id: read_id(r.get("id"), "a replicate's id")?,
+                name: r.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                of: ids_of(r, "a replicate's instance")?,
+                connector: read_id(r.get("connector"), "a replicate's connector")?,
+                at: r.get("at").and_then(Value::as_array).unwrap_or(&[]).iter().map(Anchor::from_json).collect::<Result<Vec<_>>>()?,
+                suppressed: read_flag(r, "suppressed")?,
+            });
+        }
+        for x in list("explodes") {
+            known(x, &["id", "name", "steps"])?;
+            let mut steps = Vec::new();
+            for step in x.get("steps").and_then(Value::as_array).unwrap_or(&[]) {
+                known(step, &["instances", "shift", "turn"])?;
+                let instances = step.get("instances").and_then(Value::as_array).unwrap_or(&[]).iter().map(|p| read_path(Some(p), "an exploded view's instance")).collect::<Result<Vec<_>>>()?;
+                let turn = match step.get("turn") {
+                    None => None,
+                    Some(t) => {
+                        known(t, &["point", "axis", "degrees"])?;
+                        Some((t.get("point").map_or(Ok(Vec3::ZERO), read_vec3)?, read_vec3(t.get("axis").ok_or_else(|| bad("a turn's axis"))?)?, read_number(t, "degrees", 0.0)?))
+                    }
+                };
+                steps.push(ExplodeStep { instances, shift: step.get("shift").map_or(Ok(Vec3::ZERO), read_vec3)?, turn });
+            }
+            out.explodes.push(Explode { id: read_id(x.get("id"), "an exploded view's id")?, name: x.get("name").and_then(Value::as_str).unwrap_or("").to_string(), steps });
+        }
+        for p in list("positions") {
+            known(p, &["id", "name", "values"])?;
+            let mut values = Vec::new();
+            for entry in p.get("values").and_then(Value::as_array).unwrap_or(&[]) {
+                known(entry, &["mate", "dof", "value"])?;
+                values.push((read_id(entry.get("mate"), "a position's mate")?, read_dof(entry.get("dof").and_then(Value::as_str).unwrap_or(""))?, read_number(entry, "value", 0.0)?));
+            }
+            out.positions.push(Position { id: read_id(p.get("id"), "a position's id")?, name: p.get("name").and_then(Value::as_str).unwrap_or("").to_string(), values });
+        }
         // Every reference has to be to something here, and ids stay above all those ever handed out.
-        let mut ids: Vec<u32> = out.instances.iter().map(|i| i.id).chain(out.connectors.iter().map(|c| c.id)).chain(out.mates.iter().map(|m| m.id)).chain(out.groups.iter().map(|g| g.id)).chain(out.relations.iter().map(|r| r.id)).collect();
+        let mut ids: Vec<u32> = out
+            .instances
+            .iter()
+            .map(|i| i.id)
+            .chain(out.connectors.iter().map(|c| c.id))
+            .chain(out.mates.iter().map(|m| m.id))
+            .chain(out.groups.iter().map(|g| g.id))
+            .chain(out.relations.iter().map(|r| r.id))
+            .chain(out.patterns.iter().map(|p| p.id))
+            .chain(out.replicates.iter().map(|r| r.id))
+            .chain(out.explodes.iter().map(|x| x.id))
+            .chain(out.positions.iter().map(|p| p.id))
+            .collect();
         ids.sort_unstable();
         if ids.windows(2).any(|w| w[0] == w[1]) {
             return Err(Error::InvalidInput("an id appears twice in this assembly".into()));
@@ -669,6 +989,16 @@ impl Assembly {
                 if out.mate(m).is_none() {
                     return Err(Error::InvalidInput(format!("relation {} uses mate {m}, which isn't here", r.id)));
                 }
+            }
+        }
+        for p in &out.patterns {
+            if p.of.iter().any(|i| out.instance(*i).is_none()) || matches!(p.axis, PatternAxis::Connector(c) if out.connector(c).is_none()) {
+                return Err(Error::InvalidInput(format!("pattern {} uses an instance or connector that isn't here", p.id)));
+            }
+        }
+        for r in &out.replicates {
+            if r.of.iter().any(|i| out.instance(*i).is_none()) || out.connector(r.connector).is_none() {
+                return Err(Error::InvalidInput(format!("replicate {} uses an instance or connector that isn't here", r.id)));
             }
         }
         let top = ids.last().copied().unwrap_or(0);
