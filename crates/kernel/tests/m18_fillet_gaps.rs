@@ -598,10 +598,38 @@ fn a_varying_radius_says_what_it_cant_do() {
     assert!(why.contains("two radii"), "{why}");
     let why = fillet_radii(&b, &[(vec![9999], Radius::Constant(2.0))], 2).unwrap_err().to_string();
     assert!(why.contains("no edge"), "{why}");
-    // A closed chain has no end to start from.
+    // Round a closed chain, its start is its end, so two radii there can't both be.
     let c = cyl(0.0, 0.0, 0.0, 20.0, 20.0, 1);
     let why = fillet_radii(&c, &[(vec![edge_at(&c, v3(0.0, 20.0, 20.0))], along(&[(0.0, 1.0), (1.0, 2.0)]))], 2).unwrap_err().to_string();
     assert!(why.contains("closed chain"), "{why}");
+}
+
+#[test]
+fn a_radius_varying_round_a_whole_rim() {
+    // A cylinder's whole top rim, from 2 where it starts, at x = 20, up to 4 halfway round and back down to 2, which is
+    // the same either way round. By Pappus at each angle, as on half a rim.
+    let body = cyl(0.0, 0.0, 0.0, 20.0, 20.0, 1);
+    let e = edge_at(&body, v3(0.0, 20.0, 20.0));
+    let law = Radius::Along { stations: vec![(0.0, 2.0), (0.5, 4.0)], start: Some(v3(20.0, 0.0, 20.0)) };
+    let f = fillet_radii(&body, &[(vec![e], law)], 3).unwrap();
+    let v = sound(&f, "a whole rim");
+    let radius = |t: f64| if t <= PI { 2.0 + 2.0 * t / PI } else { 4.0 - 2.0 * (t - PI) / PI };
+    let taken = simpson(0.0, 2.0 * PI, |t| {
+        let r = radius(t);
+        let off = r * (10.0 - 3.0 * PI) / (12.0 - 3.0 * PI);
+        k(r) * (20.0 - off)
+    });
+    close(v, vol(&body) - taken, 1e-7, "a whole rim");
+    // Started a quarter round instead, the same law lands elsewhere, and takes the same.
+    let law = Radius::Along { stations: vec![(0.0, 2.0), (0.5, 4.0)], start: Some(v3(0.0, 20.0, 20.0)) };
+    let g = fillet_radii(&body, &[(vec![e], law)], 3).unwrap();
+    close(sound(&g, "started elsewhere"), vol(&body) - taken, 1e-7, "started elsewhere");
+    // Where the radius is 4, a point 4 (1 - 1/sqrt 2) in from the corner on the diagonal is just in the fillet.
+    let index = coreshape::boolean::classify::Index::new(&g);
+    use coreshape::boolean::classify::BodyLoc;
+    let d = 4.0 * (1.0 - std::f64::consts::FRAC_1_SQRT_2);
+    assert_eq!(index.locate_in_body(v3(0.0, -(20.0 - d) + 0.01, 20.0 - d - 0.01)), BodyLoc::Inside);
+    assert_eq!(index.locate_in_body(v3(0.0, -(20.0 - d) - 0.01, 20.0 - d + 0.01)), BodyLoc::Outside);
 }
 
 /// Across every edge within this distance of a point, whether the faces on both sides are tangent.

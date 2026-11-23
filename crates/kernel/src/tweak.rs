@@ -877,9 +877,119 @@ fn offset_within(body: &Body, distances: &[f64], depth: usize) -> Result<Body> {
             if depth >= MOST_DEPTH {
                 return Err(why);
             }
-            taken_apart(body, distances, depth).map_err(|_| why)
+            match taken_apart(body, distances, depth) {
+                Ok(done) => Ok(done),
+                Err(_) => {
+                    let d = distances.first().copied().unwrap_or(0.0);
+                    if d < 0.0 && distances.iter().all(|x| *x == d) {
+                        through_the_neck(body, d, depth).map_err(|_| why)
+                    } else {
+                        Err(why)
+                    }
+                }
+            }
         }
     }
+}
+
+/// What a cut across a neck tags its faces with, so that a result they'd shaped can be told.
+const NECK_CUT: u32 = u32::MAX - 41;
+
+/// Moving in past half a neck's width parts a part in two, and a neck needn't be a pocket or a boss of anything to take
+/// apart, as a dumbbell's isn't. Cut across the neck, each side moves in on its own and they stand apart. That's the same
+/// as moving the whole in as long as the cut's own faces are gone from both results by then, or the cut would have shaped
+/// them; and every point of the result has to be the distance clear of the part. A neck is two flat walls facing each
+/// other closer than twice the distance, and the cut goes across the middle of where they face each other, one way across
+/// them or the other.
+fn through_the_neck(body: &Body, d: f64, depth: usize) -> Result<Body> {
+    let reach = -d;
+    let outward = |f: usize| -> Option<Frame> {
+        match body.faces[f].surface {
+            Surface::Plane(frame) => Some(if body.faces[f].flipped { Frame { origin: frame.origin, x: frame.x, y: -frame.y, z: -frame.z } } else { frame }),
+            _ => None,
+        }
+    };
+    let mut necks: Vec<(f64, Vec3, Vec3, Vec3)> = Vec::new();
+    for a in 0..body.faces.len() {
+        let Some(fa) = outward(a) else { continue };
+        for b in a + 1..body.faces.len() {
+            let Some(fb) = outward(b) else { continue };
+            if fa.z.dot(fb.z) > -1.0 + 1e-9 {
+                continue;
+            }
+            // The material between them: b beyond a against a's normal.
+            let gap = (fb.origin - fa.origin).dot(fb.z);
+            if !(gap > MIN_FEATURE && gap < 2.0 * reach) {
+                continue;
+            }
+            // Where they face each other: their boxes, flattened onto a's plane, overlapping.
+            let (x, y) = (fa.x, fa.y);
+            let flat = |f: usize| {
+                let pts = boundary_samples(body, f);
+                let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
+                for p in pts {
+                    let q = v2((p - fa.origin).dot(x), (p - fa.origin).dot(y));
+                    lo = v2(lo.x.min(q.x), lo.y.min(q.y));
+                    hi = v2(hi.x.max(q.x), hi.y.max(q.y));
+                }
+                (lo, hi)
+            };
+            let ((la, ha), (lb, hb)) = (flat(a), flat(b));
+            let (lo, hi) = (v2(la.x.max(lb.x), la.y.max(lb.y)), v2(ha.x.min(hb.x), ha.y.min(hb.y)));
+            if !(hi.x - lo.x > MIN_FEATURE && hi.y - lo.y > MIN_FEATURE) {
+                continue;
+            }
+            let middle = fa.origin + x * ((lo.x + hi.x) / 2.0) + y * ((lo.y + hi.y) / 2.0) + fb.z * (gap / 2.0);
+            necks.push((gap, middle, x, y));
+        }
+    }
+    necks.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let size = body.rough_size().max(1.0);
+    let mut last = refuse("there's no neck here to cut across".to_string());
+    for (_, middle, x, y) in necks.into_iter().take(4) {
+        for across in [x, y] {
+            match apart_at(body, d, depth, middle, across, size) {
+                Ok(done) => return Ok(done),
+                Err(why) => last = why,
+            }
+        }
+    }
+    Err(last)
+}
+
+/// Cuts a part by the plane through `point` square to `normal`, moves each side in by `-d` on its own, and puts them
+/// together, if the cut shaped neither.
+fn apart_at(body: &Body, d: f64, depth: usize, point: Vec3, normal: Vec3, size: f64) -> Result<Body> {
+    let n = normal.normalized();
+    let x = n.any_perpendicular();
+    let y = n.cross(x);
+    let r = 4.0 * size;
+    let block = crate::build::box_solid(&Frame { origin: point - x * r - y * r, x, y, z: n }, 2.0 * r, 2.0 * r, r, NECK_CUT)?;
+    let one = crate::boolean::intersect(body, &block)?;
+    let other = subtract(body, &block)?;
+    if one.faces.is_empty() || other.faces.is_empty() {
+        return Err(refuse("the cut across the neck misses the part".to_string()));
+    }
+    let mut moved = Vec::new();
+    for side in [&one, &other] {
+        let m = offset_within(side, &vec![d; side.faces.len()], depth + 1)?;
+        if m.faces.iter().any(|f| f.tag.feature == NECK_CUT) {
+            return Err(refuse("the cut across the neck would shape the result".to_string()));
+        }
+        if !m.faces.is_empty() {
+            moved.push(m);
+        }
+    }
+    let result = match moved.as_slice() {
+        [] => return Err(refuse("moving this far leaves nothing of the part".to_string())),
+        [only] => only.clone(),
+        [a, b] => crate::boolean::union(a, b)?,
+        _ => unreachable!(),
+    };
+    validate(&result).map_err(|defects| refuse(format!("the result isn't a valid solid: {}", defects.join("; "))))?;
+    meshes_closed(&result)?;
+    stays_clear(body, &result, -d)?;
+    Ok(result)
 }
 
 /// The faces joined to one by edges of one kind, convex or concave, and by seams and smooth edges: a pocket's faces by the
@@ -1211,7 +1321,117 @@ fn draft_once(body: &Body, from: &[usize], faces: &[usize], pull: Vec3, neutral:
                 let half_angle = angle.abs();
                 Surface::Cone { frame: Frame::new(origin, z, frame.x), radius, half_angle }
             }
-            _ => return Err(Error::Unsupported("only planes and cylinders can be drafted".into()).into()),
+            Surface::Extruded { frame, ref curve } => {
+                if frame.z.cross(pull).norm() > 1e-9 {
+                    return Err(refuse("a face extruded from a curve can only be drafted along the way it was extruded".to_string()).into());
+                }
+                let c = &curve.spline;
+                let (t0, t1) = c.domain();
+                let height = (neutral - frame.origin).dot(frame.z);
+                let on = move |s: f64| -> Option<(Vec3, Vec3)> {
+                    let q = c.eval(t0 + (t1 - t0) * s);
+                    let p = frame.to_world(v3(q.x, q.y, height));
+                    Some((p, face.outward_normal(p)))
+                };
+                let reach = boundary_samples(body, i);
+                Surface::Free { frame: Frame::WORLD, patch: Arc::new(ruled_draft(&face.surface, &on, pull, neutral, angle, &reach)?) }
+            }
+            Surface::Revolved { frame, ref curve } => {
+                if frame.z.cross(pull).norm() > 1e-9 {
+                    return Err(refuse("a turned face can only be drafted along its axis".to_string()).into());
+                }
+                // Where its curve crosses the neutral plane, as its radius there: the drafted face is a cone through that
+                // circle, over the angles the face covers.
+                let height = (neutral - frame.origin).dot(frame.z);
+                let c = &curve.spline;
+                let (t0, t1) = c.domain();
+                let along = |t: f64| c.eval(t).y - height;
+                let steps = 256;
+                let mut roots = Vec::new();
+                for k in 0..steps {
+                    let (a, b) = (t0 + (t1 - t0) * k as f64 / steps as f64, t0 + (t1 - t0) * (k + 1) as f64 / steps as f64);
+                    if along(a) == 0.0 || along(a) * along(b) < 0.0 {
+                        let (mut lo, mut hi) = (a, b);
+                        for _ in 0..80 {
+                            let m = (lo + hi) / 2.0;
+                            if along(lo) * along(m) <= 0.0 {
+                                hi = m;
+                            } else {
+                                lo = m;
+                            }
+                        }
+                        roots.push((lo + hi) / 2.0);
+                    }
+                }
+                if roots.len() != 1 {
+                    return Err(refuse(format!("a turned face is drafted from where it crosses the neutral plane, and this one crosses it {} times", roots.len())).into());
+                }
+                let radius = c.eval(roots[0]).x;
+                let reach = boundary_samples(body, i);
+                // The angles it covers, from the middle of them, with a little to spare.
+                let angle_of = |p: Vec3| {
+                    let l = frame.to_local(p);
+                    l.y.atan2(l.x)
+                };
+                let mid = {
+                    let sum = reach.iter().fold(Vec3::ZERO, |m, p| m + (frame.to_local(*p) - v3(0.0, 0.0, frame.to_local(*p).z)).normalized());
+                    sum.y.atan2(sum.x)
+                };
+                let wrap = |a: f64| (a - mid + PI).rem_euclid(TAU) - PI;
+                let (lo, hi) = reach.iter().map(|p| wrap(angle_of(*p))).fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), a| (l.min(a), h.max(a)));
+                let (lo, hi) = ((lo - 0.2).max(-PI + 1e-3), (hi + 0.2).min(PI - 1e-3));
+                let on = move |s: f64| -> Option<(Vec3, Vec3)> {
+                    let a = mid + lo + (hi - lo) * s;
+                    let p = frame.to_world(v3(radius * a.cos(), radius * a.sin(), height));
+                    Some((p, face.outward_normal(p)))
+                };
+                Surface::Free { frame: Frame::WORLD, patch: Arc::new(ruled_draft(&face.surface, &on, pull, neutral, angle, &reach)?) }
+            }
+            Surface::Free { frame, ref patch } => {
+                // Its curve on the neutral plane, along whichever way across it crosses that plane once.
+                let ((u0, u1), (v0, v1)) = patch.domain();
+                let height = |u: f64, v: f64| (frame.to_world(patch.eval(u, v)) - neutral).dot(pull);
+                let crossing = |along_u: bool, s: f64| -> Option<(f64, f64)> {
+                    let at = |t: f64| if along_u { (u0 + (u1 - u0) * s, v0 + (v1 - v0) * t) } else { (u0 + (u1 - u0) * t, v0 + (v1 - v0) * s) };
+                    let h = |t: f64| {
+                        let (u, v) = at(t);
+                        height(u, v)
+                    };
+                    let steps = 64;
+                    let mut found = None;
+                    for k in 0..steps {
+                        let (a, b) = (k as f64 / steps as f64, (k + 1) as f64 / steps as f64);
+                        if h(a) == 0.0 || h(a) * h(b) < 0.0 {
+                            if found.is_some() {
+                                return None;
+                            }
+                            let (mut lo, mut hi) = (a, b);
+                            for _ in 0..80 {
+                                let m = (lo + hi) / 2.0;
+                                if h(lo) * h(m) <= 0.0 {
+                                    hi = m;
+                                } else {
+                                    lo = m;
+                                }
+                            }
+                            found = Some(at((lo + hi) / 2.0));
+                        }
+                    }
+                    found
+                };
+                let along_u = (0..=16).all(|k| crossing(true, k as f64 / 16.0).is_some());
+                if !along_u && !(0..=16).all(|k| crossing(false, k as f64 / 16.0).is_some()) {
+                    return Err(refuse("a free-form face is drafted from where it crosses the neutral plane, once all the way across it, and this one doesn't".to_string()).into());
+                }
+                let on = move |s: f64| -> Option<(Vec3, Vec3)> {
+                    let (u, v) = crossing(along_u, s)?;
+                    let p = frame.to_world(patch.eval(u, v));
+                    Some((p, face.outward_normal(p)))
+                };
+                let reach = boundary_samples(body, i);
+                Surface::Free { frame: Frame::WORLD, patch: Arc::new(ruled_draft(&face.surface, &on, pull, neutral, angle, &reach)?) }
+            }
+            _ => return Err(Error::Unsupported("only planes, cylinders, extruded and turned curves and free-form faces can be drafted".into()).into()),
         };
     }
     // A smooth edge between drafted faces is a straight ruling. It keeps its point on the neutral plane and
@@ -1226,16 +1446,91 @@ fn draft_once(body: &Body, from: &[usize], faces: &[usize], pull: Vec3, neutral:
         if !fd {
             return Ok(p);
         }
-        if !matches!(body.edges[e].curve, Curve::Line { .. }) {
-            return Err(Error::Unsupported("a smooth edge between drafted faces must be straight".into()));
-        }
         let out = body.faces[f].outward_normal(p);
         let along = (p - neutral).dot(pull);
-        Ok(p - out * (along * angle.tan()))
+        let moved = p - out * (along * angle.tan());
+        if matches!(body.edges[e].curve, Curve::Line { .. }) {
+            return Ok(moved);
+        }
+        // A curved one, as where a turned face's two halves meet, becomes the ruling through where it crossed the neutral
+        // plane: that point moved in, then onto the drafted face, which keeps it in the plane through the axis.
+        match surfaces[f] {
+            Surface::Free { .. } => Ok(surfaces[f].project(moved)),
+            _ => Err(Error::Unsupported("a curved smooth edge between drafted faces must be on a free-form, extruded or turned face".into())),
+        }
     };
     let done = with_surfaces(body, &surfaces, &map)?;
     meshes_closed(&done)?;
     Ok(done)
+}
+
+/// A drafted face's new surface: the ruled surface through its curve on the neutral plane, each ruling leaning in from
+/// the pull by the draft angle, against the face's outward normal there, so that a point `h` along the pull from the
+/// neutral plane moves in by `h tan(angle)`, as on a drafted plane. `on` gives the curve's point and the face's outward
+/// normal there for a share of the way along it. That's exact along each ruling; across, the face's normal along a
+/// spline is no spline, so the two ends of the rulings are fitted, as cubics through the same parameters, more of them
+/// until both are within `FIT` at every point halfway between. It covers the face's heights with as much again to spare,
+/// for its edges to be found on, and its normal points the way the old surface's did.
+fn ruled_draft(old: &Surface, on: &dyn Fn(f64) -> Option<(Vec3, Vec3)>, pull: Vec3, neutral: Vec3, angle: f64, reach: &[Vec3]) -> Result<Patch> {
+    let lost = || refuse("the face's curve on the neutral plane couldn't be followed all the way along it".to_string());
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in reach {
+        let h = (*p - neutral).dot(pull);
+        lo = lo.min(h);
+        hi = hi.max(h);
+    }
+    let room = (hi - lo).max(1.0);
+    let (z0, z1) = (lo - room, hi + room);
+    let tan = angle.tan();
+    // The ruling's direction at a point of the curve, square to the pull.
+    let lean = |n: Vec3| -> Option<Vec3> {
+        let flat = n - pull * n.dot(pull);
+        (flat.norm() > 1e-6).then(|| pull - flat.normalized() * tan)
+    };
+    let row = |s: f64, z: f64| -> Option<Vec3> {
+        let (p, n) = on(s)?;
+        Some(p + lean(n)? * z)
+    };
+    // Which way round, so that the normal stays as it was.
+    let (p, n) = on(0.5).ok_or_else(lost)?;
+    let (q, _) = on(0.5 + 1e-4).ok_or_else(lost)?;
+    let reversed = (q - p).cross(pull).dot(old.normal(p)) < 0.0;
+    let at = |s: f64| if reversed { 1.0 - s } else { s };
+    if lean(n).is_none() {
+        return Err(refuse("a face that's nearly square to the pull can't be drafted".to_string()));
+    }
+    let mut count = 16usize;
+    loop {
+        let params: Vec<f64> = (0..=count).map(|k| k as f64 / count as f64).collect();
+        let (degree, knots) = crate::patch::interpolation_knots(&params);
+        let solver = crate::patch::Collocation::new(&params, degree, &knots).ok_or_else(lost)?;
+        let mut rows = Vec::with_capacity(2);
+        for z in [z0, z1] {
+            let values: Vec<crate::spline::Hom> = params.iter().map(|&s| row(at(s), z).map(|p| crate::spline::Hom::of(p, 1.0))).collect::<Option<_>>().ok_or_else(lost)?;
+            let controls: Vec<Vec3> = solver.solve(&values).iter().map(|h| h.point()).collect();
+            rows.push(Spline::new(degree, knots.clone(), controls, vec![1.0; params.len()])?);
+        }
+        let worst = (0..count)
+            .flat_map(|k| [(k, z0, 0), (k, z1, 1)])
+            .map(|(k, z, r)| {
+                let s = (k as f64 + 0.5) / count as f64;
+                row(at(s), z).map_or(f64::INFINITY, |want| rows[r].eval(s).dist(want))
+            })
+            .fold(0.0f64, f64::max);
+        if worst <= crate::rolling::FIT {
+            let n = rows[0].points().len();
+            let mut points = Vec::with_capacity(2 * n);
+            for i in 0..n {
+                points.push(rows[0].points()[i]);
+                points.push(rows[1].points()[i]);
+            }
+            return Patch::new((degree, 1), (knots, vec![z0, z0, z1, z1]), (n, 2), points, vec![1.0; 2 * n]);
+        }
+        if count >= 4096 {
+            return Err(refuse(format!("the drafted face couldn't be fitted within {:e}: it comes to {worst:e}", crate::rolling::FIT)));
+        }
+        count *= 2;
+    }
 }
 
 #[cfg(test)]

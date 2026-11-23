@@ -189,22 +189,23 @@ fn a_shell_of_a_part_with_a_thin_wall() {
 }
 
 #[test]
-fn a_neck_with_no_feature_to_take_apart_is_refused_and_says_where() {
-    // A dumbbell in outline. Its neck isn't a pocket or a boss of anything, so nothing here can be taken apart, and moving
-    // in past half the neck's width would split the part.
+fn a_neck_with_no_feature_to_take_apart_is_cut_across() {
+    // A dumbbell in outline: two lobes 20 square joined by a neck 4 wide and 20 long, 30 tall. Its neck isn't a pocket or a
+    // boss of anything, so nothing can be taken apart, and moving in 3, past half the neck's width, parts it in two: each lobe
+    // moved in, 14 by 14 by 24. It's cut across the neck, each side moved in on its own, and the cut's faces have gone.
     let outline = profile::Wire::polygon(&[v2(0.0, 0.0), v2(20.0, 0.0), v2(20.0, 8.0), v2(40.0, 8.0), v2(40.0, 0.0), v2(60.0, 0.0), v2(60.0, 20.0), v2(40.0, 20.0), v2(40.0, 12.0), v2(20.0, 12.0), v2(20.0, 20.0), v2(0.0, 20.0)]);
     let bell = extrude(&profile::Profile::new(outline), &Frame::WORLD, 30.0, BASE).unwrap();
-    let result = offset(&bell, -3.0);
-    match result {
-        Ok(moved) => {
-            // If it gets there another way, it has to be right: two pieces, each 14 by 14 by 24.
-            close(volume(&moved), 2.0 * 14.0 * 14.0 * 24.0, "split in two");
-        }
-        Err(why) => {
-            let why = why.to_string();
-            assert!(why.contains("walls cross near") || why.contains("turns round") || why.contains("mesh"), "{why}");
-        }
-    }
+    let moved = offset(&bell, -3.0).unwrap();
+    validate(&moved).unwrap();
+    assert_eq!(moved.solid_count(), 2);
+    close(volume(&moved), 2.0 * 14.0 * 14.0 * 24.0, "split in two");
+    // Just under half the neck, it stays one piece, the neck 0.2 wide.
+    let thin = offset(&bell, -1.9).unwrap();
+    assert_eq!(thin.solid_count(), 1);
+    close(volume(&thin), (2.0 * 16.2 * 16.2 + (20.0 + 3.8) * 0.2) * 26.2, "just joined");
+    // A shell as thick: its cavity is the two lobes moved in.
+    let hollow = shell(&bell, &[], 3.0, 5).unwrap();
+    close(volume(&hollow), volume(&bell) - 2.0 * 14.0 * 14.0 * 24.0, "shelled");
 }
 
 #[test]

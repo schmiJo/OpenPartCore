@@ -13,11 +13,11 @@ cargo run --release -p coreshape --example replay -- <grid|rot|prism|gen|al|ext|
 
 These are missing, not failing. [PLAN.md](PLAN.md) has the order.
 
-- **Offset and shell where walls cross and nothing can be taken apart,** such as the neck of a dumbbell in outline. Crossing around pockets, bosses, holes and slots works: see [below](#offset-shell-and-draft).
-- **Draft on spline and free-form faces,** and any draft that changes the topology, other than taking a fillet off and putting it back.
+- **Offset and shell where curved walls cross and nothing can be taken apart,** such as a round neck between two balls. Crossing around pockets, bosses, holes and slots works, and so does a neck between flat walls, such as a dumbbell's in outline: see [below](#offset-shell-and-draft).
+- **A draft that changes the topology,** other than taking a fillet off and putting it back, and a draft of a face that meets one that isn't drafted smoothly along a curve. Draft on spline, turned and free-form faces is built: see [below](#offset-shell-and-draft).
 - **Most of what could be done between sheets.** Sheets exist and can be made, cut, thickened and sewn: see [below](#sheet-bodies). What's not built is listed there.
-- **More kinds of blend.** No variable radius and no general corner blends, and fillets don't yet reshape a neighbouring face they'd run off: see [below](#fillets-and-chamfers).
-- **Splitting a sheet along another sheet, and a free-form face carried on past its edges for a split.** See [Small features](#small-features).
+- **More kinds of blend.** No general corner blends where a fitted blend passes a sharp edge's vertex, fillets don't yet reshape a neighbouring face they'd run off, and a varying radius can't run smoothly into edges with another radius: see [below](#fillets-and-chamfers). A radius varying along a chain, open or closed, is built.
+- **A free-form face carried on past its edges for a split,** and a Boolean between sheets. Splitting a sheet along another sheet is built: see [Sheet bodies](#sheet-bodies).
 
 ## Fuzz results
 
@@ -212,7 +212,7 @@ Open surfaces that are bodies of their own: [the design](SHEET_BODIES_DESIGN.md)
 
 **Not built, and refused saying so:**
 
-- **Cutting a sheet with another sheet,** or a Boolean between sheets, as a sheet has no inside to tell the sides apart by. A solid, a plane or a sketch's outline can cut one.
+- **A Boolean between sheets,** as a sheet has no inside to tell the sides apart by. **Splitting a sheet along another sheet is built, since 2026-11-23:** the first is cut where the second crosses it, and each piece goes to the side of the second it's on, found by which side of the cutting face a point just into the piece is on, next to each stretch of the cut, and carried across the piece's other edges to its neighbours. A cutting sheet that ends partway across, which would only slit it, is refused, and so is a piece found on both sides. Checked: a plate cut by a wall into 120 and 80 of its 200, a tube cut by a floor into rings of the heights they must be, a quarter tube cut by a slanted plane into two parts that add up to it and lie each on its side, two walls in an X cutting each other in half, and slits refused.
 - **Fillet, chamfer, offset, shell, draft and delete face on a sheet.** A sheet's boundary isn't something any of these know about.
 - **Extending a sheet,** or trimming one up to another that doesn't reach across it.
 - **A loft between open curves.** A loft's sections are closed outlines, which it matches up around their loops. With the mode `surface` it makes the sides of those, and a section of open curves is refused for having no outline.
@@ -270,7 +270,7 @@ Parts held by a fastened mate that's already met move as one and cost next to no
 
 Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.md).
 
-- **Refused by name:** draft on these faces. Offset and shell turn the face into the free-form surface it exactly is, moved: see [below](#offset-shell-and-draft). Fillets and chamfers are fitted: see [below](#fillets-and-chamfers).
+- **Draft** along the extrusion, or along a turned face's axis, makes the face a fitted ruled patch: see [below](#offset-shell-and-draft). Offset and shell turn the face into the free-form surface it exactly is, moved: see [below](#offset-shell-and-draft). Fillets and chamfers are fitted: see [below](#fillets-and-chamfers).
 - **Two different splines sharing part of their length** are refused when their faces overlap there. Identical curves are fine, so two extrusions from one profile work.
 - **A spline can touch a revolve axis only at its ends.**
 - **An outline that crosses itself is found by sampling,** 16 pieces per knot interval and closer toward its ends, so a crossing much smaller than that could get through to the mesher, which
@@ -282,7 +282,7 @@ Curves swept along a line or around an axis: see [NURBS_DESIGN.md](NURBS_DESIGN.
 
 Rational B-spline patches, from a loft or a file: see [NURBS_DESIGN.md](NURBS_DESIGN.md#phase-3-free-form-patches).
 
-- **Refused by name:** draft on these faces, as on swept splines. A pole or a fold, found by sampling each knot interval at 25 to 169 points, fewer when there are many small intervals and with a closer look before refusing, for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
+- **Draft** makes a free-form face the ruled surface through its curve on the neutral plane, fitted: see [below](#offset-shell-and-draft). A pole or a fold, found by sampling each knot interval at 25 to 169 points, fewer when there are many small intervals and with a closer look before refusing, for a normal that vanishes or turns over between neighbours, so one much smaller than that could get through.
 - **Two surfaces lying on each other are refused unless they're the same patch.** A patch that's exactly a cylinder, against a real cylinder of that size, is refused as a tangency, and nothing guesses that they're the same.
 - **The proof has edges.** The closest point is proven for every point of the patch. Past its boundary the surface carries on along its tangent planes, where the value is only a height, and that's only used near faces' edges. Far from a surface, if a great many points are almost equally close, a search can run out of budget and report a smaller distance it can prove. A patch's tightest bend, which sets how fine a trace is, is sampled and not proven, so a very small feature between samples could be stepped over. The checks on every result still apply.
 - **Lofts take one outline per section, with the same number of holes.** Since 2026-11-23 they can also start or end at a point, close into a ring, follow guide curves, and leave their ends square or round over an end point. Their limits:
@@ -337,7 +337,7 @@ Supported:
 - **A face that ends part of the way along the edge.** A hole across the contact line just cuts the fillet. Where the blend would otherwise cut into what's beyond a wall or hang out over nothing, it's kept to what's under or over that face, so a boss's fillet near the plate's edge stops at the plate's side, which rises to meet it.
 
 - **Different radii on edges that meet at a corner** (`fillet_radii`). The largest goes first, and the others then run smoothly around it as one chain, with the radius going from one to the other around the piece between them, so nothing at the corner is left sharp. An edge that's the odd one out at a corner, convex among concave or the other way round, always goes first.
-- **A radius varying along a chain of edges,** in straight lines between places along it, on any edge the fitted route takes, an open chain only. On a straight edge between square faces, and around half a rim, the volume matches the integral of each section's area to 1e-8, as the sections there are exactly what a ball would make.
+- **A radius varying along a chain of edges,** in straight lines between places along it, on any edge the fitted route takes. On a straight edge between square faces, and around half a rim, the volume matches the integral of each section's area to 1e-8, as the sections there are exactly what a ball would make. **Round a closed chain too, since 2026-11-23:** measured from the point nearest `start`, or the chain's lowest point, the way the chain runs, and on from the last place back round to the first, so a whole rim from 2 up to 4 halfway and back matches its integral to 1e-7, started anywhere. Places at 0 and 1 with different radii are refused, as there they're one place.
 
 Every fillet and chamfer is checked afterwards in two ways that don't depend on how it was made. Its result can't reach past the part's own bounds, as a blend only lies between points on the part's faces. And along each edge it was asked for, the edge has to have gone: taken off a convex edge and filled in on a concave one. Where the ball has its faces to stand on, all of it has to go, and where a face runs off, most of it. These would have turned both wrong results the real parts found into refusals: a rib's fillet that ran on past its tip, and a chamfer down a shelf bracket's sloped back that did nothing. A fitted blend is only checked at the middle of each edge, where an exact one is checked at every station, as finding a point among free-form faces is slow. A fitted blend's edges are never ones where the ball is sure of its faces, so all it checks there is that no middle is on the wrong side and most of them are gone. Checked at 7 points each, the tee demo took 76 ms for a step of its first slider natively, and 43 ms checked at the middle. The other demos are within the noise either way.
 
@@ -351,7 +351,7 @@ Supported, but fitted and not exact, which makes them the only results in this k
 Not supported, returning an error:
 
 - A radius too big for both of the faces beside the edge.
-- A radius that varies around a closed chain, as there's no end for it to start from, or that varies and runs smoothly into edges with another radius.
+- A radius that varies and runs smoothly into edges with another radius.
 - Two edges running smoothly into each other with different radii and nothing between them for the radius to go from one to the other.
 - A fitted blend passing a vertex where a sharp edge meets it, or that ends where more than one face lies beyond it. Those need corner blends.
 - A fitted blend's end at a reflex corner, where its side would end past the neighbouring edge, which takes reshaping that neighbour.
@@ -402,7 +402,7 @@ These move a body's surfaces, so they are exact.
 - **A face that doesn't survive goes, and the change is tried again.** A fillet smaller than the wall of a shell, a chamfer that gets used up, a hole, pocket or slot that closes moving out, and a boss that goes moving in. By then the face is redundant, as its neighbours have moved past it, so this gives the same shape as a part that never had it. It uses [delete face](#delete-face), so what that refuses is refused here too.
 - **Only if it's really redundant.** A face can give way only in part, such as a tapered chamfer whose narrow end is used up while its wide end isn't, and just deleting that would give a plausible, wrong shape. So points across every face that went have to be the full distance from the result, on the right side, or that route is abandoned for the next one. That's sampled at up to 121 points of each face.
 - **Walls that cross are settled by taking the part apart.** Moving in, a part with a pocket is its surroundings moved in, less the pocket moved out, which is an exact identity: a point is that far inside the part if and only if it's that far inside the surroundings and that far from the pocket. Moving out, a part with a boss is the part without it moved out, together with the boss moved out. Neither piece crosses itself, and a Boolean settles what they do to each other, which covers a wall opening through, two pockets joining, a hole breaking out of an edge, two bosses growing together, and a part splitting into separate solids. The faces of the result keep the names they came from.
-- **What it can't take apart is refused, saying where,** when delete face can't lift out either of the features involved. The clearest case is a part with no feature at all to lift out: a dumbbell in outline, moving in past half the neck's width, whose neck isn't a pocket or a boss of anything. Crossing is found by whether a moved face comes nearer another face than that face has moved, at 4 points along each edge and up to 24 across each face, so a crossing smaller than those could get through.
+- **A neck between flat walls is cut across, since 2026-11-23.** Moving in past half a neck's width parts the part, and a neck needn't be a pocket or a boss of anything, as a dumbbell's in outline isn't. Where taking apart finds nothing, two flat walls facing each other closer than twice the distance are a neck: the part is cut across the middle of where they face each other, one way across them or the other, each side moves in on its own, and they're put together. That's what moving the whole would give as long as the cut's own faces have gone from both results, which is checked, as is every point of the result being the distance clear of the part. The dumbbell moved in 3, past its neck's 2, comes out as its two lobes exactly, and shells; at 1.9 it stays one piece with a neck 0.2 wide. **Still refused:** a neck between curved walls, such as a round one between two balls, and anything else that can't be taken apart, saying where.
 - **Fuzz** (`--example fuzz_features -- 2000 offset`, and `curved`), on random parts with a random feature, moved by up to 35% of their smallest size. Whatever gave way, moving out, every point in the part or closer to it than the distance has to be in the result, and nothing more than twice that outside it can be. Moving in, every point in the result has to be in the part and at least the distance inside it, and nothing more than twice that inside the part can be left out. On blocks: 1,894 right, 45 refused, 0 wrong and 61 skipped, of 2,000. On cylinders, lofts and spline extrusions: 210 right, 52 refused, 0 wrong and 38 skipped, of 300. Before taking parts apart, the blocks were 77% right.
 - **Past the distance of a concave edge moving in, or a convex one moving out, edges stay sharp,** meeting further along. There are no rounded joins, so the result isn't the set of points at that distance, only what's inside the moved faces.
 - **A free-form or swept spline face moves exactly.** Its offset isn't a spline, so it isn't stored as one: the surface is the patch plus a distance, and the distance to it is the distance to the patch less that one. Checked on a vase, by a one-dimensional integral from its own profile, at offsets from 0.25 to 3: 6152.276608 against 6152.276661 at 0.75, and 12447.1833 against 12447.1844 at 3. On a spline sphere, 5575.279763 against 5575.279763.
@@ -429,8 +429,19 @@ These move a body's surfaces, so they are exact.
 
 - **Faces that meet smoothly must move together.** Shelling with one of a smooth pair open is refused, as is
   drafting half of one.
-- **Draft takes planes along the pull and cylinders on it.** Spheres, cones and tori aren't draftable, and neither is a
-  smooth edge between drafted faces that isn't straight.
+- **Draft takes planes along the pull, cylinders on it, faces extruded from a curve along it, faces turned about it, and
+  free-form faces.** Spheres, cones and tori aren't draftable. A drafted plane turns and a drafted cylinder becomes a cone,
+  exactly. Any other face becomes the ruled surface through its curve on the neutral plane, each ruling leaning in from the
+  pull by the angle, which is what drafting a plane does too. Along each ruling that's exact; across, the face's normal
+  along a spline is no spline, so the rulings' ends are fitted as cubics through the same parameters, more of them until
+  both are within 1.5e-7 everywhere between. Checked by closed forms: an elliptical prism drafted 3 and -2 degrees about its
+  base and 4 about its middle matches Steiner's formula for its level cuts, the inward offset of a smooth convex outline
+  having an area of A - P d + pi d^2, to 1e-7; a turned spline wall and a loft between equal circles, a cylinder written as
+  a free-form patch, each come out the frustum they must, to 1e-7. A turned face is drafted from where its curve crosses
+  the neutral plane, which it has to do once; a free-form face from where it crosses it, once across the whole face one
+  way or the other, or it's refused, saying so. A smooth edge between drafted faces is the ruling through its point on the
+  neutral plane: straight edges as before, and curved ones, as where a turned face's halves meet, moved onto the new face.
+  A smooth curved edge between a free-form face and one that isn't drafted, as along a loft's rails, is still refused.
 - **A fillet touching a drafted face comes off and goes back on,** at the same radius between the same two faces, which comes out the same as drafting first and rounding after. Its faces may get different slots, as those go by edge, so name them by the faces they're between: `f3:side.1[f2:end|f2:side.0]`.
 - **A draft that changes the topology otherwise is refused.** Nothing there is redundant the way an offset's is, as the neutral plane leaves some of every face in place.
 

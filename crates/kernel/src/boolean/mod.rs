@@ -280,6 +280,10 @@ enum Plan {
     /// The first is a solid, cut along the second, a sheet: all of the solid is kept, and each piece of the sheet inside it
     /// twice, once facing each way, so that the solid comes apart into pieces on either side.
     Split,
+    /// The first is a sheet, cut along the second, also a sheet: the pieces of the first in front of the second, the way
+    /// its faces face, if true, or behind it. Each piece's side is found next to the cut, and carried across the edges it
+    /// shares with others that aren't the cut.
+    SplitSheet(bool),
 }
 
 fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
@@ -436,7 +440,7 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
     // Step 5: cut each face into regions.
     let mut pieces: Vec<Piece> = Vec::new();
     for s in 0..2 {
-        if s == 1 && matches!(plan, Plan::Trim(_)) {
+        if s == 1 && matches!(plan, Plan::Trim(_) | Plan::SplitSheet(_)) {
             continue;
         }
         for f in 0..bodies[s].faces.len() {
@@ -465,6 +469,27 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
 
     // Step 6: classify and select.
     let mut selected: Vec<(usize, bool)> = Vec::new(); // (piece, flip)
+    if let Plan::SplitSheet(front) = plan {
+        let cut: HashSet<usize> = extras[0].iter().flatten().copied().collect();
+        // A cut that ends inside a face parts nothing there, and tracing the face's pieces leaves it out.
+        let used: HashSet<usize> = pieces.iter().flat_map(|p| p.loops.iter().flatten().map(|c| c.edge)).collect();
+        if cut.iter().any(|e| !used.contains(e)) {
+            return Err(Error::InvalidInput("the cutting sheet ends partway across the sheet, which would only slit it: it has to reach right across".into()));
+        }
+        let sides = sheet_sides(&pieces, a, b, &index[1], &arr, &cut)?;
+        for (i, side) in sides.iter().enumerate() {
+            if *side == Some(front) || (side.is_none() && !front) {
+                selected.push((i, false));
+            }
+        }
+        let body = assemble(&pieces, &selected, bodies, &arr, true)?;
+        let body = simplify::simplify(body)?;
+        validate(&body).map_err(Error::InvalidBody)?;
+        if !body.faces.is_empty() {
+            verify_meshable(&body, bodies)?;
+        }
+        return Ok(body);
+    }
     for (i, piece) in pieces.iter().enumerate() {
         if plan == Plan::Split {
             // A sheet has no inside to sort the solid's pieces by: they all stay.
@@ -492,7 +517,7 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
                 (Keep::Inside, Class::In) => Some(false),
                 _ => None,
             },
-            Plan::Split => unreachable!("chosen above"),
+            Plan::Split | Plan::SplitSheet(_) => unreachable!("chosen above"),
         };
         if let Some(flip) = keep {
             selected.push((i, flip));
@@ -519,8 +544,89 @@ fn run(a: &Body, b: &Body, plan: Plan) -> Result<Body> {
         }
         // The pieces are checked against the solid once they're apart.
         Plan::Split => verify_meshable(&body, bodies)?,
+        Plan::SplitSheet(_) => unreachable!("returned above"),
     }
     Ok(body)
+}
+
+/// Which side of the cutting sheet each piece of a sheet is on: true in front, the way the cutting sheet's faces face.
+/// Next to a stretch of the cut, a point just into the piece says, by which side of the cutting face it's on there; across
+/// the piece's other edges, its neighbours are on the same side. A piece the cut doesn't reach, nor anything joined to it,
+/// has no side. One found on both sides is a slit, where the cutting sheet ends partway across, and is refused.
+fn sheet_sides(pieces: &[Piece], a: &Body, b: &Body, index_b: &Index, arr: &Arrangement, cut: &HashSet<usize>) -> Result<Vec<Option<bool>>> {
+    let size = a.rough_size().max(b.rough_size()).max(1.0);
+    let mut side: Vec<Option<bool>> = vec![None; pieces.len()];
+    let mut queue: Vec<usize> = Vec::new();
+    let slit = || Error::InvalidInput("the cutting sheet ends partway across the sheet, which would only slit it: it has to reach right across".into());
+    for (i, piece) in pieces.iter().enumerate() {
+        let face = &a.faces[piece.face];
+        for c in piece.loops.iter().flatten() {
+            if !cut.contains(&c.edge) {
+                continue;
+            }
+            let edge = &arr.edges[c.edge];
+            let t = (edge.t0 + edge.t1) / 2.0;
+            let mid = edge.curve.eval(t);
+            let along = edge.curve.derivative(t).normalized() * if c.reversed { -1.0 } else { 1.0 };
+            // A face's loops go round it anticlockwise about its outward normal, so it's on the left.
+            let into = face.outward_normal(mid).cross(along).normalized();
+            let probe = face.surface.project(mid + into * (1e-5 * size));
+            // The cutting face through the cut there.
+            let Some(g) = (0..b.faces.len()).filter(|&g| index_b.face_box_holds(g, mid, 1e-6 * size)).min_by(|&x, &y| b.faces[x].surface.sdf(mid).abs().total_cmp(&b.faces[y].surface.sdf(mid).abs())) else {
+                continue;
+            };
+            let front = (probe - mid).dot(b.faces[g].outward_normal(mid)) > 0.0;
+            match side[i] {
+                None => {
+                    side[i] = Some(front);
+                    queue.push(i);
+                }
+                Some(s) if s != front => return Err(slit()),
+                _ => {}
+            }
+        }
+    }
+    // Across the edges that aren't the cut.
+    let mut by_edge: HashMap<usize, Vec<usize>> = HashMap::default();
+    for (i, piece) in pieces.iter().enumerate() {
+        for c in piece.loops.iter().flatten() {
+            if !cut.contains(&c.edge) {
+                by_edge.entry(c.edge).or_default().push(i);
+            }
+        }
+    }
+    while let Some(i) = queue.pop() {
+        let here = side[i];
+        for c in pieces[i].loops.iter().flatten() {
+            let Some(next) = by_edge.get(&c.edge) else { continue };
+            for &j in next {
+                match side[j] {
+                    None => {
+                        side[j] = here;
+                        queue.push(j);
+                    }
+                    s if s != here => return Err(slit()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(side)
+}
+
+/// Cuts a sheet along another sheet that runs right across it: what's in front of the cutting sheet, the way its faces
+/// face, and what's behind it, each as one body of however many sheets. A cutting sheet that ends partway across, which
+/// would only slit it, is refused. Nothing in front and the whole sheet behind means the cutting sheet doesn't reach it.
+pub fn split_sheet_by_sheet(sheet: &Body, cutter: &Body) -> Result<(Body, Body)> {
+    if !sheet.sheet || !cutter.sheet {
+        return Err(Error::InvalidInput("splitting a sheet along a sheet takes two sheets".into()));
+    }
+    let front = run(sheet, cutter, Plan::SplitSheet(true))?;
+    if front.faces.is_empty() {
+        return Ok((Body { sheet: true, ..Body::default() }, sheet.clone()));
+    }
+    let back = run(sheet, cutter, Plan::SplitSheet(false))?;
+    Ok((front, back))
 }
 
 /// Refuses a split along a sheet that ends inside the solid. Where it does, the edge it ends at has only the sheet's piece

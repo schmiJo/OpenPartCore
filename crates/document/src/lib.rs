@@ -4130,12 +4130,7 @@ impl Document {
                         (false, true) => (trim_sheet(body, &cutter, Keep::Inside)?, trim_sheet(body, &cutter, Keep::Outside)?),
                         (false, false) => (intersect(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?, subtract(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?),
                         (true, false) => split_by_sheet(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?,
-                        (true, true) => {
-                            return Err(Error::Unsupported(format!(
-                                "splitting the sheet {} along another sheet isn't built, as a sheet has no inside to tell the two sides apart by: cutting a sheet with another sheet takes a plane, a face's flat, round or ring-shaped surface, or a solid part",
-                                id.text()
-                            )))
-                        }
+                        (true, true) => coreshape::boolean::split_sheet_by_sheet(body, &cutter).map_err(|e| on_body(e, *id, scope.len() > 1))?,
                     };
                     if inside.faces.is_empty() || outside.faces.is_empty() {
                         if named {

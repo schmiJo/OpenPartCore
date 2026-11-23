@@ -586,10 +586,71 @@ impl Law {
             sum += l;
         }
         match varying {
-            Varying::Along { stations, start } => {
-                if chain.closed {
-                    return Err(Error::Unsupported("a radius that varies around a closed chain of edges isn't available yet: there's no end for it to start from".into()));
+            Varying::Along { stations, start } if chain.closed => {
+                // Round a closed chain, from the point on it nearest `start`, or its lowest by x, then y, then z, the way the
+                // chain runs, and on round from the last station back to the first, so there's no break.
+                let samples = 64;
+                let mut origin = (f64::INFINITY, 0.0);
+                let mut lowest: Option<(Vec3, f64)> = None;
+                for (i, l) in lengths.iter().enumerate() {
+                    for k in 0..samples {
+                        let s = k as f64 / samples as f64;
+                        let p = els[i].point(body, s);
+                        let pos = before[i] + s * l;
+                        if let Some(want) = start {
+                            if p.dist(*want) < origin.0 {
+                                origin = (p.dist(*want), pos);
+                            }
+                        } else if lowest.is_none_or(|(q, _)| [p.x, p.y, p.z] < [q.x, q.y, q.z]) {
+                            lowest = Some((p, pos));
+                        }
+                    }
                 }
+                let origin = lowest.map_or(origin.1, |(_, pos)| pos);
+                let (first, last) = (stations[0], stations[stations.len() - 1]);
+                if first.0 <= 1e-12 && last.0 >= 1.0 - 1e-12 && (first.1 - last.1).abs() > 1e-9 * first.1.max(last.1) {
+                    return Err(Error::InvalidInput(format!(
+                        "round a closed chain, where it starts is where it ends, so a radius of {} there and {} can't both be: give one",
+                        first.1, last.1
+                    )));
+                }
+                // The stations once round, with the last before the first and the first after the last.
+                let mut ring: Vec<(f64, f64)> = vec![(stations[stations.len() - 1].0 - 1.0, stations[stations.len() - 1].1)];
+                ring.extend(stations.iter().copied());
+                ring.push((stations[0].0 + 1.0, stations[0].1));
+                let at_ring = |x: f64| -> f64 {
+                    for w in ring.windows(2) {
+                        if x <= w[1].0 {
+                            if w[1].0 - w[0].0 < 1e-12 {
+                                return w[1].1;
+                            }
+                            return w[0].1 + (w[1].1 - w[0].1) * (x - w[0].0) / (w[1].0 - w[0].0);
+                        }
+                    }
+                    ring[ring.len() - 1].1
+                };
+                let share = |pos: f64| ((pos - origin) / total).rem_euclid(1.0);
+                let mut spans = Vec::with_capacity(els.len());
+                let mut kinks = Vec::with_capacity(els.len());
+                for (i, l) in lengths.iter().enumerate() {
+                    // Where along this element a station falls, once round.
+                    let mut here: Vec<f64> = stations
+                        .iter()
+                        .map(|st| ((origin + st.0 * total - before[i]).rem_euclid(total)) / l)
+                        .filter(|s| *s > 1e-9 && *s < 1.0 - 1e-9)
+                        .collect();
+                    here.sort_by(f64::total_cmp);
+                    here.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+                    let mut points = vec![0.0];
+                    points.extend(here.iter().copied());
+                    points.push(1.0);
+                    // Each piece's ends, with the end of one just before a station kept apart from the next's start.
+                    spans.push(Span::Lines(points.iter().map(|s| (*s, at_ring(share(before[i] + s * l)))).collect()));
+                    kinks.push(here);
+                }
+                Ok(Law { spans, kinks })
+            }
+            Varying::Along { stations, start } => {
                 // Which end is 0.
                 let (a, z) = (els[0].point(body, 0.0), els[els.len() - 1].point(body, 1.0));
                 let flip = match start {

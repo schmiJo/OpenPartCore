@@ -281,12 +281,31 @@ fn what_a_split_along_a_sheet_refuses() {
     doc.set_scope(split, vec![BodyId::parse("f2").unwrap()]).unwrap();
     let why = failure(&mut doc);
     assert!(why.contains("one piece"), "{why}");
-    // A sheet split by a sheet.
+}
+
+#[test]
+fn a_sheet_splits_along_another_sheet() {
+    // Two walls 40 tall crossing in an X: the first, from (-5, 0) to (25, 30), is cut where the second crosses it, halfway,
+    // into two of 40 by 15 sqrt 2 each. The half in front of the second keeps its name, the other is named for the split.
     let mut doc = Document::new();
     let a = wall(&mut doc, vec![Move::Line { to: p(25.0, 30.0) }], p(-5.0, 0.0));
     let b = wall(&mut doc, vec![Move::Line { to: p(25.0, 0.0) }], p(-5.0, 30.0));
     let split = feature(&mut doc, &format!(r#"{{"type": "split", "tool": "f{}"}}"#, b.0));
     doc.set_scope(split, vec![BodyId::parse(&format!("f{}", a.0)).unwrap()]).unwrap();
+    let o = ok(&mut doc);
+    let half = 40.0 * 15.0 * 2f64.sqrt();
+    near(size_of(&o, &format!("f{}", a.0)), half, "the half that keeps its name");
+    let other: Vec<f64> = sizes(&o).into_iter().filter(|(n, _)| n.starts_with(&format!("f{}", split.0))).map(|x| x.1).collect();
+    assert_eq!(other.len(), 1, "{:?}", sizes(&o));
+    near(other[0], half, "the other half");
+    near(size_of(&o, &format!("f{}", b.0)), 40.0 * 30.0 * 2f64.sqrt(), "the tool, kept");
+    // One only half as tall, which ends halfway up across the first, is refused.
+    let mut doc = Document::new();
+    let a = wall(&mut doc, vec![Move::Line { to: p(25.0, 30.0) }], p(-5.0, 0.0));
+    let s = doc.with(Op::sketch(Placement::xy(-10.0), vec![Region::new(Shape::OpenPath { start: p(-5.0, 30.0), moves: vec![Move::Line { to: p(25.0, 0.0) }] })]));
+    let b = feature(&mut doc, &format!(r#"{{"type": "extrude", "sketch": {}, "length": 20, "mode": "surface"}}"#, s.0));
+    let split = feature(&mut doc, &format!(r#"{{"type": "split", "tool": "f{}"}}"#, b.0));
+    doc.set_scope(split, vec![BodyId::parse(&format!("f{}", a.0)).unwrap()]).unwrap();
     let why = failure(&mut doc);
-    assert!(why.contains("sheet with another sheet"), "{why}");
+    assert!(why.contains("slit"), "{why}");
 }

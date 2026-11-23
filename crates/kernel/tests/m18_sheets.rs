@@ -1,7 +1,7 @@
 //! Sheet bodies: open surfaces that are bodies of their own. Each result is checked by a formula, and anything that holds for
 //! solids has to go on holding for them.
 
-use coreshape::boolean::{trim_sheet, trim_sheet_by_plane, Keep};
+use coreshape::boolean::{split_sheet_by_sheet, trim_sheet, trim_sheet_by_plane, Keep};
 use coreshape::tess::open_only_at_boundary;
 use coreshape::topo::Coedge;
 use coreshape::*;
@@ -807,4 +807,65 @@ fn a_cut_sheet_thickens_and_sews() {
     assert!(whole.sheet);
     near(area(&whole), 1600.0, "area");
     assert_eq!(whole.boundary_edges().len(), 4, "the seam has gone from the boundary");
+}
+
+// ----- A sheet along a sheet -----
+
+/// A flat sheet standing up along y at `x`, reaching from -50 to 50 in y and z, facing +x.
+fn wall_at(x: f64) -> Body {
+    let frame = Frame::new(v3(x, -50.0, -50.0), Vec3::X, Vec3::Y);
+    fill(&rect(100.0, 100.0), &frame, 9).unwrap()
+}
+
+#[test]
+fn a_sheet_splits_along_another_sheet_into_both_sides() {
+    // The plate, 10 by 20, cut by a wall at x = 4 facing +x: 6 by 20 in front of it, 4 by 20 behind.
+    let (front, back) = split_sheet_by_sheet(&plate(), &wall_at(4.0)).unwrap();
+    check_sheet(&front, 120.0);
+    check_sheet(&back, 80.0);
+    assert!(front.aabb().min.x > 4.0 - 1e-9 && back.aabb().max.x < 4.0 + 1e-9);
+    // A tube, cut across by the same wall turned to face along z at z = 3: a ring 3 tall behind, the rest in front.
+    let tube = extrude_open(&PathBuilder::new(v2(5.0, 0.0)).arc_to(v2(-5.0, 0.0), v2(0.0, 0.0), true).arc_to(v2(5.0, 0.0), v2(0.0, 0.0), true).open(), &Frame::WORLD, 10.0, 1);
+    if let Ok(tube) = tube {
+        let floor = fill(&rect(100.0, 100.0), &Frame { origin: v3(-50.0, -50.0, 3.0), ..Frame::WORLD }, 9).unwrap();
+        let (up, down) = split_sheet_by_sheet(&tube, &floor).unwrap();
+        check_sheet(&up, 2.0 * PI * 5.0 * 7.0);
+        check_sheet(&down, 2.0 * PI * 5.0 * 3.0);
+    }
+    // A wall that doesn't reach: nothing in front, all of it behind.
+    let (none, all) = split_sheet_by_sheet(&plate(), &wall_at(40.0)).unwrap();
+    assert!(none.faces.is_empty());
+    check_sheet(&all, 200.0);
+}
+
+#[test]
+fn a_curved_sheet_splits_along_a_slanted_one() {
+    // A quarter of a cylinder's side, radius 10 and 20 long, cut by a plane through its middle slanting across it. The two
+    // parts add up to the whole, each on its own side.
+    let arc = PathBuilder::new(v2(10.0, 0.0)).arc_to(v2(0.0, 10.0), v2(0.0, 0.0), true).open();
+    let curved = extrude_open(&arc, &Frame::WORLD, 20.0, 1).unwrap();
+    let whole = area(&curved);
+    near(whole, PI * 10.0 / 2.0 * 20.0, "quarter tube");
+    let slant = Frame::new(v3(0.0, 0.0, 10.0), v3(0.3, 0.2, 1.0), Vec3::X);
+    let cutter = fill(&rect(200.0, 200.0), &Frame { origin: slant.to_world(v3(-100.0, -100.0, 0.0)), ..slant }, 9).unwrap();
+    let (front, back) = split_sheet_by_sheet(&curved, &cutter).unwrap();
+    validate(&front).unwrap();
+    validate(&back).unwrap();
+    near(area(&front) + area(&back), whole, "the parts add up");
+    let up = slant.z;
+    let m = mesh(&front);
+    assert!(m.positions.iter().all(|p| (*p - slant.origin).dot(up) > -1e-6), "front is in front");
+    let m = mesh(&back);
+    assert!(m.positions.iter().all(|p| (*p - slant.origin).dot(up) < 1e-6), "back is behind");
+}
+
+#[test]
+fn a_sheet_that_ends_partway_across_only_slits_and_is_refused() {
+    // A wall at x = 4 only from y = -50 to 10, which ends inside the plate's 20.
+    let short = fill(&rect(60.0, 100.0), &Frame::new(v3(4.0, -50.0, -50.0), Vec3::X, Vec3::Y), 9).unwrap();
+    let why = split_sheet_by_sheet(&plate(), &short).unwrap_err().to_string();
+    assert!(why.contains("slit"), "{why}");
+    // A solid isn't a sheet to cut or to cut with.
+    let block = box_solid(&Frame::WORLD, 1.0, 1.0, 1.0, 3).unwrap();
+    assert!(split_sheet_by_sheet(&block, &wall_at(0.5)).is_err());
 }
