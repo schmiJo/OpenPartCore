@@ -64,6 +64,7 @@ progress happens on the `next` branch in `.worktrees/next`, so the main working 
 
 | Commit | Change | What to do |
 |---|---|---|
+| Kinds of loft | `Op::Loft` gained `shape: LoftShape`, with `from`, `to`, `closed`, `guides`, `start` and `end`, and `LoftEndSpec`. The kernel gained `loft_through`, `Section`, `LoftOptions` and `LoftEnd`, and `loft` is `loft_through` with the defaults, giving exactly what it gave. A file without the new keys reads and writes as before | Code building an `Op::Loft` adds `shape: LoftShape::default()`, and an exhaustive pattern on it needs the field or `..` |
 | Text in sketches | `Sketch` gained `texts: Vec<Text>`, and its JSON an optional `texts` list, written only when there's text, so other sketches save as before; a reader from before can't read a sketch with text. `WhyIgnored` gained `NotInFont` and `UnknownFont`. New: `coreshape_sketch::font`, `Sketch::text` and `text_of`. `remove_entity` takes a text's id, and a text's point takes the text with it. `coreshape-wasm` depends on `coreshape-sketch` | A `match` over `WhyIgnored` adds the two |
 | Speed at real size | `boolean::classify::Index`'s `face_boxes` and `loop_boxes` are no longer public fields: `face_box(f)`, `face_box_overlaps` and `face_box_holds` take their place, as faces are bounded closely only when wanted. New: `coreshape::par`, `Body::rough_aabb`, `rough_size` and `face_aabb_with`. Mass properties, meshes, STEP reading and the MCP summary use every core natively, `COSHAPE_THREADS` capping them. Circles' and ellipses' boxes are exact, so `Body::aabb` is a little smaller where they set it, and a mesh made for its size a little finer. STEP reading's `solids` progress counts distinct solids, then all | Code reading an index's boxes calls `face_box`. A host that mustn't use more than one thread sets `COSHAPE_THREADS=1` |
 | Hole tables and tops | A saved hole that leaves its counterbore's depth to its size is deeper now, by DIN 974-1's allowance (M6: 6.4, not 6). One that leaves its countersink's diameter to its size is wider, DIN 74 form F's (M6: 13.71, not 13.44). A tapped hole with a fine pitch ISO 2306 rounds takes its drill (M10×1.25: 8.8, not 8.75). A hole's top carries back only as far as the face it goes in through stands proud, nothing on a flat face, so a wall over it is no longer cut, and a countersink carries back as a cylinder, not its cone. So such parts' volumes change a little. Names, slots and the file format are unchanged | Nothing, unless a saved part has to keep its old holes: then give `cbore_depth` and `csink_diameter` |
@@ -108,7 +109,7 @@ progress happens on the `next` branch in `.worktrees/next`, so the main working 
 
 ## Not planned yet
 
-Variable-radius fillets, general vertex blends, cutting a sheet with a sheet, and engineering drawings.
+Variable-radius fillets, general vertex blends, cutting a sheet with a sheet, and engineering drawings: all being built now, from 2026-11-23, in the order of item 11 below.
 
 ## Next, in order
 
@@ -124,3 +125,4 @@ From OpenShape's list, in its order. SchmiShape has since taken OpenShape's plac
 8. Small features (split, scale, stretch, rib, thin features, axes from lines) and the hole feature: done, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md#small-features) and [KNOWN_LIMITS.md](KNOWN_LIMITS.md#holes).
 9. Speed at real size: done for a part of 800 features and the 711-part rover, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md#big-parts-and-big-files). What's left is Booleans that work only where the bodies meet, and the free-form nearest-point search.
 10. Text in sketches: done, with a TrueType reader written here and a part of Noto Sans built in, see [KNOWN_LIMITS.md](KNOWN_LIMITS.md#text-in-sketches).
+11. Everything listed as not built, in this order: the other kinds of loft (done: to a point, closed, guides, square and rounded ends, see [FILE_FORMAT.md](FILE_FORMAT.md#lofts)), the rest of the assemblies, engineering drawings, draft on spline and free-form faces, variable-radius fillets and corner blends, operations between sheets, and offset and shell where walls cross.

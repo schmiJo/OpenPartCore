@@ -228,7 +228,7 @@ fn a_face_on_a_turned_curve_or_a_free_form_face_cuts_along_its_surface() {
     let loft = |doc: &mut Document| {
         let a = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::circle(0.0, 0.0, 10.0))]));
         let b = doc.with(Op::sketch(Placement::xy(30.0), vec![Region::new(Shape::circle(0.0, 0.0, 6.0))]));
-        doc.add(Op::Loft { sections: vec![a.into(), b.into()], mode: Mode::Add, thin: None }).unwrap()
+        doc.add(Op::Loft { sections: vec![a.into(), b.into()], mode: Mode::Add, thin: None, shape: LoftShape::default() }).unwrap()
     };
     let slab = |doc: &mut Document, mode: Mode| {
         let s = doc.with(Op::sketch(Placement::xy(5.0), vec![Region::new(Shape::rect(-3.0, -15.0, 6.0, 30.0))]));

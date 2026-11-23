@@ -81,7 +81,7 @@ Common fields: `id`, `name`, `suppressed` (default false), `bodies` (default all
 | `tab` | `sketch`, whose regions are drawn on the plane of a sheet metal wall. See [Sheet metal](#sheet-metal) |
 | `bend` | `sketch`, holding one line on the plane of a sheet metal wall, `degrees` (default 90), `bend_radius` (default the part's), `position` (`center`, the default, or `start`), `moves` (`left`, the default, or `right`), `flip`. See [Sheet metal](#sheet-metal) |
 | `extrude` | `sketch`, `length`, `start` (default 0), `mode` (default `add`), and optionally `regions`, `faces`, `end`, `opposite` and `thin`: see [below](#extrude-regions-and-ends) and [Thin walls](#thin-walls) |
-| `loft` | `sections`, in order, each a sketch id, for a sketch holding one outline, or a region `{"sketch": 2, "region": "r..."}`, so that one sketch with several outlines can feed it, and `mode`. Straight between two, and a smooth cubic through three or more. A region that has gone fails the feature, saying what's there. Optionally `thin`: see [Thin walls](#thin-walls) |
+| `loft` | `sections`, in order, each a sketch id, for a sketch holding one outline, or a region `{"sketch": 2, "region": "r..."}`, so that one sketch with several outlines can feed it, and `mode`. Straight between two, and a smooth cubic through three or more. A region that has gone fails the feature, saying what's there. Optionally `thin`: see [Thin walls](#thin-walls), and the options in [Lofts](#lofts) below: to a point, round in a ring, along guides, and square or rounded ends |
 | `revolve` | `sketch`, `degrees` (default 360), `mode`, and `axis`: `{"point": [x, y], "direction": [dx, dy]}`, a line in the sketch's plane, in its coordinates, to turn around as drawn, right-handed around its direction, or any [line](#planes) lying in the sketch's plane, which the revolve then follows: `{"sketch": 3, "line": 7}` for a line of its sketch, or a straight edge. One out of the plane is refused, saying how far off it is. Without an `axis`, profile x is the distance from the sketch's Z axis, and profile y the height along it. Optionally `regions`, as an extrude has them: see [below](#extrude-regions-and-ends), and `thin`: see [Thin walls](#thin-walls) |
 | `sweep` | `sketch`, `path`, `mode`, and optionally `thin`: see [Thin walls](#thin-walls). `path` is a list of steps, `{"sketch": 5}` or `{"edges": selection}`: see below |
 | `helix` | `sketch`, `pitch` (how far along the axis one turn goes), `turns`, `point` (default origin) and `axis` (default +z) for the axis, or `axis` alone naming any [line](#planes), which it then follows, `left_handed` (default false), `mode`. The sketch can hold the axis, for a spring or a thread, or lie across it, for a twisted bar |
@@ -411,6 +411,29 @@ A name that picks several faces, such as a patterned boss's top, extrudes them a
 With `"mode": "add"`, a wall that carries straight on from a face of the part, as the walls over a block's top do, becomes part of that face, which keeps its name. So `f6:wall.0` names only the walls that stand out on their own, and with `new_body` or `surface` it names them all.
 
 A face has to be flat, and bounded by edges with an exact form: lines, arcs, ellipses and splines. An edge that's an intersection curve held as samples, such as where a plane cuts a free-form face, is refused, saying which face. So is a curved face, and a face that has gone.
+
+
+### Lofts
+
+Besides `sections`, a loft can take:
+
+| Key | Value | What it does |
+|---|---|---|
+| `from` | a point: `[x, y, z]`, `"origin"`, a part's corner `{"faces": [...], "near": [x, y, z]}` as `vertices_list` gives it, or a sketch's point `{"sketch": 4, "point": "7"}` | Starts at that point, before the first section, as a cone starts at its tip. `sections` can then be a single outline |
+| `to` | a point, as `from` | Ends at that point, after the last section |
+| `closed` | `true` | Goes on from the last section back round to the first, as a ring, with no caps. At least three sections, and no points or ends |
+| `guides` | a list of sketch ids | Each open chain of curves in each sketch is a guide the sides follow. A guide has to run through every section's outline, crossing each section's plane on its outline, and to the point if there is one. Where it meets an outline between corners, the outline is cut there. Either way round will do |
+| `start`, `end` | `"normal"`, `{"normal": 1.5}`, `"round"` or `{"round": 1.5}`, or `"free"`, the default | `normal`: leave the first section, or come into the last, square to its plane. `round`: round over a point at that end, as a dome does, level there. The number is how hard it pulls, an expression above 0 and at most 100: at 1, as fast as going straight from end to end |
+
+```json
+{ "id": 9, "type": "loft", "sections": [5], "to": [0, 0, 30], "end": "round" }
+{ "id": 10, "type": "loft", "sections": [5, 6, 7, 8], "closed": true }
+{ "id": 11, "type": "loft", "sections": [5, 6], "guides": [12], "start": {"normal": 1.5} }
+```
+
+The sections are still gone through exactly: guides bend what's between them, and set ends only change how it leaves
+them. A thin loft can be closed or have its ends set, but can't go to a point or follow guides yet. A loft can't yet both
+follow guides and set its ends, or be closed and follow guides: see [KNOWN_LIMITS.md](KNOWN_LIMITS.md#free-form-surfaces-and-lofts).
 
 ### Thin walls
 

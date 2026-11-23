@@ -48,7 +48,7 @@ pub use delete::delete_faces;
 pub use error::{Error, Result};
 pub use flat::flat_face_profile;
 pub use helix::{helix, Helix};
-pub use loft::loft;
+pub use loft::{loft, loft_through, LoftEnd, LoftOptions, Section};
 pub use mass::{mass_properties, MassProps};
 pub use math::{v2, v3, Aabb, Frame, Mirror, Rng, Vec2, Vec3, MAX_COORD, MIN_FEATURE, PI, TAU, TOL};
 pub use profile::{PathBuilder, Profile, Seg, SegGeom, Wire};

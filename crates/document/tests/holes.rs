@@ -608,7 +608,7 @@ fn a_hole_goes_into_a_free_form_face() {
     let mut doc = Document::new();
     let base = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(-20.0, -20.0, 40.0, 40.0))]));
     let top = doc.with(Op::sketch(Placement::xy(30.0), vec![Region::new(Shape::circle(0.0, 0.0, 15.0))]));
-    doc.with(Op::Loft { sections: vec![base.into(), top.into()], mode: Mode::Add, thin: None });
+    doc.with(Op::Loft { sections: vec![base.into(), top.into()], mode: Mode::Add, thin: None, shape: LoftShape::default() });
     let before = vol(&ok(&mut doc));
     let mut sketch = Sketch::new();
     sketch.point(0.0, 0.0);
@@ -630,7 +630,7 @@ fn a_hole_goes_into_a_free_form_face() {
     let mut check = Document::new();
     let base = check.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(-20.0, -20.0, 40.0, 40.0))]));
     let top = check.with(Op::sketch(Placement::xy(30.0), vec![Region::new(Shape::circle(0.0, 0.0, 15.0))]));
-    check.with(Op::Loft { sections: vec![base.into(), top.into()], mode: Mode::Add, thin: None });
+    check.with(Op::Loft { sections: vec![base.into(), top.into()], mode: Mode::Add, thin: None, shape: LoftShape::default() });
     let c = check.with(Op::sketch(side(x - 3.0), vec![Region::new(Shape::circle(0.0, 15.0, 4.0))]));
     check.with(Op::extrude(c, 0.0, 30.0, Mode::Remove));
     let d = check.with(Op::sketch(side(-30.0), vec![Region::new(Shape::circle(0.0, 15.0, 2.0))]));

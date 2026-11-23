@@ -885,7 +885,7 @@ pub enum Op {
     /// Straight between two sections, and a smooth cubic through three or more. Sides are named from the first section.
     /// With `thin` it lofts walls through the sections' outlines or open curves, each as thick as it says in its own
     /// section's plane: see `Thin`.
-    Loft { sections: Vec<LoftSection>, mode: Mode, thin: Option<Thin> },
+    Loft { sections: Vec<LoftSection>, mode: Mode, thin: Option<Thin>, shape: LoftShape },
     /// Sweeps a sketch along a smooth path of lines and arcs: steps from the sketch plane, heading along its normal, or a
     /// sketch's curves, or a part's edges. See `SweepPath`. With `thin` it sweeps a wall along the sketch's outlines and
     /// open curves in place of its regions: see `Thin`.
@@ -1090,6 +1090,36 @@ pub struct RegionPick {
     pub region: coreshape_sketch::RegionId,
 }
 
+/// How a loft goes besides through its sections in order. The default is a plain loft, written as one always was.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LoftShape {
+    /// A point it starts at, before its first section, as a cone's tip is: a corner, a sketch's point or a place.
+    pub from: Option<PointRef>,
+    /// A point it ends at, after its last section.
+    pub to: Option<PointRef>,
+    /// On from the last section back round to the first, as a ring, with no caps.
+    pub closed: bool,
+    /// Sketches whose open curves its sides follow, each chain of curves one guide. Each has to run through every
+    /// section's outline, and to the point if it has one.
+    pub guides: Vec<FeatureId>,
+    /// How it leaves its first section, or point.
+    pub start: LoftEndSpec,
+    /// How it comes into its last.
+    pub end: LoftEndSpec,
+}
+
+/// How a loft leaves or comes into an end.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum LoftEndSpec {
+    /// However the sections take it.
+    #[default]
+    Free,
+    /// Square to the end section's plane, pulling as hard as the number: 1 is as fast as going straight from end to end.
+    Normal(Expr),
+    /// Rounded over an end point, as a dome is, pulling as hard as the number.
+    Round(Expr),
+}
+
 /// One section of a loft: a sketch, which has to hold one outline, or one region of a constrained sketch, so that a sketch
 /// with several outlines can feed it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1261,6 +1291,7 @@ impl Op {
             Op::Pattern { along: PatternPath::Linear { direction: line, .. } | PatternPath::Circular { axis: line, .. }, .. } => vec![Geo::Line(line)],
             Op::Helix { axis: line, .. } | Op::Transform { motion: Motion::Rotate { axis: line, .. }, .. } | Op::Revolve { axis: Some(RevolveAxis::Line(line)), .. } => vec![Geo::Line(line)],
             Op::Transform { motion: Motion::Scale { point, .. }, .. } => vec![Geo::Point(point)],
+            Op::Loft { shape, .. } => shape.from.iter().chain(shape.to.iter()).map(Geo::Point).collect(),
             Op::Transform { motion: Motion::Stretch { axis: line, .. }, .. } => vec![Geo::Line(line)],
             _ => Vec::new(),
         }
@@ -1296,6 +1327,7 @@ impl Op {
             || matches!(self, Op::Extrude { sketch: Some(sketch), regions, thin: Some(_), .. } | Op::Revolve { sketch, regions, thin: Some(_), .. } if *sketch == id && regions.is_empty())
             || matches!(self, Op::Sweep { sketch, thin: Some(_), .. } if *sketch == id)
             || matches!(self, Op::Loft { sections, thin: Some(_), .. } if sections.iter().any(|s| s.sketch == id && s.region.is_none()))
+            || matches!(self, Op::Loft { shape, .. } if shape.guides.contains(&id))
             || matches!(self, Op::Sweep { path: SweepPath::Sketch(along), .. } if *along == id)
             || matches!(self, Op::SheetMetal { sketch, .. } | Op::Bend { sketch, .. } | Op::Rib { sketch, .. } if *sketch == id)
     }
@@ -1381,7 +1413,10 @@ impl Op {
                 }
             }
             Op::Helix { sketch, .. } | Op::Fill { sketch } | Op::SheetMetal { sketch, .. } | Op::Tab { sketch } | Op::Bend { sketch, .. } | Op::Rib { sketch, .. } => out.push(*sketch),
-            Op::Loft { sections, .. } => out.extend(sections.iter().map(|s| s.sketch)),
+            Op::Loft { sections, shape, .. } => {
+                out.extend(sections.iter().map(|s| s.sketch));
+                out.extend(shape.guides.iter().copied());
+            }
             Op::Hole { at: HoleAt::Sketch { sketch, .. }, .. } => out.push(*sketch),
             Op::BooleanBodies { tools, .. } => out.extend(tools.iter().map(|b| b.feature)),
             Op::Trim { tool: TrimTool::Body(body), .. } => out.push(body.feature),
@@ -1516,7 +1551,14 @@ impl Op {
                     Primitive::Torus { major, minor } => out.extend([major, minor]),
                 }
             }
-            Op::Loft { thin, .. } => out.extend(thin.iter().map(|t| &t.thickness)),
+            Op::Loft { thin, shape, .. } => {
+                out.extend(thin.iter().map(|t| &t.thickness));
+                for end in [&shape.start, &shape.end] {
+                    if let LoftEndSpec::Normal(m) | LoftEndSpec::Round(m) = end {
+                        out.push(m);
+                    }
+                }
+            }
             Op::DeleteFace { .. } => {}
             Op::Helix { pitch, turns, .. } => out.extend([pitch, turns]),
             Op::Thicken { thickness, .. } => out.push(thickness),
@@ -2916,7 +2958,7 @@ impl Document {
             | Op::SheetMetal { sketch, .. }
             | Op::Tab { sketch }
             | Op::Bend { sketch, .. } => vec![*sketch],
-            Op::Loft { sections, .. } => sections.iter().map(|s| s.sketch).collect(),
+            Op::Loft { sections, shape, .. } => sections.iter().map(|s| s.sketch).chain(shape.guides.iter().copied()).collect(),
             _ => Vec::new(),
         };
         for sketch in &list {
@@ -3219,7 +3261,10 @@ impl Document {
                 | Op::Bend { sketch, .. }
                 | Op::Rib { sketch, .. }
                 | Op::Hole { at: HoleAt::Sketch { sketch, .. }, .. } => hash_text(body_key ^ mixed(&[*sketch]), &own),
-                Op::Loft { sections, .. } => hash_text(body_key ^ mixed(&sections.iter().map(|s| s.sketch).collect::<Vec<_>>()), &own),
+                Op::Loft { sections, shape, .. } => {
+                    let sketches: Vec<FeatureId> = sections.iter().map(|s| s.sketch).chain(shape.guides.iter().copied()).collect();
+                    hash_text(body_key ^ mixed(&sketches), &own)
+                }
                 Op::Pattern { of, .. } | Op::Mirror { of, .. } => hash_text(body_key ^ mixed(of), &own),
                 _ => hash_text(body_key, &own),
             };
@@ -3545,10 +3590,14 @@ impl Document {
                 }
                 applied(tools, *mode)
             }
-            Op::Loft { sections, mode, thin: Some(t) } => {
+            Op::Loft { sections, mode, thin: Some(t), shape } => {
                 if *mode == Mode::Surface {
                     return Err(Error::InvalidInput("a thin loft makes a wall with a thickness, and a surface has none".into()));
                 }
+                if shape.from.is_some() || shape.to.is_some() || !shape.guides.is_empty() {
+                    return Err(Error::InvalidInput("a thin loft can't go to a point or follow guides yet".into()));
+                }
+                let options = coreshape::LoftOptions { closed: shape.closed, guides: Vec::new(), start: loft_end(&shape.start, env)?, end: loft_end(&shape.end, env)? };
                 let (left, right) = t.sides(env)?;
                 // Each section's walls, in its own plane: the rings round its outlines and the strips along its open curves.
                 let mut walls: Vec<(Vec<(Profile, u32)>, Frame)> = Vec::with_capacity(sections.len());
@@ -3570,13 +3619,13 @@ impl Document {
                 }
                 let mut tools = Vec::with_capacity(first.len());
                 for i in 0..first.len() {
-                    let through: Vec<(&Profile, Frame)> = walls.iter().map(|(list, frame)| (&list[i].0, *frame)).collect();
-                    let made = coreshape::loft::loft(&through, tag).map_err(|e| thin_refused(e, "loft"))?;
+                    let through: Vec<coreshape::Section> = walls.iter().map(|(list, frame)| coreshape::Section::Outline(&list[i].0, *frame)).collect();
+                    let made = coreshape::loft::loft_through(&through, &options, tag).map_err(|e| thin_refused(e, "loft"))?;
                     tools.push(thin_tagged(made, walls[0].0[i].1, tag));
                 }
                 applied(tools, *mode)
             }
-            Op::Loft { sections, mode, thin: None } => {
+            Op::Loft { sections, mode, thin: None, shape } => {
                 let mut list: Vec<(Profile, Frame)> = Vec::with_capacity(sections.len());
                 for section in sections {
                     let out = sketch_output(&section.sketch)?;
@@ -3596,8 +3645,28 @@ impl Document {
                     };
                     list.push((profile, out.frame));
                 }
-                let refs: Vec<(&Profile, Frame)> = list.iter().map(|(p, f)| (p, *f)).collect();
-                applied(vec![coreshape::loft::loft(&refs, tag)?], *mode)
+                // The points it starts or ends at, and the guides: each open chain of curves in each guide sketch.
+                let from = shape.from.as_ref().map(|p| look.point(p)).transpose()?;
+                let to = shape.to.as_ref().map(|p| look.point(p)).transpose()?;
+                let mut guide_wires: Vec<(Arc<Vec<Wire>>, Frame)> = Vec::with_capacity(shape.guides.len());
+                for id in &shape.guides {
+                    let out = sketch_output(id)?;
+                    if out.open.is_empty() {
+                        return Err(Error::InvalidInput(format!("a loft's guide is an open curve, and the sketch f{} has none", id.0)));
+                    }
+                    guide_wires.push((out.open.clone(), out.frame));
+                }
+                let mut through: Vec<coreshape::Section> = Vec::with_capacity(list.len() + 2);
+                through.extend(from.map(coreshape::Section::Point));
+                through.extend(list.iter().map(|(p, f)| coreshape::Section::Outline(p, *f)));
+                through.extend(to.map(coreshape::Section::Point));
+                let options = coreshape::LoftOptions {
+                    closed: shape.closed,
+                    guides: guide_wires.iter().flat_map(|(wires, frame)| wires.iter().map(move |w| (w, *frame))).collect(),
+                    start: loft_end(&shape.start, env)?,
+                    end: loft_end(&shape.end, env)?,
+                };
+                applied(vec![coreshape::loft::loft_through(&through, &options, tag)?], *mode)
             }
             Op::Sweep { sketch, path, mode, thin } => {
                 if thin.is_some() && *mode == Mode::Surface {
@@ -5461,6 +5530,15 @@ fn mode_value(m: Mode) -> Value {
     })
 }
 
+/// How a loft leaves or comes into an end, with its pull worked out.
+fn loft_end(end: &LoftEndSpec, env: &Env) -> Result<coreshape::LoftEnd> {
+    Ok(match end {
+        LoftEndSpec::Free => coreshape::LoftEnd::Free,
+        LoftEndSpec::Normal(m) => coreshape::LoftEnd::Normal(num(m, env)?),
+        LoftEndSpec::Round(m) => coreshape::LoftEnd::Round(num(m, env)?),
+    })
+}
+
 /// A feature's `"thin"`: `{"thickness": t, "side": "inside"}`, or nothing.
 fn read_thin(v: &Value) -> Result<Option<Thin>> {
     let Some(t) = v.get("thin") else { return Ok(None) };
@@ -5803,7 +5881,7 @@ pub fn op_value(op: &Op) -> Value {
             items.push(("mode", mode_value(*mode)));
             Value::obj(items)
         }
-        Op::Loft { sections, mode, thin } => {
+        Op::Loft { sections, mode, thin, shape } => {
             let mut items = vec![
                 ("type", Value::str("loft")),
                 (
@@ -5821,6 +5899,22 @@ pub fn op_value(op: &Op) -> Value {
                 ("mode", mode_value(*mode)),
             ];
             items.extend(thin.as_ref().map(|t| ("thin", thin_value(t))));
+            // Only what isn't a plain loft's, so that a plain one is written as it always was.
+            items.extend(shape.from.as_ref().map(|p| ("from", planes::point_ref_value(p))));
+            items.extend(shape.to.as_ref().map(|p| ("to", planes::point_ref_value(p))));
+            if shape.closed {
+                items.push(("closed", Value::Bool(true)));
+            }
+            if !shape.guides.is_empty() {
+                items.push(("guides", ids_value(&shape.guides)));
+            }
+            for (key, end) in [("start", &shape.start), ("end", &shape.end)] {
+                match end {
+                    LoftEndSpec::Free => {}
+                    LoftEndSpec::Normal(m) => items.push((key, Value::obj(vec![("normal", expr_value(m))]))),
+                    LoftEndSpec::Round(m) => items.push((key, Value::obj(vec![("round", expr_value(m))]))),
+                }
+            }
             Value::obj(items)
         }
         Op::Sweep { sketch, path, mode, thin } => {
@@ -6329,7 +6423,7 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
             Ok(Op::Solid { primitive, at, mode: read_mode(v)? })
         }
         "loft" => {
-            with(&["type", "sections", "mode", "thin"])?;
+            with(&["type", "sections", "mode", "thin", "from", "to", "closed", "guides", "start", "end"])?;
             let bad = || Error::InvalidInput("\"sections\" must be a list of sketch ids, or of {\"sketch\": 4, \"region\": \"r...\"}".into());
             let sections = field(v, "sections", "a loft")?
                 .as_array()
@@ -6341,7 +6435,51 @@ pub fn read_op(v: &Value, extra: &[&str]) -> Result<Op> {
                     None => Err(bad()),
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(Op::Loft { sections, mode: read_mode(v)?, thin: read_thin(v)? })
+            let end_of = |key: &str| -> Result<LoftEndSpec> {
+                let Some(x) = v.get(key) else { return Ok(LoftEndSpec::Free) };
+                let wrong = || Error::InvalidInput(format!("a loft's \"{key}\" is \"free\", \"normal\", \"round\", {{\"normal\": 1.5}} or {{\"round\": 1.5}}"));
+                match x {
+                    Value::Str(t) if t == "free" => Ok(LoftEndSpec::Free),
+                    Value::Str(t) if t == "normal" => Ok(LoftEndSpec::Normal(Expr::number(1.0))),
+                    Value::Str(t) if t == "round" => Ok(LoftEndSpec::Round(Expr::number(1.0))),
+                    Value::Obj(_) if x.get("normal").is_some() => {
+                        known_keys(x, &["normal"]).map_err(|_| wrong())?;
+                        Ok(LoftEndSpec::Normal(read_expr(x.get("normal").expect("checked"))?))
+                    }
+                    Value::Obj(_) if x.get("round").is_some() => {
+                        known_keys(x, &["round"]).map_err(|_| wrong())?;
+                        Ok(LoftEndSpec::Round(read_expr(x.get("round").expect("checked"))?))
+                    }
+                    _ => Err(wrong()),
+                }
+            };
+            let guides = match v.get("guides") {
+                None => Vec::new(),
+                Some(list) => list
+                    .as_array()
+                    .ok_or_else(|| Error::InvalidInput("a loft's \"guides\" are a list of sketch ids".into()))?
+                    .iter()
+                    .map(|g| {
+                        g.as_f64()
+                            .filter(|n| n.fract() == 0.0 && *n >= 1.0 && *n < u32::MAX as f64)
+                            .map(|n| FeatureId(n as u32))
+                            .ok_or_else(|| Error::InvalidInput("a loft's \"guides\" are a list of sketch ids".into()))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            };
+            let closed = match v.get("closed") {
+                None => false,
+                Some(c) => c.as_bool().ok_or_else(|| Error::InvalidInput("a loft's \"closed\" is true or false".into()))?,
+            };
+            let shape = LoftShape {
+                from: v.get("from").map(planes::read_point_ref).transpose()?,
+                to: v.get("to").map(planes::read_point_ref).transpose()?,
+                closed,
+                guides,
+                start: end_of("start")?,
+                end: end_of("end")?,
+            };
+            Ok(Op::Loft { sections, mode: read_mode(v)?, thin: read_thin(v)?, shape })
         }
         "sweep" => {
             with(&["type", "sketch", "path", "mode", "thin"])?;

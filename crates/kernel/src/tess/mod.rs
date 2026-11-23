@@ -534,9 +534,38 @@ fn build_face(
         })
         .collect();
 
+    // Each loop's points in the chart. A point at a free-form surface's pole, where a whole side of the chart shrinks
+    // to one point, has no one place there: it goes in as the stretch of that side from where the loop comes in to
+    // where it goes out, two places for one point, or the loop would cut the corner and leave part of the face out.
+    let placed: Vec<Vec<(Vec2, Vec3)>> = chains
+        .iter()
+        .map(|chain| {
+            let at = |p: Vec3| surface.to_chart(chart, p);
+            let pole = |p: Vec3| match surface {
+                Surface::Free { frame, patch } => patch.pole_side(frame.to_local(p)),
+                _ => None,
+            };
+            let n = chain.len();
+            let mut out = Vec::with_capacity(n + 2);
+            for i in 0..n {
+                let p = chain[i];
+                match pole(p) {
+                    Some((along_u, c)) if n > 2 => {
+                        let (before, after) = (at(chain[(i + n - 1) % n]), at(chain[(i + 1) % n]));
+                        let (a, b) = if along_u { (v2(before.x, c), v2(after.x, c)) } else { (v2(c, before.y), v2(c, after.y)) };
+                        out.push((a, p));
+                        if (a - b).norm() > 1e-9 * (1.0 + a.norm()) {
+                            out.push((b, p));
+                        }
+                    }
+                    _ => out.push((at(p), p)),
+                }
+            }
+            out
+        })
+        .collect();
     let (mut lo, mut hi) = (v2(f64::INFINITY, f64::INFINITY), v2(f64::NEG_INFINITY, f64::NEG_INFINITY));
-    for &p in chains.iter().flatten() {
-        let uv = surface.to_chart(chart, p);
+    for &(uv, _) in placed.iter().flatten() {
         lo = v2(lo.x.min(uv.x), lo.y.min(uv.y));
         hi = v2(hi.x.max(uv.x), hi.y.max(uv.y));
     }
@@ -565,10 +594,10 @@ fn build_face(
     let mut cdt = Cdt::new();
     let mut point_of: HashMap<u32, Vec3> = HashMap::default();
     let mut loop_ids = Vec::with_capacity(chains.len());
-    for chain in &chains {
+    for chain in &placed {
         let mut ids = Vec::with_capacity(chain.len());
-        for &p in chain {
-            let q = frame.to_grid(surface.to_chart(chart, p));
+        for &(uv, p) in chain {
+            let q = frame.to_grid(uv);
             let id = cdt.insert(q, true).expect("boundary insertion always succeeds");
             point_of.entry(id).or_insert(p);
             ids.push(id);

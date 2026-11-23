@@ -159,7 +159,7 @@ fn a_sweep_a_loft_and_a_helix_make_sides_without_ends() {
     let mut doc = Document::new();
     let a = doc.with(Op::sketch(Placement::xy(0.0), vec![Region::new(Shape::rect(0.0, 0.0, 4.0, 4.0))]));
     let b = doc.with(Op::sketch(Placement::xy(6.0), vec![Region::new(Shape::rect(0.0, 0.0, 4.0, 4.0))]));
-    doc.with(Op::Loft { sections: vec![a.into(), b.into()], mode: Mode::Surface, thin: None });
+    doc.with(Op::Loft { sections: vec![a.into(), b.into()], mode: Mode::Surface, thin: None, shape: LoftShape::default() });
     let o = ok(&mut doc);
     assert!(o.bodies[0].body.sheet);
     assert!(!o.bodies[0].body.boundary_edges().is_empty());

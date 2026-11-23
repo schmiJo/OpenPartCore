@@ -1097,6 +1097,28 @@ impl Patch {
         self.moved_poles.iter().any(|q| q.dist(p) <= 1e-7)
     }
 
+    /// Which side of the chart a point at a pole is, as the side's fixed chart coordinate: `(true, y)` for a side along
+    /// u at chart y, `(false, x)` for one along v at chart x. A pole is a whole side shrunk to a point, so in the chart
+    /// it has no one place.
+    pub fn pole_side(&self, p: Vec3) -> Option<(bool, f64)> {
+        if !self.at_pole(p) {
+            return None;
+        }
+        let ((u0, u1), (v0, v1)) = self.domain();
+        let near = |a: Vec3| a.dist(p) <= 1e-7;
+        for v in [v0, v1] {
+            if [u0, (u0 + u1) / 2.0, u1].iter().all(|&u| near(self.eval(u, v))) {
+                return Some((true, v * self.scale.1));
+            }
+        }
+        for u in [u0, u1] {
+            if [v0, (v0 + v1) / 2.0, v1].iter().all(|&v| near(self.eval(u, v))) {
+                return Some((false, u * self.scale.0));
+            }
+        }
+        None
+    }
+
     fn base_at_pole(&self, p: Vec3) -> bool {
         self.poles.iter().any(|q| q.dist(p) <= 1e-7)
     }
