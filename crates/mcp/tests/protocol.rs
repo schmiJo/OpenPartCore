@@ -1430,3 +1430,23 @@ fn holes_list_says_what_each_hole_is() {
     assert!(faces.contains("f2:tip.1"), "{faces}");
     assert!(parsed(&c.ok("holes_list", r#"{"upto":0}"#)).as_array().unwrap().is_empty());
 }
+
+#[test]
+fn a_volume_that_cant_be_measured_closely_says_so() {
+    // The nozzle loft, a rectangle through a circle to an ellipse, taken out a quarter. Its side edges go from sharp at the
+    // rectangle's corners to smooth at the circle, where the moved faces meet nearly tangent and the traced edges between
+    // them can't be integrated along: the summary says how far out the volume can be. A plain box's doesn't.
+    let root = folder("uncertain");
+    let mut c = Client::start(&root);
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","regions":[{"outer":{"type":"rect","x":-30,"y":-22.5,"w":60,"h":45}}]}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","plane":{"origin":[0,0,44],"z":[0,0,1],"x":[1,0,0]},"regions":[{"outer":{"type":"circle","r":14}}]}}"#);
+    c.ok("feature_add", r#"{"feature":{"type":"sketch","plane":{"origin":[0,0,80],"z":[0,0,1],"x":[1,0,0]},"regions":[{"outer":{"type":"ellipse","rx":22,"ry":15.4}}]}}"#);
+    let lofted = c.ok("feature_add", r#"{"feature":{"type":"loft","sections":[1,2,3]}}"#);
+    assert!(!lofted.contains("only good to within"), "{lofted}");
+    let moved = c.ok("feature_add", r#"{"feature":{"type":"offset","distance":0.25}}"#);
+    assert!(moved.contains("the volume is only good to within"), "{moved}");
+    let mut c = Client::start(&folder("certain"));
+    c.ok("feature_add", r#"{"feature":{"type":"solid","shape":"box","dx":40,"dy":30,"dz":12}}"#);
+    let moved = c.ok("feature_add", r#"{"feature":{"type":"offset","distance":0.25}}"#);
+    assert!(!moved.contains("only good to within"), "{moved}");
+}

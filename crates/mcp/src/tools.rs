@@ -841,6 +841,16 @@ impl Session {
                 }
                 let facts: Vec<Arc<Facts>> = measured.into_iter().map(|m| m.0).collect();
                 let bounds = bounds.unwrap_or_else(|| body.aabb());
+                // A volume that can't be worked out closely says so, with how far out it can be: as where an edge is traced
+                // between faces that come near tangent along it, and what's integrated along it is thrown out.
+                let error: f64 = facts.iter().map(|f| f.props.volume_error).sum();
+                if error > 1e-6 * volume.abs().max(1.0) {
+                    let note = Value::str(format!("the volume is only good to within {:.3}: an edge on the part can't be traced closely enough to measure it, as where faces meet nearly tangent", error));
+                    match items.iter_mut().find(|(k, _)| *k == "notes") {
+                        Some((_, Value::Arr(list))) => list.push(note),
+                        _ => items.push(("notes", Value::Arr(vec![note]))),
+                    }
+                }
                 let mut solid = vec![
                     ("volume", num(volume)),
                     ("area", num(area)),
