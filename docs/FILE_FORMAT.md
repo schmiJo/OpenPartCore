@@ -665,6 +665,27 @@ A `spline` has `points` (its control points), with optional `degree` (default 3)
 (default all 1). By hand, `{"type": "spline", "through": [[0, 0], [5, 4], [10, 0]]}` makes the smooth curve through those points, and it's saved as
 control points after that. `"7.p2"` is control point 2, and `"7.start"` and `"7.end"` are the first and last.
 
+### Text
+
+Text goes in an optional top-level list, `texts`, beside `entities`:
+
+```json
+"texts": [{"id": 9, "at": 7, "up": 8, "text": "M6 \u00d7 20\nSTEEL", "font": "sans"}]
+```
+
+Each is placed by two of the sketch's point entities, so constraints place it as they place anything: `at` is on its
+baseline where its first character starts, and `up` is straight above `at`, by the height of a capital letter. A distance
+between them sizes it, and making them vertical keeps it upright; turning `up` round `at` turns it. Its characters' outlines
+are curves of the sketch, which make regions as any curves do: a letter is material and the inside of its loop, as in `o`, a
+hole, by the usual every other level of nesting, and text inside a closed outline is a hole in it. The faces they sweep are
+named by the text's id, `f3:side.9`, which is one of the sketch's entity ids. Lines after a `\n` are a line's spacing lower.
+Removing either point removes the text, and removing the text removes its points.
+
+The only font is `sans`, the default: 220 characters of Noto Sans Regular, printable ASCII, Latin-1 and a few more, under the
+SIL Open Font License that `crates/sketch/fonts/OFL.txt` holds. A character it hasn't got is left out with a space's room,
+and the sketch's feature notes it; `⌀`, which it hasn't got, is set as `Ø`. See
+[KNOWN_LIMITS.md](KNOWN_LIMITS.md#text-in-sketches).
+
 ### Projected geometry
 
 A `projected` entity is part geometry seen along the sketch's normal, as Onshape's links to a part and its Use make: a point on a

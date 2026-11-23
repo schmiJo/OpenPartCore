@@ -75,7 +75,7 @@ impl Seg {
     }
 
     /// The point halfway along.
-    fn middle(&self) -> P2 {
+    pub(crate) fn middle(&self) -> P2 {
         match self.kind {
             SegKind::Line { a, b } => [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0],
             SegKind::Arc { center, radius, a0, a1 } => {
@@ -267,6 +267,10 @@ pub enum WhyIgnored {
     NoLength,
     /// It's part of a loop that encloses no area.
     NoArea,
+    /// A text's character that its font hasn't got, which is left out with a space's room.
+    NotInFont { ch: char },
+    /// A text in a font there isn't.
+    UnknownFont,
 }
 
 /// Part or all of a curve that bounds no region. Construction geometry and points aren't listed: they
@@ -308,7 +312,7 @@ fn dist(a: P2, b: P2) -> f64 {
 }
 
 /// The point at a curve's parameter: a fraction on a line, an angle on an arc or ellipse.
-fn point_at(kind: &SegKind, t: f64) -> P2 {
+pub(crate) fn point_at(kind: &SegKind, t: f64) -> P2 {
     match *kind {
         SegKind::Spline { ref shape, .. } => shape.eval(t).0,
         SegKind::Line { a, b } => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t],
@@ -321,7 +325,7 @@ fn point_at(kind: &SegKind, t: f64) -> P2 {
 }
 
 /// How fast `point_at` moves with its parameter, going up.
-fn velocity_at(kind: &SegKind, t: f64) -> P2 {
+pub(crate) fn velocity_at(kind: &SegKind, t: f64) -> P2 {
     match *kind {
         SegKind::Spline { ref shape, .. } => shape.eval(t).1,
         SegKind::Line { a, b } => [b[0] - a[0], b[1] - a[1]],
@@ -823,6 +827,9 @@ impl Sketch {
                 None => ignored.push(Ignored { entity: e.id, whole: true, why: WhyIgnored::NoLength, pieces: Vec::new() }),
             }
         }
+        for t in &self.texts {
+            text_curves(self, t, &mut curves, &mut ignored);
+        }
 
         // Every point where something happens along a curve. Ends come first, so that a junction
         // takes its position from a curve's end when it has one.
@@ -1230,5 +1237,60 @@ impl Sketch {
 
     pub fn picked_regions(&self) -> &[RegionId] {
         &self.picked_regions
+    }
+}
+
+/// A text's outlines as curves of its sketch, by its id: lines and quadratic B-splines, set in its font and placed by its
+/// two points. Characters the font hasn't got are noted, as is a font there isn't, or a text with no height.
+fn text_curves(sketch: &Sketch, t: &Text, curves: &mut Vec<(EntityId, SegKind, bool)>, ignored: &mut Vec<Ignored>) {
+    let point = |id: EntityId| match sketch.entity(id).map(|e| &e.geometry) {
+        Some(Geometry::Point { at }) => Some(*at),
+        _ => None,
+    };
+    let (Some(at), Some(up)) = (point(t.at), point(t.up)) else {
+        ignored.push(Ignored { entity: t.id, whole: true, why: WhyIgnored::NoLength, pieces: Vec::new() });
+        return;
+    };
+    let Some(font) = crate::font::Font::named(&t.font) else {
+        ignored.push(Ignored { entity: t.id, whole: true, why: WhyIgnored::UnknownFont, pieces: Vec::new() });
+        return;
+    };
+    let height = dist(at, up);
+    if !(height > JOIN && height.is_finite()) {
+        ignored.push(Ignored { entity: t.id, whole: true, why: WhyIgnored::NoLength, pieces: Vec::new() });
+        return;
+    }
+    let s = height / font.cap_height;
+    let u = [(up[0] - at[0]) / height, (up[1] - at[1]) / height];
+    let r = [u[1], -u[0]];
+    let place = |p: crate::font::FontPoint| [at[0] + s * (r[0] * p[0] + u[0] * p[1]), at[1] + s * (r[1] * p[0] + u[1] * p[1])];
+    let set = font.set(&t.text);
+    for ch in &set.missing {
+        ignored.push(Ignored { entity: t.id, whole: false, why: WhyIgnored::NotInFont { ch: *ch }, pieces: Vec::new() });
+    }
+    for contour in &set.contours {
+        for piece in contour {
+            match piece {
+                crate::font::Piece::Line(a, b) => {
+                    let (a, b) = (place(*a), place(*b));
+                    if dist(a, b) > JOIN {
+                        curves.push((t.id, SegKind::Line { a, b }, false));
+                    }
+                }
+                crate::font::Piece::Quadratic(controls) => {
+                    // A uniform quadratic B-spline, clamped at its ends: a knot between each pair of the points off
+                    // the curve, where TrueType's implied points on it are.
+                    let m = controls.len();
+                    let mut knots = vec![0.0; 3];
+                    knots.extend((1..m - 2).map(|k| k as f64));
+                    knots.extend([(m - 2) as f64; 3]);
+                    let points: Vec<P2> = controls.iter().map(|p| place(*p)).collect();
+                    if let Ok(shape) = SplineShape::new(2, knots, points, vec![1.0; m]) {
+                        let (t0, t1) = shape.domain();
+                        curves.push((t.id, SegKind::Spline { shape: Arc::new(shape), t0, t1 }, false));
+                    }
+                }
+            }
+        }
     }
 }

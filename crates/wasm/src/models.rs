@@ -489,6 +489,39 @@ fn hole_plate(doc: &mut Document, variant: usize) {
     });
 }
 
+const TEXT_NAMES: [&str; 4] = ["CoreShape, cut in", "CoreShape, raised", "\u{D8} 12 \u{B1}0.05, cut in", "\u{C5}ngstr\u{F6}m \u{C7}a va, raised"];
+
+/// A name plate with text on it, cut in or raised, in the built-in font: centred on the plate by constraints on the two
+/// points that place it, and sized by a dimension between them.
+fn name_plate(doc: &mut Document, variant: usize) {
+    use coreshape_sketch::{Part, Ref, Rule, Sketch, ORIGIN};
+    let (words, raised) = match variant {
+        0 => ("CoreShape", false),
+        1 => ("CoreShape", true),
+        2 => ("\u{D8} 12 \u{B1}0.05", false),
+        _ => ("\u{C5}ngstr\u{F6}m \u{C7}a va", true),
+    };
+    let font = coreshape_sketch::font::Font::builtin();
+    // How wide the text is for each unit of its height.
+    let k = font.advance(words) / font.cap_height;
+    let s = doc.with(Op::sketch(xy(), vec![Region::new(Shape::rounded(0.0, 0.0, format!("{k} * height + 2 * margin").as_str(), "2.4 * height + 2 * margin", "margin"))]));
+    doc.with(Op::extrude(s, 0.0, "thick", Mode::Add));
+    let mut sketch = Sketch::new();
+    let t = sketch.text(words, [0.0, 0.0], 1.0);
+    let (at, up) = (sketch.text_of(t).unwrap().at, sketch.text_of(t).unwrap().up);
+    let whole = |entity| Ref { entity, part: Part::Whole };
+    sketch.constrain(Rule::HorizontalDistance { a: whole(ORIGIN), b: whole(at), value: format!("-{k} * height / 2").as_str().into() });
+    sketch.constrain(Rule::VerticalDistance { a: whole(ORIGIN), b: whole(at), value: "-height / 2".into() });
+    sketch.constrain(Rule::Vertical { a: whole(at), b: Some(whole(up)) });
+    sketch.constrain(Rule::VerticalDistance { a: whole(at), b: whole(up), value: "height".into() });
+    let words = doc.with(Op::ConstrainedSketch { plane: Placement::xy("thick"), sketch });
+    if raised {
+        doc.with(Op::extrude(words, 0.0, "depth", Mode::Add));
+    } else {
+        doc.with(Op::extrude(words, "-depth", "depth", Mode::Remove));
+    }
+}
+
 fn rounded_block(doc: &mut Document, _: usize) {
     let s = doc.with(Op::sketch(xy(), vec![Region::new(Shape::centered("w", "d"))]));
     doc.with(Op::extrude(s, 0.0, "h", Mode::Add));
@@ -994,8 +1027,15 @@ pub fn catalog() -> &'static [ModelDef] {
         mm("across", "Holes across", 50.0, 80.0, 70.0),
         mm("along", "Holes along", 30.0, 50.0, 40.0),
     ];
+    static TEXT: [ParamDef; 5] = [
+        ParamDef { key: "kind", label: "Text", unit: "", min: 0.0, max: 3.0, step: 1.0, default: 0.0, choices: &TEXT_NAMES },
+        mm("height", "Capital height", 4.0, 14.0, 8.0),
+        mm("depth", "Depth", 0.4, 2.0, 1.0),
+        mm("thick", "Plate thickness", 3.0, 8.0, 4.0),
+        mm("margin", "Margin", 4.0, 12.0, 6.0),
+    ];
     static SLIDER_CRANK: [ParamDef; 3] = [mm("crank", "Crank length", 15.0, 80.0, 30.0), mm("rod", "Rod length", 40.0, 160.0, 100.0), deg("angle", "Crank angle", 0.0, 720.0, 30.0)];
-    static MODELS: [ModelDef; 25] = [
+    static MODELS: [ModelDef; 26] = [
         ModelDef {
             id: "bracket",
             name: "Bracket",
@@ -1178,6 +1218,14 @@ pub fn catalog() -> &'static [ModelDef] {
             blurb: "Holes from the standard metric tables: counterbored, countersunk, clearance and tapped, at points on a face's plane, so they follow it. Tapped threads are noted, not modelled.",
             params: &HOLES,
             build: hole_plate,
+            assembly: None,
+        },
+        ModelDef {
+            id: "text",
+            name: "Name plate",
+            blurb: "Text in a sketch, in the built-in font, a part of Noto Sans: cut in or raised, centred and sized by constraints on the two points that place it.",
+            params: &TEXT,
+            build: name_plate,
             assembly: None,
         },
         ModelDef {

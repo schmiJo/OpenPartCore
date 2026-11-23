@@ -467,6 +467,22 @@ impl Sketch {
             ("entities", Value::Arr(entities)),
             ("constraints", Value::Arr(constraints)),
         ];
+        if !self.texts.is_empty() {
+            let texts = self
+                .texts
+                .iter()
+                .map(|t| {
+                    Value::obj(vec![
+                        ("id", Value::Num(t.id.0 as f64)),
+                        ("at", Value::Num(t.at.0 as f64)),
+                        ("up", Value::Num(t.up.0 as f64)),
+                        ("text", Value::str(&t.text)),
+                        ("font", Value::str(&t.font)),
+                    ])
+                })
+                .collect();
+            items.push(("texts", Value::Arr(texts)));
+        }
         if !self.picked_regions.is_empty() {
             items.push(("picked_regions", Value::Arr(self.picked_regions.iter().map(|r| Value::str(r.name())).collect())));
         }
@@ -487,7 +503,7 @@ impl Sketch {
     }
 
     fn read(v: &Value) -> R<Sketch> {
-        known(v, &["format", "version", "next_entity", "next_constraint", "entities", "constraints", "picked_regions"])?;
+        known(v, &["format", "version", "next_entity", "next_constraint", "entities", "constraints", "texts", "picked_regions"])?;
         if v.get("format").and_then(Value::as_str) != Some(SKETCH_FORMAT) {
             return Err("this is not a CoreShape sketch".to_string());
         }
@@ -553,6 +569,35 @@ impl Sketch {
             }
             s.next_constraint = s.next_constraint.max(id.0 + 1);
             s.constraints.push(Constraint { id, rule, reference });
+        }
+        for item in v.get("texts").and_then(Value::as_array).unwrap_or(&[]) {
+            known(item, &["id", "at", "up", "text", "font"])?;
+            let id = EntityId(id_field(item, "a text")?);
+            if id.is_reference() || s.entities.iter().any(|e| e.id == id) || s.texts.iter().any(|t| t.id == id) {
+                return Err(format!("text id {} is taken, or reserved", id.0));
+            }
+            let point = |key: &str| -> R<EntityId> {
+                let n = item.get(key).and_then(Value::as_f64).ok_or_else(|| format!("text {} needs \"{key}\", the id of a point", id.0))?;
+                let e = EntityId(n as u32);
+                match s.entity(e).map(|x| &x.geometry) {
+                    Some(Geometry::Point { .. }) if n >= 0.0 && n.fract() == 0.0 => Ok(e),
+                    _ => Err(format!("text {}'s \"{key}\" is {n}, which isn't one of the sketch's points", id.0)),
+                }
+            };
+            let (at, up) = (point("at")?, point("up")?);
+            if at == up {
+                return Err(format!("text {} is placed by one point twice: \"at\" and \"up\" are two", id.0));
+            }
+            if let Some(other) = s.texts.iter().find(|t| [t.at, t.up].iter().any(|p| *p == at || *p == up)) {
+                return Err(format!("text {} is placed by a point that places text {} too", id.0, other.id.0));
+            }
+            let text = item.get("text").and_then(Value::as_str).ok_or_else(|| format!("text {} needs \"text\", what it says", id.0))?.to_string();
+            let font = item.get("font").map(|f| f.as_str().map(str::to_string).ok_or("a text's \"font\" is a name")).transpose()?.unwrap_or_else(|| "sans".into());
+            if crate::font::Font::named(&font).is_none() {
+                return Err(format!("text {}'s font \"{font}\" isn't one there is: \"sans\" is", id.0));
+            }
+            s.next_entity = s.next_entity.max(id.0 + 1);
+            s.texts.push(Text { id, at, up, text, font });
         }
         // Ids are never reused, so these must stay above every id ever handed out.
         let keep = |key: &str, floor: u32| {
@@ -701,6 +746,11 @@ impl Ignored {
             }
             WhyIgnored::NoLength => items.push(("why", Value::str("no_length"))),
             WhyIgnored::NoArea => items.push(("why", Value::str("no_area"))),
+            WhyIgnored::NotInFont { ch } => {
+                items.push(("why", Value::str("not_in_font")));
+                items.push(("character", Value::str(ch.to_string())));
+            }
+            WhyIgnored::UnknownFont => items.push(("why", Value::str("unknown_font"))),
         }
         items.push(("pieces", Value::Arr(self.pieces.iter().map(seg_value).collect())));
         Value::obj(items)

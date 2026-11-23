@@ -19,6 +19,7 @@
 pub mod data;
 pub mod drag;
 pub mod expr;
+pub mod font;
 pub mod fuzz;
 pub mod json;
 pub mod measure;

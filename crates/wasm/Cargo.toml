@@ -12,3 +12,4 @@ crate-type = ["cdylib", "rlib"]
 coreshape = { path = "../kernel" }
 coreshape-document = { path = "../document" }
 coreshape-assembly = { path = "../assembly" }
+coreshape-sketch = { path = "../sketch" }

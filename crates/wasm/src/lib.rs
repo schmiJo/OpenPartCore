@@ -923,6 +923,10 @@ mod tests {
     fn offsetting_the_demos_out_and_back_returns_their_volume() {
         let (mut tried, mut refused) = (0, 0);
         for m in models::catalog() {
+            // Offsetting text takes minutes, a face of every curve of every letter: see KNOWN_LIMITS.md.
+            if m.id == "text" {
+                continue;
+            }
             let Some(body) = m.document(0).rebuild(None).body else { continue };
             for d in [0.25, -0.25] {
                 tried += 1;

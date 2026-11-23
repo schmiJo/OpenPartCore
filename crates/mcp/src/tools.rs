@@ -810,7 +810,8 @@ impl Session {
                 // A curve that closes nothing no longer stops a sketch, so say which ones those were.
                 for s in o.steps.iter().filter(|s| s.kind == "constrained_sketch") {
                     if let Ok(found) = self.doc.sketch_arrangement(s.id) {
-                        let mut who: Vec<u32> = found.ignored.iter().map(|i| i.entity.0).collect();
+                        // A text's missing characters are the sketch step's own note.
+                        let mut who: Vec<u32> = found.ignored.iter().filter(|i| !matches!(i.why, sk::WhyIgnored::NotInFont { .. } | sk::WhyIgnored::UnknownFont)).map(|i| i.entity.0).collect();
                         who.sort_unstable();
                         who.dedup();
                         if !who.is_empty() {

@@ -3353,7 +3353,18 @@ impl Document {
                 for p in &list {
                     p.validate()?;
                 }
-                Ok(sketched(SketchOutput { frame, profiles: Arc::new(list), by_entity: true, solved: Some(Arc::new(solved.sketch)), open: Arc::new(open), no_regions }))
+                // Characters a text's font hasn't got are left out, and said.
+                let mut notes = Vec::new();
+                for t in &solved.sketch.texts {
+                    let missing = coreshape_sketch::font::Font::named(&t.font).map(|f| f.set(&t.text).missing).unwrap_or_default();
+                    if !missing.is_empty() {
+                        let list: String = missing.iter().collect();
+                        notes.push(format!("text {} has characters its font hasn't got, left out with a space's room: {list}", t.id.0));
+                    }
+                }
+                let mut out = sketched(SketchOutput { frame, profiles: Arc::new(list), by_entity: true, solved: Some(Arc::new(solved.sketch)), open: Arc::new(open), no_regions });
+                out.notes = notes;
+                Ok(out)
             }
             Op::Extrude { sketch, start, length, mode, regions, faces, end, opposite, thin } => {
                 // Each sketch it takes from, in the order they first come up.

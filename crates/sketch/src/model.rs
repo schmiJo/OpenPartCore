@@ -179,6 +179,21 @@ pub struct Entity {
     pub projection: Option<Projection>,
 }
 
+/// Text in a sketch: characters set in a font, whose outlines are closed curves of the sketch, which make its regions as any
+/// others do, the inside of a letter's loop a hole by default. It's placed by two of the sketch's points, so constraints place
+/// it: `at`, on its baseline where the first character starts, and `up`, straight above `at` by the height of a capital
+/// letter. Turning `up` round `at` turns the text, and the distance between them sizes it. Lines after a `\n` go below.
+/// Its id is one of the sketch's entity ids, and the faces its outlines sweep are named by it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Text {
+    pub id: EntityId,
+    pub at: EntityId,
+    pub up: EntityId,
+    pub text: String,
+    /// The font's name: `sans`, the built-in one, is the only one there is yet.
+    pub font: String,
+}
+
 /// Where a projected entity comes from: part geometry that the document projects onto the sketch's plane at each rebuild,
 /// from the model as it stands just before the sketch. Its `geometry` is where it was last worked out, and it's fixed: it
 /// takes no freedom, nothing moves it, and dragging it is refused. The sketch keeps `from` as it was given, as only the
@@ -343,6 +358,8 @@ pub struct Constraint {
 pub struct Sketch {
     pub entities: Vec<Entity>,
     pub constraints: Vec<Constraint>,
+    /// Text, whose characters' outlines are curves of the sketch: see `Text`.
+    pub texts: Vec<Text>,
     pub(crate) next_entity: u32,
     pub(crate) next_constraint: u32,
     /// Regions chosen by id. Empty means the default: see `Sketch::regions`.
@@ -357,7 +374,7 @@ impl Default for Sketch {
 
 impl Sketch {
     pub fn new() -> Sketch {
-        Sketch { entities: Vec::new(), constraints: Vec::new(), next_entity: 1, next_constraint: 1, picked_regions: Vec::new() }
+        Sketch { entities: Vec::new(), constraints: Vec::new(), texts: Vec::new(), next_entity: 1, next_constraint: 1, picked_regions: Vec::new() }
     }
 
     pub fn entity(&self, id: EntityId) -> Option<&Entity> {
@@ -400,6 +417,22 @@ impl Sketch {
 
     pub fn point(&mut self, x: f64, y: f64) -> EntityId {
         self.add(Geometry::Point { at: [x, y] })
+    }
+
+    /// Text in the built-in font, set from `at` on its baseline, upright, with capitals `height` high. Adds the two points
+    /// that place it, at `at` and straight above it, and gives the text's own id. Nothing holds those points yet:
+    /// constraints on them do.
+    pub fn text(&mut self, text: &str, at: P2, height: f64) -> EntityId {
+        let from = self.point(at[0], at[1]);
+        let up = self.point(at[0], at[1] + height);
+        let id = EntityId(self.next_entity);
+        self.next_entity += 1;
+        self.texts.push(Text { id, at: from, up, text: text.to_string(), font: "sans".to_string() });
+        id
+    }
+
+    pub fn text_of(&self, id: EntityId) -> Option<&Text> {
+        self.texts.iter().find(|t| t.id == id)
     }
 
     pub fn line(&mut self, start: P2, end: P2) -> EntityId {
@@ -575,6 +608,17 @@ impl Sketch {
 
     /// Removes an entity and every constraint that refers to it, returning those constraints.
     pub fn remove_entity(&mut self, id: EntityId) -> Result<Vec<ConstraintId>, String> {
+        // A text goes with the points that place it, and either point with the text.
+        if let Some(t) = self.texts.iter().find(|t| t.id == id || t.at == id || t.up == id).cloned() {
+            self.texts.retain(|x| x.id != t.id);
+            let mut gone = Vec::new();
+            for point in [t.at, t.up] {
+                if self.entities.iter().any(|e| e.id == point) {
+                    gone.extend(self.remove_entity(point)?);
+                }
+            }
+            return Ok(gone);
+        }
         let at = self.entities.iter().position(|e| e.id == id).ok_or_else(|| format!("there is no entity {}", id.0))?;
         self.entities.remove(at);
         let gone: Vec<ConstraintId> =

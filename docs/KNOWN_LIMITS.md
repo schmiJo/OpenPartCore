@@ -381,7 +381,7 @@ Works, but differs from commercial CAD:
 | Mounting plate | 8 | The holes cross (3), or a fillet meets another tangentially (4), and 1 more |
 | Stress cases | 13 | Always the deliberate known-limit case |
 | Screw | 14 | **Open:** the helix's union fails its own check, "the result does not close: an edge is used by 1 faces", for example at `[9.5, 40, 6, 1]`. Found on 2026-11-22, when a new demo moved the positions the scan draws; the commit before fails there too. Refused, not wrong. Mine to fix if asked |
-| Flange, sheet metal tray, ribbed tray, thin duct, hole plate, rounded block, crossed cylinders, sliding pockets, vase, joint, crank, panel, spring, cup, healed, walls, tee, nozzle, cam, knob, ring sector | 0 | |
+| Flange, sheet metal tray, ribbed tray, thin duct, hole plate, name plate, rounded block, crossed cylinders, sliding pockets, vase, joint, crank, panel, spring, cup, healed, walls, tee, nozzle, cam, knob, ring sector | 0 | |
 
 The positions are drawn in turn from one seeded generator, so adding a demo moves every later demo's positions: crossed cylinders were refused at 7 of 200 before, at exact tangencies, and now aren't, and the screw's refusals only showed up then.
 
@@ -497,6 +497,39 @@ Split, scale, rib, thin extrude and axes from lines (2026-11-22). Each volume in
 - **Thin extrude** follows lines and arcs. A spline or an ellipse is refused, as one moved sideways isn't one, and so are walls thicker than an arc is round, corners so sharp the wall's outside would reach out more than 50 thicknesses, and segments too short for the wall between two corners.
 - **Thin revolve, sweep and loft** make their walls as a thin extrude does, so the same refusals apply. A thin loft's wall is as thick as it says in each section's plane, and in between it's what the loft makes of the sections' walls: where the loft runs at a slant to its sections, as from a wide section to a narrow one, the wall is thinner than that measured square to it. A wall thickened square to the loft would be even, but its ends wouldn't be flat in the sections' planes, so a duct couldn't sit flat on a part. A rectangle lofted to a circle twists 45 degrees one way or the other, which fit equally well: the loft now takes the clockwise one, about the way it goes, which is what rounding happened to choose for the demos, and a hole twists as its outline does, where it used to be left to rounding, which twisted a thin loft's two sides opposite ways and was refused.
 - **Rib** runs across from straight lines in its sketch's plane, or along the sketch's normal from lines and arcs. It has no draft, and an arc across its plane is refused. A rib whose slab runs past the parts without meeting them is refused rather than left sticking out, so a rib sketched well above a part, whose carried-on ends pass over the walls, is refused too: sketch it on the rim, as Onshape's examples do, or leave `extend` off.
+
+## Text in sketches
+
+Text in a constrained sketch (2026-11-23), placed and sized by two of the sketch's points, so constraints and dimensions drive
+it: see [FILE_FORMAT.md](FILE_FORMAT.md#text). The font is read by a TrueType reader written here, `crates/sketch/src/font.rs`,
+so no library is needed, and the built-in font is 220 characters of Noto Sans Regular in this crate's own compact form, 60 kB,
+made by `crates/sketch/examples/make_font.rs`. Noto Sans is under the SIL Open Font License, with no reserved name, which
+allows a part of it to go with this code, changed, under the same license: `crates/sketch/fonts/OFL.txt`.
+
+A run of points off a TrueType curve is exactly a uniform quadratic B-spline, which is how each comes into the sketch, so a
+letter's straight parts sweep planes and its curves spline extrusions, with nothing approximated. **Checked:** every
+character's regions have the area worked out straight from the font's points, by the polygon through those on the curve and
+two thirds of each parabola's triangle, to 1e-7. Three characters' contours overlap, Å, Ç and ç, where an accent is laid over
+its letter: TrueType fills where contours wind round a point at all, and the sketch's regions would leave the overlap out or
+split the letter in regions that touch, which can't be swept as one. Those are filled by TrueType's rule, worked out on the
+glyph's own arrangement, and held to a raster of the font's contours to 0.4%. Text raised from a plane and cut into a plate
+comes out at the regions' area times its depth to 1e-8, and so does text sized by a dimension. The demo has a name plate.
+
+- **Å's ring is lowered 8 font units** in the built-in font. In Noto Sans it sits on the A's flat top, touching it at one
+  point, and two parts of a region meeting at a point can't be a solid's corner here. Lowered, it overlaps the A, as Ç's
+  cedilla overlaps its C, and the two are one region, joined by a neck about 0.6 mm wide in text 8 mm high.
+- **Not read:** kerning, so pairs such as AV are set at their plain advances; ligatures; OpenType fonts with PostScript
+  outlines (`.otf` with a CFF table); hinting, which a solid doesn't want; and composite glyphs placed by matching points,
+  which are rare.
+- **One font.** There's no way yet to give a document a font of its own, though the reader reads any TrueType font a program
+  hands it. No bold or italic, no alignment but from the left, and a line's spacing is the font's.
+- **Not in the font:** arrows, `√`, `∞`, `≈`, `≠`, `≤`, `≥`, `∅` and `⌀`, which Noto Sans keeps in its symbol and maths
+  fonts. `⌀` is set as `Ø`, which drawings often use for it.
+- **Slow on lots of text.** Each curve of a letter is a spline extrusion, so a few words make some hundreds of faces of
+  those. "CoreShape 2026" raised and cut into a plate both take about a second natively. **Offsetting or shelling a part
+  with text on it takes many minutes**, more than ten for the demo's name plate, and the demo tests leave that one out.
+  It's the offset's way of trying faces apart one by one when they don't all move cleanly, which a face of every letter's
+  curve makes long.
 
 ## Holes
 
